@@ -1,0 +1,41 @@
+{
+  "name": "playwright",
+  "version": "0.1.0",
+  "description": "Playwright browser automation and end-to-end testing workflows for Codex.",
+  "author": {
+    "name": "[TODO: Author Name]",
+    "email": "[TODO: author@example.com]",
+    "url": "[TODO: https://github.com/author]"
+  },
+  "homepage": "[TODO: https://docs.example.com/plugin]",
+  "repository": "[TODO: https://github.com/author/plugin]",
+  "license": "[TODO: MIT]",
+  "keywords": [
+    "playwright",
+    "browser-automation",
+    "e2e-testing"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Playwright",
+    "shortDescription": "Browser automation and end-to-end testing",
+    "longDescription": "Use Playwright from Codex to set up browser tests, run focused end-to-end checks, debug traces, and capture screenshots for local web apps.",
+    "developerName": "[TODO: OpenAI]",
+    "category": "Engineering",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "[TODO: https://openai.com/]",
+    "privacyPolicyURL": "[TODO: https://openai.com/policies/row-privacy-policy/]",
+    "termsOfServiceURL": "[TODO: https://openai.com/policies/row-terms-of-use/]",
+    "defaultPrompt": [
+      "Set up Playwright tests for this app.",
+      "Run the Playwright suite and debug failures.",
+      "Capture a screenshot of my local app."
+    ],
+    "brandColor": "#2EAD33",
+    "screenshots": []
+  }
+}

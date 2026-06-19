@@ -1,0 +1,19 @@
+{
+  "name": "Musashi - AI Fight Coach",
+  "short_name": "Musashi",
+  "description": "AI-powered combat sports coaching with real-time pose analysis, video breakdown, and strategic insights",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f5f0e8",
+  "theme_color": "#8b7355",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/musashi-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["sports", "health", "productivity"]
+}

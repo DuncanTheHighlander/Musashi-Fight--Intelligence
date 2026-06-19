@@ -1,0 +1,29 @@
+#:schema node_modules/wrangler/config-schema.json
+name = "app"
+main = "src/cloudflare-worker.ts"
+compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat"]
+
+[triggers]
+crons = ["*/5 * * * *"]
+
+[assets]
+directory = ".open-next/assets"
+binding = "ASSETS"
+
+[[services]]
+binding = "WORKER_SELF_REFERENCE"
+service = "app"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "musashi-db"
+database_id = "eda3460e-70ab-4eef-b273-0efc52007c82"
+migrations_dir = "migrations"
+
+[[vectorize]]
+binding = "VECTORIZE"
+index_name = "musashi-knowledge"
+
+[ai]
+binding = "AI"

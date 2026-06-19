@@ -1,0 +1,62 @@
+{
+  "compilerOptions": {
+    "target": "ES2017",
+    "types": [
+      "@cloudflare/workers-types/2023-07-01",
+      "node",
+      "react",
+      "react-dom"
+    ],
+    "lib": [
+      "dom",
+      "dom.iterable",
+      "esnext"
+    ],
+    "allowJs": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "preserve",
+    "incremental": true,
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ],
+    "paths": {
+      "@/*": [
+        "./src/*"
+      ]
+    }
+  },
+  "include": [
+    "env.d.ts",
+    "next-env.d.ts",
+    "src/**/*",
+    ".next/types/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    ".next",
+    "src/app/api/appointments/**/*",
+    "src/app/api/cleaners/**/*",
+    "src/app/api/invoices/**/*",
+    "src/app/api/photos/**/*",
+    "src/app/api/properties/**/*",
+    "src/app/api/services/**/*",
+    "src/components/calendar/**/*",
+    "src/components/chatbot/**/*",
+    "src/components/dashboard/**/*",
+    "src/components/gps/**/*",
+    "src/components/photos/**/*",
+    "src/components/time/**/*",
+    "src/lib/database.ts",
+    "src/lib/database-extensions.ts",
+    "open-next.config.ts"
+  ]
+}

@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 48" fill="none">
+  <!-- M -->
+  <path d="M4 40 L12 8 L24 28 L36 8 L44 40" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <!-- U -->
+  <path d="M56 10 L56 32 Q56 40 64 40 Q72 40 72 32 L72 10" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <!-- S -->
+  <path d="M96 14 Q88 10 84 14 Q80 18 86 22 L92 26 Q98 30 94 34 Q90 40 82 36" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <!-- A -->
+  <path d="M104 40 L116 10 L128 40 M108 30 L124 30" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <!-- S -->
+  <path d="M152 14 Q144 10 140 14 Q136 18 142 22 L148 26 Q154 30 150 34 Q146 40 138 36" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <!-- H -->
+  <path d="M164 10 L164 40 M164 25 L184 25 M184 10 L184 40" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <!-- I -->
+  <path d="M200 10 L200 40" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" fill="none"/>
+</svg>

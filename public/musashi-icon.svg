@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <!-- Stylized M — katana-stroke inspired -->
+  <path d="M8 52 L18 12 L32 36 L46 12 L56 52" stroke="currentColor" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <!-- Horizontal blade accent -->
+  <path d="M14 38 L50 38" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" opacity="0.6"/>
+</svg>

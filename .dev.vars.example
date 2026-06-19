@@ -1,0 +1,7 @@
+# Copy to .dev.vars for `pnpm preview` / wrangler dev (never commit .dev.vars).
+# Loads Next.js .env* files when NEXTJS_ENV=development.
+NEXTJS_ENV=development
+
+# Secrets for local Workers preview — mirror production vars from .env.local:
+# GEMINI_API_KEY=your-gemini-api-key-here
+# MUSASHI_SESSION_SECRET=generate-a-strong-random-string-here-min-32-chars
