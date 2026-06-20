@@ -6,8 +6,19 @@ portrait demo clip AND busy gym / street-fight clips (bystanders in frame).
 This folder is the restore point. If tracking regresses, copy these files back
 over `src/` and re-verify before accepting any new change.
 
-`TRACK_PIPELINE_VERSION = 17` (denseTrackCache.ts). Bump on ANY detection/
+`TRACK_PIPELINE_VERSION = 18` (denseTrackCache.ts). Bump on ANY detection/
 identity change so stale cached tracks can't replay.
+
+**Update — v18 (2026-06-19, on top of the v17 floor):** added a body-relative
+**arm/head pop guard** in `kinematics.ts` `smoothLandmarks` — rejects teleports
+on arms (15-22) and head (0-10), mirroring the existing leg-jump guard, so a
+noisy frame can't fling a hand/head across the screen. Thresholds sit above
+real-strike range (punches still land). No regression: tsc clean, kinematics 31
++ identity 27 tests pass. Snapshot files in this folder are refreshed to v18;
+the v17 dense-pass revert below is still the floor. Git: floor = `bc4b3a0`,
+v18 = `7018711`. Why it matters: the fault/pattern detectors and the Gemini
+strategy analysis are fed the POSE TIMELINE (not the video), so steadier
+hand/head joints = more accurate "guard dropping / chin exposed" callouts.
 
 ## The regime that works (and the trap that doesn't)
 
