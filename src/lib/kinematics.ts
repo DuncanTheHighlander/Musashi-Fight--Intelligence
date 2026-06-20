@@ -645,8 +645,22 @@ export function smoothLandmarks(
       const relMotion = Math.hypot((lm.x - prev.x) - bodyDx, (lm.y - prev.y) - bodyDy)
       legJumpPenalty = relMotion > 0.14 ? 0.45 : relMotion > 0.08 && visibility < 0.7 ? 0.3 : 0
     }
+    // Body-relative teleport rejection for arms (15-22) and head (0-10). Unlike
+    // legs, these have no pop guard, so a noisy frame can fling the hand/head
+    // across the frame and the motionBoost above would pass it through as if it
+    // were real motion. A real strike moves the hand only ~0.1-0.15 frame-units
+    // body-relative; a noise teleport reads far higher. The head barely moves
+    // body-relative ever, so it gets a tighter gate. Thresholds sit ABOVE
+    // real-strike range so genuine punches still land on-frame.
+    let popPenalty = 0
+    if ((i >= 15 && i <= 22) || i <= 10) {
+      const relMotion = Math.hypot((lm.x - prev.x) - bodyDx, (lm.y - prev.y) - bodyDy)
+      const hardT = i <= 10 ? 0.12 : 0.22
+      const softT = i <= 10 ? 0.08 : 0.15
+      popPenalty = relMotion > hardT ? 0.5 : relMotion > softT && visibility < 0.6 ? 0.3 : 0
+    }
     const visibilityPenalty = visibility < 0.45 ? (0.45 - visibility) * 0.5 : 0
-    a = clamp(a + motionBoost - visibilityPenalty - legJumpPenalty, 0.3, 0.96)
+    a = clamp(a + motionBoost - visibilityPenalty - legJumpPenalty - popPenalty, 0.3, 0.96)
 
     return {
       x: a * lm.x + (1 - a) * prev.x,
