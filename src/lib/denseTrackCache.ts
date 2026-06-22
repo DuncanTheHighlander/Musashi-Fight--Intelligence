@@ -33,7 +33,7 @@ function openDb(): Promise<IDBDatabase> {
 
 // Bump when the detection/identity pipeline changes — stale cached tracks
 // from older pipeline versions must not be replayed.
-const TRACK_PIPELINE_VERSION = 18
+const TRACK_PIPELINE_VERSION = 19
 
 export function denseTrackKey(video: HTMLVideoElement, stepMs: number): string {
   return `v${TRACK_PIPELINE_VERSION}|${Math.round((video.duration || 0) * 1000)}|${video.videoWidth}x${video.videoHeight}|${stepMs}`

@@ -80,3 +80,6 @@ resp_verify.json
 payload_verify.json
 verify_out.txt
 write-test.txt
+
+# RTMPose model binary — 55MB, reproducible from RTMPOSE_SETUP.md / OpenMMLab
+public/models/*.onnx

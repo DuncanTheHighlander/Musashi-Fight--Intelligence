@@ -87,10 +87,18 @@ export async function initRtmpose(): Promise<boolean> {
   if (initState === 'loading' || initState === 'failed') return false
   initState = 'loading'
   try {
-    // Non-literal specifier prevents the bundler/TS from resolving the (absent)
-    // module at build time. Resolves at runtime only when actually installed.
-    const moduleName = 'onnxruntime-web'
-    ort = await import(/* webpackIgnore: true */ moduleName)
+    // Literal dynamic import: webpack code-splits onnxruntime-web into its own
+    // lazy chunk loaded ONLY here (i.e. only when the flag is on) — flag-off
+    // never pays the bundle/memory cost. Now that the package is installed this
+    // resolves; before it was a non-literal specifier to keep the build green.
+    ort = await import('onnxruntime-web')
+    // ORT fetches its WASM/JSEP binaries at runtime — point them at the CDN that
+    // matches the installed version so Next doesn't have to serve them locally.
+    try {
+      ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.27.0/dist/'
+    } catch {
+      /* env not present — defaults will be used */
+    }
 
     const providers: string[] = []
     try {

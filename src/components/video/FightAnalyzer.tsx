@@ -47,6 +47,7 @@ import {
   type PoseHistory,
 } from '@/lib/kinematics'
 import { createRetryLandmarker, detectSecondFighter as detectSecondFighterShared, detectInRegion } from '@/lib/poseRetry'
+import { initRtmpose, isRtmposeReady, rtmposeInRegionAsync, rtmposeRequested } from '@/lib/pose/rtmposeBackend'
 import { createAppearanceTracker, sampleColorProfile, blendColorProfile, colorProfileDist, type AppearanceTracker, type ColorProfile } from '@/lib/appearance'
 import {
   advanceCrossingPhase,
@@ -489,6 +490,11 @@ export function FightAnalyzer({
           })()
         }
 
+        // Opt-in RTMPose backend (flag: ?poseBackend=rtmpose). Inert unless the
+        // flag is set AND the model/runtime load — otherwise the per-fighter
+        // refine stays on MediaPipe exactly as today.
+        if (rtmposeRequested()) void initRtmpose()
+
         const base = {
           runningMode: 'VIDEO' as const,
           numPoses: 2,
@@ -901,7 +907,7 @@ export function FightAnalyzer({
   )
 
   const processPoseFrame = useCallback(
-    (opts?: { skipThrottle?: boolean; preScan?: boolean; densePass?: boolean; mediaPipeTimestampMs?: number }) => {
+    async (opts?: { skipThrottle?: boolean; preScan?: boolean; densePass?: boolean; mediaPipeTimestampMs?: number }) => {
       const video = videoRef.current
       const landmarker = poseLandmarkerRef.current
       if (!video || !landmarker || video.ended || video.readyState < 2) return
@@ -1137,8 +1143,36 @@ export function FightAnalyzer({
               if (!a0 || !a1 || Math.hypot(a0.x - a1.x, a0.y - a1.y) > 0.06) return raw
               return refined
             }
-            if (rawA) rawA = refineSlot('A', rawA, boxA)
-            if (rawB) rawB = refineSlot('B', rawB, boxB)
+            // Detector fusion: on the dense boot pass, when the RTMPose flag is
+            // on AND the model is ready, refine each fighter with RTMPose (better
+            // on small/blurry/occluded crops), falling back to MediaPipe when
+            // RTMPose returns nothing. Flag off / live path keeps the exact
+            // synchronous MediaPipe refine below — no behavior change, no await.
+            const useRtm = !!opts?.densePass && rtmposeRequested() && isRtmposeReady()
+            if (useRtm) {
+              const refineSlotRtm = async (
+                key: 'A' | 'B',
+                raw: NormalizedLandmark[] | null,
+                box: { left: number; top: number; right: number; bottom: number } | null
+              ) => {
+                if (!raw || !box) return raw
+                if (box.right - box.left > 0.6 || box.bottom - box.top > 0.85) return raw
+                lastRefineWallMsRef.current[key] = wallNow
+                if (!refineCanvasRef.current[key]) refineCanvasRef.current[key] = document.createElement('canvas')
+                let refined = await rtmposeInRegionAsync(detectSurface, box, refineCanvasRef.current[key]!)
+                if (!refined) refined = detectInRegion(retry, detectSurface, box, refineCanvasRef.current[key]!)
+                if (!refined) return raw
+                const a0 = getPoseAnchor(raw)
+                const a1 = getPoseAnchor(refined)
+                if (!a0 || !a1 || Math.hypot(a0.x - a1.x, a0.y - a1.y) > 0.06) return raw
+                return refined
+              }
+              if (rawA) rawA = await refineSlotRtm('A', rawA, boxA)
+              if (rawB) rawB = await refineSlotRtm('B', rawB, boxB)
+            } else {
+              if (rawA) rawA = refineSlot('A', rawA, boxA)
+              if (rawB) rawB = refineSlot('B', rawB, boxB)
+            }
           }
         }
 
@@ -1735,7 +1769,7 @@ export function FightAnalyzer({
             const tMs = Math.min(Math.max(0, durMs - 1), i * stepMs)
             await seekVideoAndWait(video, tMs / 1000)
             if (cancelled) break
-            processPoseFrameRef.current({
+            await processPoseFrameRef.current({
               skipThrottle: true,
               densePass: true,
               mediaPipeTimestampMs: tMs,
