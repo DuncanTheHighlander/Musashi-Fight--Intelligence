@@ -35,8 +35,11 @@ function openDb(): Promise<IDBDatabase> {
 // from older pipeline versions must not be replayed.
 const TRACK_PIPELINE_VERSION = 19
 
-export function denseTrackKey(video: HTMLVideoElement, stepMs: number): string {
-  return `v${TRACK_PIPELINE_VERSION}|${Math.round((video.duration || 0) * 1000)}|${video.videoWidth}x${video.videoHeight}|${stepMs}`
+// `backend` namespaces the cache by detector — a MediaPipe-built track and an
+// RTMPose-built track share the same clip fingerprint but are NOT interchangeable,
+// so they must not replay across the `?poseBackend=rtmpose` flag.
+export function denseTrackKey(video: HTMLVideoElement, stepMs: number, backend = 'mediapipe'): string {
+  return `v${TRACK_PIPELINE_VERSION}|${backend}|${Math.round((video.duration || 0) * 1000)}|${video.videoWidth}x${video.videoHeight}|${stepMs}`
 }
 
 type GhostPrunable = {

@@ -178,6 +178,22 @@ function clamp01(value: number): number {
   return Math.max(0, Math.min(1, value))
 }
 
+/** Expose dense track + RTM status for QA loop / Playwright E2E (dev or ?qaLoop=1). */
+function publishDenseTrackForQa(track: DenseTrackSample[], stepMs: number): void {
+  if (typeof window === 'undefined') return
+  const qaLoop = new URLSearchParams(window.location.search).get('qaLoop') === '1'
+  if (process.env.NODE_ENV === 'production' && !qaLoop) return
+  const w = window as unknown as {
+    __denseTrack?: DenseTrackSample[]
+    __musashiRtm?: { requested: boolean; ready: boolean }
+  }
+  w.__denseTrack = track
+  w.__musashiRtm = { requested: rtmposeRequested(), ready: isRtmposeReady() }
+  window.dispatchEvent(
+    new CustomEvent('musashi:dense-ready', { detail: { frames: track.length, stepMs } })
+  )
+}
+
 function getPoseAnchor(landmarks: NormalizedLandmark[]): PoseAnchor | null {
   const ls = landmarks[11]
   const rs = landmarks[12]
@@ -1730,7 +1746,7 @@ export function FightAnalyzer({
 
           // The pass is deterministic per clip and costs minutes — restore
           // from the IndexedDB cache when this clip was analyzed before.
-          const cacheKey = denseTrackKey(video, stepMs)
+          const cacheKey = denseTrackKey(video, stepMs, rtmposeRequested() ? 'rtmpose' : 'mediapipe')
           const cached = (await loadDenseTrack(cacheKey)) as DenseTrackSample[] | null
           if (cached && cached.length >= denseSteps * 0.5 && !cancelled) {
             denseTrackRef.current = pruneGhostRuns(cached)
@@ -1740,6 +1756,7 @@ export function FightAnalyzer({
             if (process.env.NODE_ENV !== 'production') {
               ;(window as unknown as { __denseTrack?: DenseTrackSample[] }).__denseTrack = cached
             }
+            publishDenseTrackForQa(cached, stepMs)
           } else if (!cancelled) {
           denseTrackRef.current = []
           denseTrackReadyRef.current = false
@@ -1798,6 +1815,7 @@ export function FightAnalyzer({
             if (process.env.NODE_ENV !== 'production') {
               ;(window as unknown as { __denseTrack?: DenseTrackSample[] }).__denseTrack = denseTrackRef.current
             }
+            publishDenseTrackForQa(denseTrackRef.current, stepMs)
           }
           }
         }
