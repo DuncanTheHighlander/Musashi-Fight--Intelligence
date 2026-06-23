@@ -303,7 +303,7 @@ describe('identity replay', () => {
         })
         .filter((c): c is CornerCandidate => !!c)
 
-      let { A: rawA, B: rawB } = assignCornerIdentities(candidates, deduped.length, wallNow)
+      const { A: rawA, B: rawB } = assignCornerIdentities(candidates, deduped.length, wallNow)
 
       const holdMs = crossingHoldMs(crossingPhase, deduped.length)
       const reAcquiredA = rawA && (lastSeen.A === null || wallNow - lastSeen.A > holdMs)

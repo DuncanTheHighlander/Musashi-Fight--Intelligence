@@ -1762,7 +1762,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
     
     try {
       let videoBlob: ArrayBuffer | null = null
-      let videoMimeType: string | null = videoFile?.type ?? null
+      const videoMimeType: string | null = videoFile?.type ?? null
       if (videoFile) {
         try {
           videoBlob = await videoFile.arrayBuffer()

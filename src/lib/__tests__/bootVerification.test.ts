@@ -10,7 +10,7 @@ describe('verifyBootReadiness', () => {
     })
     expect(r.ok).toBe(true)
     expect(r.summary).toContain('Buffer OK')
-    expect(r.summary).toContain('10/10')
+    expect(r.warnings).toHaveLength(0)
   })
 
   it('fails when last pass frames mismatch', () => {

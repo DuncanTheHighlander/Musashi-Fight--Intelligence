@@ -67,7 +67,7 @@ export default function SignupPage() {
       })
       
       await checkSession()
-      router.push('/')
+      router.push('/onboarding')
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Registration failed')
     } finally {

@@ -100,10 +100,30 @@ export default function HomePage() {
   }, [])
 
   useEffect(() => {
-    if (process.env.NODE_ENV === 'production' || fixtureLoadedRef.current) return
-    const fixtureVideo = new URLSearchParams(window.location.search).get('fixtureVideo')
-    const fixtureAutoPlay = new URLSearchParams(window.location.search).get('fixtureAutoplay') === '1'
-    if (!fixtureVideo?.startsWith('/test-videos/')) return
+    if (process.env.NODE_ENV === 'production' && !new URLSearchParams(window.location.search).get('qaLoop')) return
+    const params = new URLSearchParams(window.location.search)
+    const qaLoop = params.get('qaLoop') === '1'
+    if (!qaLoop && process.env.NODE_ENV === 'production') return
+
+    const fixtureVideo = params.get('fixtureVideo')
+    const fixtureAutoPlay = params.get('fixtureAutoplay') === '1'
+    if (!fixtureVideo?.startsWith('/test-videos/')) {
+      if (qaLoop && !fixtureLoadedRef.current) {
+        void fetch('/test-videos/clips.manifest.json')
+          .then((r) => r.json())
+          .then((raw: unknown) => {
+            const m = raw as { clips: Array<{ url: string }> }
+            const first = m.clips[0]?.url
+            if (first) {
+              params.set('fixtureVideo', first)
+              params.set('qaClip', '0')
+              window.location.search = params.toString()
+            }
+          })
+          .catch(() => {})
+      }
+      return
+    }
 
     let cancelled = false
     const loadFixture = async () => {
@@ -131,6 +151,34 @@ export default function HomePage() {
     return () => {
       cancelled = true
     }
+  }, [])
+
+  /** QA loop: after dense pass on clip N, auto-advance to clip N+1 (dev / ?qaLoop=1). */
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const params = new URLSearchParams(window.location.search)
+    if (params.get('qaLoop') !== '1') return
+
+    const onDenseReady = async () => {
+      const manifest = await fetch('/test-videos/clips.manifest.json').then((r) => r.json()) as {
+        clips: Array<{ id: string; url: string; label: string }>
+      }
+      const idx = Number(params.get('qaClip') ?? '0')
+      const current = manifest.clips[idx]
+      console.log(`[qaLoop] dense pass complete — ${current?.label ?? idx}`)
+      const next = idx + 1
+      if (next >= manifest.clips.length) {
+        console.log('[qaLoop] all clips done — loop complete')
+        return
+      }
+      params.set('qaClip', String(next))
+      params.set('fixtureVideo', manifest.clips[next]!.url)
+      fixtureLoadedRef.current = false
+      window.location.search = params.toString()
+    }
+
+    window.addEventListener('musashi:dense-ready', onDenseReady)
+    return () => window.removeEventListener('musashi:dense-ready', onDenseReady)
   }, [])
 
   const scrollToFightLab = useCallback(() => {

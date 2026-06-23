@@ -1,0 +1,33 @@
+{
+  "version": "v19-mediapipe-v14-replay",
+  "description": "Regression floor from clip*_replay_v14.json (2026-06). CI fails if metrics get worse than these gates.",
+  "clips": {
+    "clip1": {
+      "replay": "clip1_replay_v14.json",
+      "maxExploded": 2,
+      "maxCollapsePct": 55,
+      "minBothPresencePct": 80,
+      "maxTeleportFrames": 5,
+      "maxArmBoneP95": 0.9,
+      "maxLegBoneP95": 1.35
+    },
+    "clip2": {
+      "replay": "clip2_replay_v14.json",
+      "maxExploded": 4,
+      "maxCollapsePct": 25,
+      "minBothPresencePct": 95,
+      "maxTeleportFrames": 12,
+      "maxArmBoneP95": 0.95,
+      "maxLegBoneP95": 1.35
+    },
+    "clip3": {
+      "replay": "clip3_replay_v14.json",
+      "maxExploded": 25,
+      "maxCollapsePct": 55,
+      "minBothPresencePct": 93,
+      "maxTeleportFrames": 90,
+      "maxArmBoneP95": 1.5,
+      "maxLegBoneP95": 1.7
+    }
+  }
+}
