@@ -3,6 +3,7 @@
 # dependencies
 /node_modules
 /.pnpm-store/
+/.worktrees/
 /.venv/
 /.tools/
 /.pnp
