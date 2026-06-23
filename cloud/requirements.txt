@@ -1,0 +1,5 @@
+fastapi[standard]>=0.115,<1
+mediapipe>=0.10.21,<0.11
+numpy<2
+onnxruntime-gpu>=1.20,<1.23
+opencv-python-headless>=4.10,<5

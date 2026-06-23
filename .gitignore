@@ -2,12 +2,19 @@
 
 # dependencies
 /node_modules
+/.pnpm-store/
+/.venv/
+/.tools/
 /.pnp
 .pnp.js
 .yarn/install-state.gz
 
 # testing
 /coverage
+
+# python
+__pycache__/
+*.py[cod]
 
 # next.js
 /.next/

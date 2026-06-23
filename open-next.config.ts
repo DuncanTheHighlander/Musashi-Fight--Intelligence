@@ -1,30 +1,11 @@
-// default open-next.config.ts file created by @opennextjs/cloudflare
+import { defineCloudflareConfig } from '@opennextjs/cloudflare'
 
-import cache from "@opennextjs/cloudflare/kvCache";
-
-const config = {
-  default: {
-    override: {
-      wrapper: "cloudflare-node",
-      converter: "edge",
-      incrementalCache: async () => cache,
-      tagCache: "dummy",
-      queue: "dummy",
-    },
-  },
-
-  middleware: {
-    external: true,
-    override: {
-      wrapper: "cloudflare-edge",
-      converter: "edge",
-      proxyExternalRequest: "fetch",
-    },
-  },
-
-  dangerous: {
-    enableCacheInterception: false,
-  },
-};
-
-export default config;
+export default defineCloudflareConfig({
+  // No incremental cache binding is configured yet. Keep the package build
+  // deployable, then wire R2/KV cache deliberately when we add that binding.
+  incrementalCache: 'dummy',
+  tagCache: 'dummy',
+  queue: 'dummy',
+  cachePurge: 'dummy',
+  enableCacheInterception: false,
+})
