@@ -17,6 +17,9 @@
 __pycache__/
 *.py[cod]
 
+# local cloud smoke artifacts
+cloud/_*_smoke.json
+
 # next.js
 /.next/
 /out/

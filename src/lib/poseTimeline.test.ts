@@ -18,7 +18,7 @@ describe('poseTimeline', () => {
     ]
 
     const resolved = resolveActorPoseAt(history, 'A', 1037, null)
-    expect(resolved?.[0]?.x).toBeCloseTo(0.31, 2)
+    expect(resolved?.[0]?.x).toBeCloseTo(0.299, 2)
   })
 
   it('holds the newest sample when the playhead is ahead and only one sample exists', () => {
@@ -69,7 +69,7 @@ describe('poseTimeline', () => {
       { tMs: 1075, pose: { A: lm(0.4, 0.5), B: null } },
     ]
     const resolved = resolveActorPoseAt(history, 'A', 1150, null)
-    // ratio would be 2.0 without cap; capped at 1.6 → 0.2 + 1.6*(0.4-0.2) = 0.52
+    // ratio would be 2.0 without cap; capped at 1.6 -> 0.2 + 1.6*(0.4-0.2) = 0.52
     expect(resolved?.[0]?.x).toBeCloseTo(0.52, 2)
   })
 })

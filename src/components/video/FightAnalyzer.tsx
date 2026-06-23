@@ -67,6 +67,7 @@ import { buildFightLangFrameEvidence } from '@/lib/compiler/evidenceCompiler'
 import type { FightLangFrameEvidence } from '@/lib/fightlang/ledger'
 import { getPerformanceProfile, FrameBudget } from '@/lib/performanceProfile'
 import { denseTrackKey, loadDenseTrack, pruneGhostRuns, saveDenseTrack } from '@/lib/denseTrackCache'
+import { cloudPoseRequested, fetchCloudDenseTrack, getCloudPoseOptions } from '@/lib/cloudPose'
 import { syncPoseDetectionSurface } from '@/lib/videoCanvas'
 
 export type FightAnalyzerProps = {
@@ -1744,10 +1745,52 @@ export function FightAnalyzer({
           const stepMs = Math.max(DENSE_TRACK_MIN_STEP_MS, Math.ceil(durMs / DENSE_TRACK_MAX_SAMPLES))
           const denseSteps = Math.max(1, Math.floor(durMs / stepMs))
 
+          // Opt-in cloud dense pass (?poseBackend=cloud): offload detection +
+          // RTMPose to the GPU server (cloud/modal_app.py via the Next proxy),
+          // replay the returned candidates through the on-device identity
+          // tracker, and cache under a 'cloud-rtmpose' namespace. Returns false
+          // — so the local pass below runs — when the flag is off OR the cloud
+          // call fails, so the working on-device path can never regress.
+          const tryCloudDensePass = async (): Promise<boolean> => {
+            const cloudOptions = getCloudPoseOptions()
+            if (!cloudOptions) return false
+            const cloudKey = denseTrackKey(video, stepMs, `cloud-${cloudOptions.target}-${cloudOptions.mode}`)
+            const cloudCached = (await loadDenseTrack(cloudKey)) as DenseTrackSample[] | null
+            let track: DenseTrackSample[] | null =
+              cloudCached && cloudCached.length > 0 ? cloudCached : null
+            if (!track) {
+              const result = await fetchCloudDenseTrack({
+                videoUrl: video.currentSrc || video.src,
+                mode: cloudOptions.mode,
+                target: cloudOptions.target,
+              })
+              if (result && result.track.length > 0) {
+                track = result.track
+                void saveDenseTrack(cloudKey, stepMs, track)
+              }
+            }
+            if (!track || track.length === 0 || cancelled) return false
+            denseTrackRef.current = pruneGhostRuns(track)
+            denseTrackReadyRef.current = true
+            onDenseTrackReadyRef.current?.(track.length)
+            if (process.env.NODE_ENV !== 'production') {
+              ;(window as unknown as { __denseTrack?: DenseTrackSample[] }).__denseTrack = track
+            }
+            publishDenseTrackForQa(track, stepMs)
+            console.log(
+              `[DenseTrack] cloud ${cloudOptions.target}/${cloudOptions.mode} - ${track.length} frames`
+            )
+            return true
+          }
+
+          const cloudRequested = cloudPoseRequested()
+
           // The pass is deterministic per clip and costs minutes — restore
           // from the IndexedDB cache when this clip was analyzed before.
           const cacheKey = denseTrackKey(video, stepMs, rtmposeRequested() ? 'rtmpose' : 'mediapipe')
-          const cached = (await loadDenseTrack(cacheKey)) as DenseTrackSample[] | null
+          const cached = cloudRequested
+            ? null
+            : (await loadDenseTrack(cacheKey)) as DenseTrackSample[] | null
           if (cached && cached.length >= denseSteps * 0.5 && !cancelled) {
             denseTrackRef.current = pruneGhostRuns(cached)
             denseTrackReadyRef.current = true
@@ -1757,6 +1800,8 @@ export function FightAnalyzer({
               ;(window as unknown as { __denseTrack?: DenseTrackSample[] }).__denseTrack = cached
             }
             publishDenseTrackForQa(cached, stepMs)
+          } else if (await tryCloudDensePass()) {
+            // Cloud dense pass populated the track above; skip the local pass.
           } else if (!cancelled) {
           denseTrackRef.current = []
           denseTrackReadyRef.current = false

@@ -83,6 +83,22 @@ Smoke test through the app proxy after env vars are set:
 curl -X POST -F "video=@public/test-videos/slowmo-slip.mp4" -F "target=auto" -F "mode=rtmpose" http://localhost:3000/api/fight/cloud-pose
 ```
 
+Opt into the cloud dense pass in the browser:
+
+```text
+?poseBackend=cloud
+?poseBackend=cloud&poseCloudTarget=gpu&poseCloudMode=rtmpose
+?poseBackend=cloud&poseCloudTarget=cpu&poseCloudMode=mediapipe
+```
+
+You can also persist the same dev switches in localStorage:
+
+```js
+localStorage.setItem('musashiPoseBackend', 'cloud')
+localStorage.setItem('musashiPoseCloudTarget', 'auto') // auto | gpu | cpu
+localStorage.setItem('musashiPoseCloudMode', 'rtmpose') // rtmpose | mediapipe
+```
+
 ## Contract
 
 Request: `POST multipart/form-data`
