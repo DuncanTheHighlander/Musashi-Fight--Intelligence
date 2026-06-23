@@ -5,6 +5,7 @@
 import type { D1Database, MarketplaceJobRow } from './types'
 import { applyTransition, releaseJob } from './jobs'
 import { recordRefund } from './ledger'
+import { runPromotionSweep } from './coachRankStore'
 
 const MAX_JOBS_PER_RUN = 100
 
@@ -12,6 +13,8 @@ export type MarketplaceCronResult = {
   expiredClaims: number
   expiredDeliveries: number
   autoReleased: number
+  coachPromotions: number
+  coachReviewsQueued: number
   errors: Array<{ jobId: string; error: string }>
 }
 
@@ -114,10 +117,24 @@ export async function runMarketplaceCron(db: D1Database): Promise<MarketplaceCro
     }
   }
 
+  // Coach Rank promotions: auto-promote where gates pass, queue Black+ for review.
+  let coachPromotions = 0
+  let coachReviewsQueued = 0
+  try {
+    const sweep = await runPromotionSweep(db)
+    coachPromotions = sweep.promoted
+    coachReviewsQueued = sweep.queued
+    for (const e of sweep.errors) errors.push({ jobId: `coach:${e.userId}`, error: e.error })
+  } catch (e) {
+    errors.push({ jobId: 'coach:sweep', error: e instanceof Error ? e.message : 'unknown' })
+  }
+
   return {
     expiredClaims: expiredClaimCount,
     expiredDeliveries: expiredDeliveryCount,
     autoReleased: autoReleasedCount,
+    coachPromotions,
+    coachReviewsQueued,
     errors,
   }
 }

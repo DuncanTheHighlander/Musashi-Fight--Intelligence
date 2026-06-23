@@ -191,6 +191,9 @@ export async function recordHold(
     amountCents: number
     currency?: string
     actorUserId: string
+    status?: TxnStatus
+    stripePaymentIntentId?: string | null
+    stripeChargeId?: string | null
   },
 ): Promise<HoldFundsResult> {
   const key = `job_${args.jobId}_hold`
@@ -201,6 +204,9 @@ export async function recordHold(
     currency: args.currency,
     actorUserId: args.actorUserId,
     idempotencyKey: key,
+    status: args.status,
+    stripePaymentIntentId: args.stripePaymentIntentId,
+    stripeChargeId: args.stripeChargeId,
     metadata: { origin: 'fund' },
   })
   return { holdIdempotencyKey: key, holdTxnId: row.id }

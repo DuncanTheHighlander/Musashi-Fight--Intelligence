@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 
 import { getDb, type D1Database } from '@/lib/db'
+import { completeJobFunding } from '@/lib/marketplace/jobs'
 
 const enc = new TextEncoder()
 
@@ -108,6 +109,22 @@ const upsertSubscription = async (db: D1Database, sub: any, fallbackUserId: stri
     .run()
 }
 
+const completeMarketplaceCheckoutSession = async (db: D1Database, session: any) => {
+  const metadata = session?.metadata || {}
+  if (metadata?.musashi_kind !== 'marketplace_job_funding') return false
+
+  const jobId = String(metadata?.musashi_marketplace_job_id || '').trim()
+  const actorUserId = String(metadata?.musashi_user_id || '').trim()
+  if (!jobId || !actorUserId) throw new Error('Marketplace checkout missing metadata')
+
+  await completeJobFunding(db, {
+    jobId,
+    actorUserId,
+    stripePaymentIntentId: session?.payment_intent ? String(session.payment_intent) : null,
+  })
+  return true
+}
+
 export async function POST(req: Request) {
   const secretKey = process.env.STRIPE_SECRET_KEY
   const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET
@@ -160,6 +177,11 @@ export async function POST(req: Request) {
       const fallbackUserId = customerId ? await lookupUserIdByCustomerId(db, customerId) : null
       await upsertSubscription(db, obj, fallbackUserId)
     } else if (type === 'checkout.session.completed') {
+      const handledMarketplace = await completeMarketplaceCheckoutSession(db, obj)
+      if (handledMarketplace) {
+        return NextResponse.json({ received: true }, { status: 200 })
+      }
+
       const customerId = String(obj?.customer || '').trim()
       const sessionUserId = obj?.metadata?.musashi_user_id ? String(obj.metadata.musashi_user_id) : null
       const subscriptionId = obj?.subscription ? String(obj.subscription) : ''

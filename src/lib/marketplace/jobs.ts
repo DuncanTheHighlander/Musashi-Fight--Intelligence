@@ -331,7 +331,7 @@ export async function applyTransition(
 // ──────────────────────────────────────────────────────────────────────────
 // FUND (ledger-first Stripe stub)
 // ──────────────────────────────────────────────────────────────────────────
-export async function fundJob(
+export async function preflightFundJob(
   db: D1Database,
   args: { jobId: string; actorUserId: string },
 ): Promise<MarketplaceJobRow> {
@@ -340,6 +340,33 @@ export async function fundJob(
   if (job.fighter_id !== args.actorUserId) {
     throw new Error('Only the fighter can fund their job')
   }
+  if (job.status !== 'CREATED') {
+    throw new Error(`Job is not ready for funding: ${job.status}`)
+  }
+
+  if (job.job_type === 'direct_hire' && job.analyst_id) {
+    const analyst = await ensureAnalystProfile(db, job.analyst_id)
+    const active = await currentActiveJobCount(db, job.analyst_id)
+    const cap = Math.min(analyst.max_capacity, maxCapacity(analyst.belt_tier))
+    if (active >= cap) {
+      throw new Error(`Analyst capacity full: ${active}/${cap} active jobs`)
+    }
+  }
+
+  return job
+}
+
+export async function fundJob(
+  db: D1Database,
+  args: {
+    jobId: string
+    actorUserId: string
+    transactionStatus?: 'pending_stripe' | 'succeeded'
+    stripePaymentIntentId?: string | null
+    stripeChargeId?: string | null
+  },
+): Promise<MarketplaceJobRow> {
+  const job = await preflightFundJob(db, args)
 
   // Direct-hire preflight: confirm the pre-assigned analyst still has capacity
   // BEFORE any money is held. These writes aren't wrapped in a transaction, so
@@ -360,6 +387,9 @@ export async function fundJob(
     amountCents: job.amount_cents,
     currency: job.currency,
     actorUserId: args.actorUserId,
+    status: args.transactionStatus,
+    stripePaymentIntentId: args.stripePaymentIntentId,
+    stripeChargeId: args.stripeChargeId,
   })
 
   let funded = await applyTransition(db, {
@@ -392,6 +422,27 @@ export async function fundJob(
 // ──────────────────────────────────────────────────────────────────────────
 // CLAIM (open_bounty only; direct_hire is pre-assigned)
 // ──────────────────────────────────────────────────────────────────────────
+export async function completeJobFunding(
+  db: D1Database,
+  args: {
+    jobId: string
+    actorUserId: string
+    stripePaymentIntentId?: string | null
+    stripeChargeId?: string | null
+  },
+): Promise<MarketplaceJobRow> {
+  const job = await fetchJob(db, args.jobId)
+  if (!job) throw new Error('Job not found')
+  if (job.status !== 'CREATED') return job
+  return fundJob(db, {
+    jobId: args.jobId,
+    actorUserId: args.actorUserId,
+    transactionStatus: 'succeeded',
+    stripePaymentIntentId: args.stripePaymentIntentId,
+    stripeChargeId: args.stripeChargeId,
+  })
+}
+
 export async function claimJob(
   db: D1Database,
   args: { jobId: string; analystId: string },

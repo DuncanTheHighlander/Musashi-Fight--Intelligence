@@ -24,6 +24,7 @@ import { enforceUsage } from '@/lib/musashiUsage'
 import { getDb } from '@/lib/marketplace/types'
 import { ensureAnalystProfile } from '@/lib/marketplace/jobs'
 import { canEnableDirectHire, maxCapacity as tierMaxCapacity } from '@/lib/marketplace/beltTier'
+import { ensureCoachRank } from '@/lib/marketplace/coachRankStore'
 
 export async function GET(req: Request) {
   try {
@@ -82,6 +83,13 @@ export async function PATCH(req: Request) {
 
     const db = getDb()
     const profile = await ensureAnalystProfile(db, user.id)
+    const willBeEnabled = typeof body.isAnalystEnabled === 'boolean'
+      ? body.isAnalystEnabled
+      : Boolean(profile.is_analyst_enabled)
+
+    if (willBeEnabled) {
+      await ensureCoachRank(db, user.id)
+    }
 
     const updates: string[] = []
     const values: unknown[] = []

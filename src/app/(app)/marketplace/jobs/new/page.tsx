@@ -108,9 +108,28 @@ export default function NewJobPage() {
       // Step 2 — fund (Stripe stub — ledger row pending)
       const fundRes = await fetch(`/api/social/jobs/${jobId}/fund`, {
         method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
+        body: JSON.stringify({
+          successUrl: `${window.location.origin}/marketplace/jobs/${jobId}?funding=success`,
+          cancelUrl: `${window.location.origin}/marketplace/jobs/${jobId}?funding=cancelled`,
+        }),
       })
-      await parseApiResponse(fundRes)
+      const funded = await parseApiResponse<{
+        payment?: {
+          requiresRedirect?: boolean
+          checkoutUrl?: string | null
+        }
+      }>(fundRes)
+
+      if (funded.payment?.requiresRedirect && funded.payment.checkoutUrl) {
+        toast({
+          title: 'Finish payment',
+          description: 'Redirecting to Stripe Checkout.',
+        })
+        window.location.assign(funded.payment.checkoutUrl)
+        return
+      }
 
       toast({
         title: 'Bounty posted',
