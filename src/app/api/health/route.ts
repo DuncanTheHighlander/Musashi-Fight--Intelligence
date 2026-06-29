@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server'
+import { isGeminiConfigured } from '@/lib/cloudflare/secrets'
 
 /**
  * Lightweight health check.
@@ -13,7 +14,30 @@ import { NextResponse } from 'next/server'
  * readiness check, gate on `ai.ready === true`.
  */
 export async function GET() {
-  const geminiConfigured = Boolean(process.env.GEMINI_API_KEY)
+  const timestamp = new Date().toISOString()
+  const isProd = process.env.NODE_ENV === 'production'
+
+  if (isProd) {
+    const geminiConfigured = await isGeminiConfigured()
+    const killSwitch = process.env.MUSASHI_AI_KILL_SWITCH === '1'
+    const offlineMode =
+      process.env.OFFLINE_MODE === '1' || process.env.GEMINI_DRY_RUN === '1'
+
+    return NextResponse.json(
+      {
+        status: 'ok',
+        timestamp,
+        service: 'musashi',
+        ai: { ready: geminiConfigured && !killSwitch && !offlineMode },
+      },
+      {
+        status: 200,
+        headers: { 'Cache-Control': 'no-store, must-revalidate' },
+      }
+    )
+  }
+
+  const geminiConfigured = await isGeminiConfigured()
   const dbBound = Boolean(
     (process.env.DB as unknown as { prepare?: unknown } | undefined)?.prepare
   )
@@ -25,7 +49,7 @@ export async function GET() {
   return NextResponse.json(
     {
       status: 'ok',
-      timestamp: new Date().toISOString(),
+      timestamp,
       service: 'musashi',
       version: process.env.NEXT_PUBLIC_APP_VERSION || 'dev',
       auth: { bypass: authDisabled },

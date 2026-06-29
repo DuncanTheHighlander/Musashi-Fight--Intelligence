@@ -1,7 +1,8 @@
 'use client'
 
 import React, { useCallback, useEffect, useState } from 'react'
-import { Card, CardContent } from '@/components/ui/card'
+import Link from 'next/link'
+import { Card, CardContent, CardDescription, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
@@ -13,11 +14,11 @@ import {
   Plus,
   DollarSign,
   Eye,
+  ArrowRight,
 } from 'lucide-react'
 import { useAuth } from '@/hooks/useAuth'
 import { parseApiResponse } from '@/lib/safeJson'
 import { SectionHeader, SectionShell, EmptySectionState } from '@/components/ui/section-header'
-import { ComingSoonSection } from './ComingSoonSection'
 
 interface ScoutingRequest {
   id: string
@@ -144,12 +145,33 @@ export default function ScoutingSection() {
 
   if (!PREVIEW_ENABLED) {
     return (
-      <ComingSoonSection
-        title="Scouting"
-        icon={Target}
-        description="Crowdsourced opponent breakdowns from the Musashi community."
-        details="Available soon. We're stabilizing the scouting workflow before opening it to everyone."
-      />
+      <SectionShell>
+        <SectionHeader
+          icon={Target}
+          eyebrow="Opponent scouting"
+          title="Scout your next opponent"
+          subtitle="Post upcoming fights with opponent tape. Verified coaches send back a video game plan."
+        />
+        <Card className="border-border/60 bg-card">
+          <CardContent className="flex flex-col items-center gap-4 p-10 text-center sm:p-12">
+            <div className="flex h-14 w-14 items-center justify-center rounded-full bg-primary/15 text-primary">
+              <Target className="h-7 w-7" />
+            </div>
+            <div className="max-w-md space-y-2">
+              <CardTitle className="text-xl">Scouting is on the Coaches page</CardTitle>
+              <CardDescription>
+                Upload your clips and opponent footage — coaches deliver video breakdowns with escrow protection.
+              </CardDescription>
+            </div>
+            <Button asChild size="lg" className="gap-2">
+              <Link href="/marketplace/scout">
+                Scout an opponent
+                <ArrowRight className="h-4 w-4" />
+              </Link>
+            </Button>
+          </CardContent>
+        </Card>
+      </SectionShell>
     )
   }
 

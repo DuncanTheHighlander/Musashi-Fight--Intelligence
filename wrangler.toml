@@ -27,3 +27,58 @@ index_name = "musashi-knowledge"
 
 [ai]
 binding = "AI"
+
+[secrets]
+required = [
+  "MUSASHI_SESSION_SECRET",
+  "MUSASHI_SHOGUN_EMAIL",
+  "MUSASHI_SHOGUN_PASSWORD",
+  "MUSASHI_CRON_SECRET",
+  "MUSASHI_APP_URL",
+  "STRIPE_WEBHOOK_SECRET",
+  "STORAGE_SERVICE_URL",
+  "STORAGE_ACCESS_KEY",
+  "STORAGE_SECRET_KEY",
+  "STORAGE_BUCKET_NAME",
+]
+
+# Cloudflare Secrets Store — store_id identifies the account store (not a credential).
+# Workers read values via binding names + async env.BINDING.get().
+[[secrets_store_secrets]]
+binding = "SECRET_AI"
+store_id = "3a6ee7307f0b482ab4b3f3dd6794168c"
+secret_name = "Ai"
+
+[[secrets_store_secrets]]
+binding = "SECRET_MODAL"
+store_id = "3a6ee7307f0b482ab4b3f3dd6794168c"
+secret_name = "Modal"
+
+[[secrets_store_secrets]]
+binding = "SECRET_REVCAT1"
+store_id = "3a6ee7307f0b482ab4b3f3dd6794168c"
+secret_name = "revcat1"
+
+[[secrets_store_secrets]]
+binding = "SECRET_REVCAT2"
+store_id = "3a6ee7307f0b482ab4b3f3dd6794168c"
+secret_name = "revcat2"
+
+[[secrets_store_secrets]]
+binding = "SECRET_STRIPE"
+store_id = "3a6ee7307f0b482ab4b3f3dd6794168c"
+secret_name = "Stripe"
+
+[[secrets_store_secrets]]
+binding = "SECRET_SUPABASE"
+store_id = "3a6ee7307f0b482ab4b3f3dd6794168c"
+secret_name = "Supabase"
+
+# Production vars (per-Worker secrets via `wrangler secret put` — see docs/MARKETPLACE_LAUNCH.md)
+# Set STRIPE_* and STORAGE_* secrets before deploy; mock modes are for local dev only.
+[vars]
+MUSASHI_MARKETPLACE_PAYMENTS = "stripe"
+MUSASHI_STORAGE_MODE = "r2"
+NODE_ENV = "production"
+# Set your live URL after first deploy (Workers subdomain or custom domain):
+# MUSASHI_APP_URL = "https://app.yourdomain.com"

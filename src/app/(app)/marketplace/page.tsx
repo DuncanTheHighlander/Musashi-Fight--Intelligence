@@ -14,7 +14,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { useToast } from '@/hooks/use-toast'
 import { useAuth } from '@/hooks/useAuth'
 import { parseApiResponse } from '@/lib/safeJson'
-import { Briefcase, Plus, Settings2, Shield } from 'lucide-react'
+import { Briefcase, Plus, Settings2, Shield, Trophy, Video, Target } from 'lucide-react'
 import { JobCard, type JobCardData } from '@/components/marketplace/JobCard'
 import { AnalystCard, type AnalystCardData } from '@/components/marketplace/AnalystCard'
 import { SectionHeader, EmptySectionState } from '@/components/ui/section-header'
@@ -24,27 +24,49 @@ export default function MarketplacePage() {
   const { user, loading: authLoading } = useAuth()
   const { toast } = useToast()
 
-  const [activeTab, setActiveTab] = useState<'bounties' | 'analysts' | 'mine'>('bounties')
-  const [bounties, setBounties] = useState<JobCardData[]>([])
+  const [activeTab, setActiveTab] = useState<'clips' | 'scout' | 'analysts' | 'mine'>('clips')
+  const [clipJobs, setClipJobs] = useState<JobCardData[]>([])
+  const [scoutJobs, setScoutJobs] = useState<JobCardData[]>([])
   const [myJobs, setMyJobs] = useState<JobCardData[]>([])
   const [analysts, setAnalysts] = useState<AnalystCardData[]>([])
   const [loading, setLoading] = useState(false)
-  const [bountiesError, setBountiesError] = useState(false)
+  const [clipJobsError, setClipJobsError] = useState(false)
+  const [scoutJobsError, setScoutJobsError] = useState(false)
   const [analystsError, setAnalystsError] = useState(false)
   const [myJobsError, setMyJobsError] = useState(false)
 
-  const fetchBounties = useCallback(async () => {
-    setBountiesError(false)
+  const fetchClipJobs = useCallback(async () => {
+    setClipJobsError(false)
     try {
-      const res = await fetch('/api/social/jobs?status=FUNDED&jobType=open_bounty&limit=50', {
-        credentials: 'include',
-      })
+      const res = await fetch(
+        '/api/social/jobs?status=FUNDED&jobType=open_bounty&category=clip&limit=50',
+        { credentials: 'include' },
+      )
       const data = await parseApiResponse<{ jobs: JobCardData[] }>(res)
-      setBounties(data.jobs || [])
+      setClipJobs(data.jobs || [])
     } catch (err) {
-      setBountiesError(true)
+      setClipJobsError(true)
       toast({
-        title: 'Failed to load bounties',
+        title: 'Failed to load clip reviews',
+        description: err instanceof Error ? err.message : 'Unknown error',
+        variant: 'destructive',
+      })
+    }
+  }, [toast])
+
+  const fetchScoutJobs = useCallback(async () => {
+    setScoutJobsError(false)
+    try {
+      const res = await fetch(
+        '/api/social/jobs?status=FUNDED&jobType=open_bounty&category=scout&limit=50',
+        { credentials: 'include' },
+      )
+      const data = await parseApiResponse<{ jobs: JobCardData[] }>(res)
+      setScoutJobs(data.jobs || [])
+    } catch (err) {
+      setScoutJobsError(true)
+      toast({
+        title: 'Failed to load scouting requests',
         description: err instanceof Error ? err.message : 'Unknown error',
         variant: 'destructive',
       })
@@ -88,33 +110,52 @@ export default function MarketplacePage() {
   useEffect(() => {
     if (authLoading) return
     setLoading(true)
-    Promise.all([fetchBounties(), fetchAnalysts(), user ? fetchMyJobs() : Promise.resolve()])
+    Promise.all([
+      fetchClipJobs(),
+      fetchScoutJobs(),
+      fetchAnalysts(),
+      user ? fetchMyJobs() : Promise.resolve(),
+    ])
       .finally(() => setLoading(false))
-  }, [authLoading, user, fetchBounties, fetchAnalysts, fetchMyJobs])
+  }, [authLoading, user, fetchClipJobs, fetchScoutJobs, fetchAnalysts, fetchMyJobs])
 
   return (
     <div className="container mx-auto max-w-6xl px-4 py-8 lg:px-6 lg:py-10">
       <SectionHeader
         icon={Briefcase}
-        eyebrow="Bounties & Analysts"
-        title="Hire a Coach"
-        subtitle="Post a fight for analysis, or browse expert coaches ranked by belt tier."
+        eyebrow="Coach feedback"
+        title="Get breakdowns from verified coaches"
+        subtitle="Upload a clip for technique feedback, or scout an upcoming opponent. Coaches send video breakdowns back to you."
         action={
           <>
             <Button asChild variant="outline" className="h-10">
               <Link href="/marketplace/settings">
                 <Settings2 className="h-4 w-4 mr-2" />
-                Analyst Settings
+                Coach settings
               </Link>
             </Button>
             {user?.role === 'shogun' && (
-              <Button asChild variant="outline" className="h-10">
-                <Link href="/admin/disputes">
-                  <Shield className="h-4 w-4 mr-2" />
-                  Disputes
-                </Link>
-              </Button>
+              <>
+                <Button asChild variant="outline" className="h-10">
+                  <Link href="/admin/coach-review">
+                    <Trophy className="h-4 w-4 mr-2" />
+                    Quality Review
+                  </Link>
+                </Button>
+                <Button asChild variant="outline" className="h-10">
+                  <Link href="/admin/disputes">
+                    <Shield className="h-4 w-4 mr-2" />
+                    Disputes
+                  </Link>
+                </Button>
+              </>
             )}
+            <Button asChild variant="outline" className="h-10">
+              <Link href="/marketplace/scout">
+                <Target className="h-4 w-4 mr-2" />
+                Scout opponent
+              </Link>
+            </Button>
             <Button
               className="h-10"
               onClick={() => {
@@ -125,51 +166,89 @@ export default function MarketplacePage() {
                 router.push('/marketplace/jobs/new')
               }}
             >
-              <Plus className="h-4 w-4 mr-2" />
-              Post a Bounty
+              <Video className="h-4 w-4 mr-2" />
+              Review my clip
             </Button>
           </>
         }
       />
 
       <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as typeof activeTab)}>
-        <TabsList className="grid w-full max-w-md grid-cols-3">
-          <TabsTrigger value="bounties">Open Bounties</TabsTrigger>
-          <TabsTrigger value="analysts">Analysts</TabsTrigger>
-          <TabsTrigger value="mine" disabled={!user}>My Jobs</TabsTrigger>
+        <TabsList className="grid w-full max-w-2xl grid-cols-4">
+          <TabsTrigger value="clips">Clip reviews</TabsTrigger>
+          <TabsTrigger value="scout">Opponent scout</TabsTrigger>
+          <TabsTrigger value="analysts">Coaches</TabsTrigger>
+          <TabsTrigger value="mine" disabled={!user}>My requests</TabsTrigger>
         </TabsList>
 
-        <TabsContent value="bounties" className="mt-6">
+        <TabsContent value="clips" className="mt-6">
           {loading ? (
             <SkeletonGrid />
-          ) : bountiesError ? (
+          ) : clipJobsError ? (
             <EmptySectionState
-              icon={Briefcase}
-              title="Could not load bounties"
+              icon={Video}
+              title="Could not load clip reviews"
               description="Check your connection and try again."
               action={
-                <Button variant="outline" onClick={() => { setLoading(true); fetchBounties().finally(() => setLoading(false)) }}>
+                <Button variant="outline" onClick={() => { setLoading(true); fetchClipJobs().finally(() => setLoading(false)) }}>
                   Retry
                 </Button>
               }
             />
-          ) : bounties.length === 0 ? (
+          ) : clipJobs.length === 0 ? (
             <EmptySectionState
-              icon={Briefcase}
-              title="No open bounties right now"
-              description="Be the first to post — set a budget and any verified analyst can claim it."
+              icon={Video}
+              title="No open clip reviews"
+              description="Upload sparring or technique footage — a coach will claim it and send a video breakdown back."
               action={
                 user && (
                   <Button onClick={() => router.push('/marketplace/jobs/new')}>
                     <Plus className="h-4 w-4 mr-2" />
-                    Post the first bounty
+                    Upload a clip for review
                   </Button>
                 )
               }
             />
           ) : (
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-              {bounties.map((j) => (
+              {clipJobs.map((j) => (
+                <JobCard key={j.id} job={j} />
+              ))}
+            </div>
+          )}
+        </TabsContent>
+
+        <TabsContent value="scout" className="mt-6">
+          {loading ? (
+            <SkeletonGrid />
+          ) : scoutJobsError ? (
+            <EmptySectionState
+              icon={Target}
+              title="Could not load scouting requests"
+              description="Check your connection and try again."
+              action={
+                <Button variant="outline" onClick={() => { setLoading(true); fetchScoutJobs().finally(() => setLoading(false)) }}>
+                  Retry
+                </Button>
+              }
+            />
+          ) : scoutJobs.length === 0 ? (
+            <EmptySectionState
+              icon={Target}
+              title="No open scouting requests"
+              description="Post an upcoming fight with opponent tape — coaches deliver a video game plan."
+              action={
+                user && (
+                  <Button onClick={() => router.push('/marketplace/scout')}>
+                    <Plus className="h-4 w-4 mr-2" />
+                    Scout an opponent
+                  </Button>
+                )
+              }
+            />
+          ) : (
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              {scoutJobs.map((j) => (
                 <JobCard key={j.id} job={j} />
               ))}
             </div>

@@ -2,7 +2,7 @@
  * GET /api/social/jobs/[id] — fetch a single job (with transaction summary).
  */
 import { NextResponse } from 'next/server'
-import { enforceUsage } from '@/lib/musashiUsage'
+import { requireUser } from '@/lib/musashiAuth'
 import { getDb } from '@/lib/marketplace/types'
 import type { MarketplaceJobRow, MarketplaceTransactionRow } from '@/lib/marketplace/types'
 
@@ -45,7 +45,7 @@ function toJobDto(row: MarketplaceJobRow) {
 
 export async function GET(req: Request, context: { params: Promise<Params> }) {
   try {
-    const user = await enforceUsage(req, 'chat')
+    const user = await requireUser(req)
     const { id } = await context.params
     const db = getDb()
 
@@ -64,6 +64,15 @@ export async function GET(req: Request, context: { params: Promise<Params> }) {
 
     // Attach recent transactions (participants only)
     let transactions: MarketplaceTransactionRow[] = []
+    let dispute: {
+      id: string
+      status: string
+      reason: string
+      description: string
+      openedById: string
+      counterStatement: string | null
+    } | null = null
+
     if (isParticipant) {
       const r = await db
         .prepare(
@@ -72,10 +81,38 @@ export async function GET(req: Request, context: { params: Promise<Params> }) {
         .bind(id)
         .all<MarketplaceTransactionRow>()
       transactions = r.results || []
+
+      const activeDispute = await db
+        .prepare(
+          `SELECT id, status, reason, description, opened_by_id, counter_statement
+             FROM marketplace_disputes
+            WHERE job_id = ? AND status IN ('OPEN', 'UNDER_REVIEW')
+            ORDER BY created_at DESC LIMIT 1`,
+        )
+        .bind(id)
+        .first<{
+          id: string
+          status: string
+          reason: string
+          description: string
+          opened_by_id: string
+          counter_statement: string | null
+        }>()
+      if (activeDispute) {
+        dispute = {
+          id: activeDispute.id,
+          status: activeDispute.status,
+          reason: activeDispute.reason,
+          description: activeDispute.description,
+          openedById: activeDispute.opened_by_id,
+          counterStatement: activeDispute.counter_statement,
+        }
+      }
     }
 
     return NextResponse.json({
       job: toJobDto(job),
+      dispute,
       transactions: transactions.map((t) => ({
         id: t.id,
         type: t.type,

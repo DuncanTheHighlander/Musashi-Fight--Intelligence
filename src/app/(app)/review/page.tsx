@@ -7,12 +7,14 @@
  * confirmed, rejected, or relabeled. Verdicts accumulate into the labeled
  * dataset (export at /api/fight/ledgers/export) used to tune detectors.
  */
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { SectionHeader } from '@/components/ui/section-header'
 import { ClipboardCheck, Download, RefreshCw } from 'lucide-react'
+import { resolveAssetHref } from '@/lib/storage/assetRef'
 
 type LedgerSummary = {
   id: string
@@ -48,6 +50,7 @@ type LedgerDetail = {
     itemId: string
     verdict: 'confirm' | 'reject' | 'relabel'
     correctedKind: string | null
+    note?: string | null
   }>
 }
 
@@ -58,6 +61,11 @@ const RELABEL_KINDS = [
 
 const fmtTime = (ms: number) => `${(ms / 1000).toFixed(1)}s`
 
+const markedMomentMs = (note?: string | null): number => {
+  const m = /atMs:(\d+)/.exec(note || '')
+  return m ? Number(m[1]) : 0
+}
+
 export default function ReviewPage() {
   const [ledgers, setLedgers] = useState<LedgerSummary[]>([])
   const [loading, setLoading] = useState(true)
@@ -66,6 +74,30 @@ export default function ReviewPage() {
   const [error, setError] = useState<string | null>(null)
   const [pendingItem, setPendingItem] = useState<string | null>(null)
   const [relabelOpen, setRelabelOpen] = useState<string | null>(null)
+  const [isAdmin, setIsAdmin] = useState<boolean | null>(null)
+  const [customDiscipline, setCustomDiscipline] = useState<string>('bjj')
+  const [customKind, setCustomKind] = useState('')
+  const videoRef = useRef<HTMLVideoElement | null>(null)
+
+  // Playable source for the open analysis, when the clip was saved (asset ref or URL).
+  const playableSrc =
+    detail?.summary.sourceId &&
+    (detail.summary.sourceId.startsWith('asset:') || detail.summary.sourceId.startsWith('http'))
+      ? resolveAssetHref(detail.summary.sourceId)
+      : null
+
+  const seekTo = (ms: number) => {
+    const v = videoRef.current
+    if (!v) return
+    v.currentTime = Math.max(0, ms / 1000)
+    void v.play().catch(() => {})
+  }
+
+  const [markDiscipline, setMarkDiscipline] = useState<string>('bjj')
+  const [markKind, setMarkKind] = useState('')
+  const [marking, setMarking] = useState(false)
+
+  const markedMoments = (detail?.corrections || []).filter((c) => c.itemId.startsWith('manual_'))
 
   const loadLedgers = useCallback(async () => {
     setLoading(true)
@@ -95,6 +127,48 @@ export default function ReviewPage() {
     } finally {
       setDetailLoading(false)
     }
+  }, [])
+
+  const markMoment = useCallback(async () => {
+    if (!detail || !videoRef.current || !markKind.trim()) return
+    const ms = Math.round(videoRef.current.currentTime * 1000)
+    setMarking(true)
+    setError(null)
+    try {
+      const res = await fetch('/api/fight/ledgers/corrections', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          ledgerId: detail.summary.id,
+          itemType: 'event',
+          itemId: `manual_${ms}_${Date.now()}`,
+          originalKind: 'missed',
+          verdict: 'relabel',
+          correctedKind: `${markDiscipline}:${markKind.trim()}`,
+          note: `atMs:${ms}`,
+        }),
+      })
+      const data = (await res.json()) as { success: boolean; error?: string }
+      if (!data.success) throw new Error(data.error || 'Failed to mark moment')
+      setMarkKind('')
+      await openLedger(detail.summary.id)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to mark moment')
+    } finally {
+      setMarking(false)
+    }
+  }, [detail, markDiscipline, markKind, openLedger])
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const res = await fetch('/api/auth/me')
+        const data = await res.json().catch(() => null)
+        setIsAdmin((data as { user?: { role?: string } } | null)?.user?.role === 'shogun')
+      } catch {
+        setIsAdmin(false)
+      }
+    })()
   }, [])
 
   useEffect(() => {
@@ -183,6 +257,17 @@ export default function ReviewPage() {
                     </Badge>
                   )}
                   <div className="ml-auto flex items-center gap-1.5">
+                    {playableSrc && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        disabled={busy}
+                        className="h-7 px-2 text-xs"
+                        onClick={() => seekTo(item.t.startMs)}
+                      >
+                        ▶ {fmtTime(item.t.startMs)}
+                      </Button>
+                    )}
                     <Button
                       size="sm"
                       variant="outline"
@@ -207,7 +292,10 @@ export default function ReviewPage() {
                         variant="outline"
                         disabled={busy}
                         className="h-7 px-2"
-                        onClick={() => setRelabelOpen(relabelOpen === item.id ? null : item.id)}
+                        onClick={() => {
+                          setCustomKind('')
+                          setRelabelOpen(relabelOpen === item.id ? null : item.id)
+                        }}
                       >
                         Relabel
                       </Button>
@@ -218,25 +306,71 @@ export default function ReviewPage() {
                   <p className="mt-1 text-sm text-muted-foreground">{item.label || item.message}</p>
                 )}
                 {relabelOpen === item.id && (
-                  <div className="mt-2 flex flex-wrap gap-1.5">
-                    {RELABEL_KINDS.filter((k) => k !== item.kind).map((kind) => (
+                  <div className="mt-2 space-y-2">
+                    <div className="flex flex-wrap gap-1.5">
+                      {RELABEL_KINDS.filter((k) => k !== item.kind).map((kind) => (
+                        <Button
+                          key={kind}
+                          size="sm"
+                          variant="secondary"
+                          disabled={busy}
+                          className="h-6 px-2 text-xs font-mono"
+                          onClick={() => submitCorrection(itemType, item, 'relabel', kind)}
+                        >
+                          {kind}
+                        </Button>
+                      ))}
+                    </div>
+                    <div className="flex flex-wrap items-center gap-1.5 border-t border-border/40 pt-2">
+                      <span className="text-xs text-muted-foreground">Other art:</span>
+                      <select
+                        value={customDiscipline}
+                        onChange={(e) => setCustomDiscipline(e.target.value)}
+                        className="h-7 rounded-md border border-input bg-background px-2 text-xs"
+                      >
+                        <option value="boxing">Boxing</option>
+                        <option value="muay_thai">Muay Thai</option>
+                        <option value="wrestling">Wrestling</option>
+                        <option value="judo">Judo</option>
+                        <option value="bjj">Jiu-Jitsu</option>
+                        <option value="mma">MMA</option>
+                        <option value="other">Other</option>
+                      </select>
+                      <Input
+                        value={customKind}
+                        onChange={(e) => setCustomKind(e.target.value)}
+                        placeholder="type a technique (e.g. single leg, armbar, seoi nage)"
+                        className="h-7 w-56 text-xs"
+                      />
                       <Button
-                        key={kind}
                         size="sm"
                         variant="secondary"
-                        disabled={busy}
-                        className="h-6 px-2 text-xs font-mono"
-                        onClick={() => submitCorrection(itemType, item, 'relabel', kind)}
+                        disabled={busy || !customKind.trim()}
+                        className="h-7 px-2 text-xs"
+                        onClick={() =>
+                          submitCorrection(itemType, item, 'relabel', `${customDiscipline}:${customKind.trim()}`)
+                        }
                       >
-                        {kind}
+                        Save label
                       </Button>
-                    ))}
+                    </div>
                   </div>
                 )}
               </CardContent>
             </Card>
           )
         })}
+      </div>
+    )
+  }
+
+  if (isAdmin === false) {
+    return (
+      <div className="container mx-auto max-w-2xl px-4 py-16 text-center">
+        <h1 className="text-lg font-semibold">Admin only</h1>
+        <p className="mt-2 text-sm text-muted-foreground">
+          The detection review &amp; labeling tools are restricted to the admin account.
+        </p>
       </div>
     )
   }
@@ -325,6 +459,72 @@ export default function ReviewPage() {
             <p className="text-sm text-muted-foreground">Loading…</p>
           ) : (
             <div className="space-y-6">
+              {playableSrc ? (
+                <div className="space-y-2">
+                  <video
+                    ref={videoRef}
+                    src={playableSrc}
+                    controls
+                    playsInline
+                    className="w-full rounded-md border border-border/50 bg-black"
+                  />
+                  <div className="flex flex-wrap items-center gap-1.5 rounded-md border border-border/40 p-2">
+                    <span className="text-xs text-muted-foreground">Mark a missed moment:</span>
+                    <select
+                      value={markDiscipline}
+                      onChange={(e) => setMarkDiscipline(e.target.value)}
+                      className="h-7 rounded-md border border-input bg-background px-2 text-xs"
+                    >
+                      <option value="boxing">Boxing</option>
+                      <option value="muay_thai">Muay Thai</option>
+                      <option value="wrestling">Wrestling</option>
+                      <option value="judo">Judo</option>
+                      <option value="bjj">Jiu-Jitsu</option>
+                      <option value="mma">MMA</option>
+                      <option value="other">Other</option>
+                    </select>
+                    <Input
+                      value={markKind}
+                      onChange={(e) => setMarkKind(e.target.value)}
+                      placeholder="technique the AI missed (e.g. armbar, single leg)"
+                      className="h-7 w-60 text-xs"
+                    />
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      disabled={marking || !markKind.trim()}
+                      className="h-7 px-2 text-xs"
+                      onClick={() => void markMoment()}
+                    >
+                      Mark at current time
+                    </Button>
+                  </div>
+                  {markedMoments.length > 0 && (
+                    <div className="space-y-1">
+                      <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Your marked moments</h3>
+                      {markedMoments.map((m) => (
+                        <div key={m.itemId} className="flex items-center gap-2 text-xs">
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="h-6 px-2 text-xs"
+                            onClick={() => seekTo(markedMomentMs(m.note))}
+                          >
+                            ▶ {fmtTime(markedMomentMs(m.note))}
+                          </Button>
+                          <Badge variant="secondary" className="font-mono">{m.correctedKind}</Badge>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <Card className="border-border/50 bg-card/60">
+                  <CardContent className="py-3 px-4 text-xs text-muted-foreground">
+                    No video saved for this analysis. New analyses run after this update will be saved here for playback.
+                  </CardContent>
+                </Card>
+              )}
               {renderItems('Strikes & events', 'event', detail.ledger.events)}
               {renderItems('Faults', 'fault', detail.ledger.faults)}
               {renderItems('Patterns', 'pattern', detail.ledger.patterns)}

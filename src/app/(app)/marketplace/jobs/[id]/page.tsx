@@ -13,9 +13,9 @@
  *   - Either, IN_PROGRESS|SUBMITTED: open dispute
  */
 
-import { use, useCallback, useEffect, useState } from 'react'
+import { use, useCallback, useEffect, useRef, useState } from 'react'
 import Link from 'next/link'
-import { useRouter } from 'next/navigation'
+import { useRouter, useSearchParams } from 'next/navigation'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -39,6 +39,10 @@ import {
 } from 'lucide-react'
 import { JobStatusBadge, type JobStatus } from '@/components/marketplace/JobStatusBadge'
 import { BeltBadge, type BeltTier } from '@/components/marketplace/BeltBadge'
+import { UploadDropzone } from '@/components/marketplace/UploadDropzone'
+import { CoachFeedbackVideo, isLikelyVideoRef } from '@/components/marketplace/CoachFeedbackVideo'
+import { displayAssetLabel, resolveAssetHref } from '@/lib/storage/assetRef'
+import { fundMarketplaceJob } from '@/lib/marketplace/fundClient'
 
 type Job = {
   id: string
@@ -54,6 +58,7 @@ type Job = {
   analystPayoutCents: number
   currency: string
   status: JobStatus
+  scoutingRequestId?: string | null
   deliverableUrl: string | null
   deliverableNotes: string | null
   submittedAt: string | null
@@ -73,9 +78,20 @@ type Transaction = {
   createdAt: string
 }
 
+type ActiveDispute = {
+  id: string
+  status: string
+  reason: string
+  description: string
+  openedById: string
+  counterStatement: string | null
+}
+
 export default function JobDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params)
   const router = useRouter()
+  const searchParams = useSearchParams()
+  const fundingParam = searchParams.get('funding')
   const { user } = useAuth()
   const { toast } = useToast()
 
@@ -83,16 +99,25 @@ export default function JobDetailPage({ params }: { params: Promise<{ id: string
   const [transactions, setTransactions] = useState<Transaction[]>([])
   const [loading, setLoading] = useState(true)
   const [acting, setActing] = useState(false)
+  const [fundingPoll, setFundingPoll] = useState(false)
+  const fundingHandled = useRef(false)
+  const fundingPollStarted = useRef(false)
 
   // Submit-deliverable dialog state
   const [deliverableUrl, setDeliverableUrl] = useState('')
+  const [deliverableAssetId, setDeliverableAssetId] = useState<string | null>(null)
   const [deliverableNotes, setDeliverableNotes] = useState('')
   const [submitOpen, setSubmitOpen] = useState(false)
 
   // Dispute dialog state
   const [disputeReason, setDisputeReason] = useState<string>('not_delivered')
   const [disputeDescription, setDisputeDescription] = useState('')
+  const [disputeEvidenceAssetIds, setDisputeEvidenceAssetIds] = useState<string[]>([])
   const [disputeOpen, setDisputeOpen] = useState(false)
+  const [activeDispute, setActiveDispute] = useState<ActiveDispute | null>(null)
+  const [evidenceOpen, setEvidenceOpen] = useState(false)
+  const [evidenceStatement, setEvidenceStatement] = useState('')
+  const [extraEvidenceAssetIds, setExtraEvidenceAssetIds] = useState<string[]>([])
 
   // Review dialog state
   const [tactical, setTactical] = useState(5)
@@ -104,9 +129,14 @@ export default function JobDetailPage({ params }: { params: Promise<{ id: string
   const loadJob = useCallback(async () => {
     try {
       const res = await fetch(`/api/social/jobs/${id}`, { credentials: 'include' })
-      const data = await parseApiResponse<{ job: Job; transactions: Transaction[] }>(res)
+      const data = await parseApiResponse<{
+        job: Job
+        transactions: Transaction[]
+        dispute?: ActiveDispute | null
+      }>(res)
       setJob(data.job)
       setTransactions(data.transactions || [])
+      setActiveDispute(data.dispute ?? null)
     } catch (err) {
       toast({
         title: 'Failed to load job',
@@ -119,6 +149,120 @@ export default function JobDetailPage({ params }: { params: Promise<{ id: string
   }, [id, toast])
 
   useEffect(() => { loadJob() }, [loadJob])
+
+  useEffect(() => {
+    if (fundingParam !== 'success' || !job) return
+
+    if (job.status === 'FUNDED' && !fundingHandled.current) {
+      fundingHandled.current = true
+      toast({ title: 'Payment confirmed', description: 'Your bounty is live for analysts.' })
+      router.replace(`/marketplace/jobs/${id}`)
+      return
+    }
+
+    if (job.status !== 'CREATED' || fundingPollStarted.current) return
+
+    fundingPollStarted.current = true
+    setFundingPoll(true)
+    toast({
+      title: 'Confirming payment',
+      description: 'Waiting for Stripe to confirm — this usually takes a few seconds.',
+    })
+
+    let attempts = 0
+    const interval = window.setInterval(async () => {
+      attempts += 1
+      try {
+        const res = await fetch(`/api/social/jobs/${id}`, { credentials: 'include' })
+        const data = await parseApiResponse<{ job: Job }>(res)
+        setJob(data.job)
+        if (data.job.status === 'FUNDED') {
+          window.clearInterval(interval)
+          setFundingPoll(false)
+          if (!fundingHandled.current) {
+            fundingHandled.current = true
+            toast({ title: 'Payment confirmed', description: 'Your bounty is live for analysts.' })
+            router.replace(`/marketplace/jobs/${id}`)
+          }
+        } else if (attempts >= 15) {
+          window.clearInterval(interval)
+          setFundingPoll(false)
+        }
+      } catch {
+        if (attempts >= 15) {
+          window.clearInterval(interval)
+          setFundingPoll(false)
+        }
+      }
+    }, 2000)
+
+    return () => window.clearInterval(interval)
+  }, [fundingParam, job, id, router, toast])
+
+  useEffect(() => {
+    if (fundingParam !== 'cancelled' || fundingHandled.current) return
+    fundingHandled.current = true
+    toast({
+      title: 'Payment cancelled',
+      description: 'Complete payment when you are ready to publish the bounty.',
+      variant: 'destructive',
+    })
+    router.replace(`/marketplace/jobs/${id}`)
+  }, [fundingParam, id, router, toast])
+
+  async function handleAddEvidence() {
+    if (!activeDispute) return
+    setActing(true)
+    try {
+      const res = await fetch(`/api/social/disputes/${activeDispute.id}/evidence`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          statement: evidenceStatement.trim(),
+          evidenceAssetIds: extraEvidenceAssetIds,
+        }),
+      })
+      await parseApiResponse(res)
+      setEvidenceOpen(false)
+      setEvidenceStatement('')
+      setExtraEvidenceAssetIds([])
+      await loadJob()
+      toast({ title: 'Evidence submitted', description: 'Admin will review all materials.' })
+    } catch (err) {
+      toast({
+        title: 'Failed to submit evidence',
+        description: err instanceof Error ? err.message : 'Unknown',
+        variant: 'destructive',
+      })
+    } finally {
+      setActing(false)
+    }
+  }
+
+  async function handleFund() {
+    setActing(true)
+    try {
+      const funded = await fundMarketplaceJob(id)
+      if (funded.redirected) {
+        toast({
+          title: 'Finish payment',
+          description: 'Redirecting to Stripe Checkout.',
+        })
+        return
+      }
+      await loadJob()
+      toast({ title: 'Bounty funded', description: 'Analysts can now claim it.' })
+    } catch (err) {
+      toast({
+        title: 'Funding failed',
+        description: err instanceof Error ? err.message : 'Unknown',
+        variant: 'destructive',
+      })
+    } finally {
+      setActing(false)
+    }
+  }
 
   async function postAction(path: string, body?: Record<string, unknown>) {
     setActing(true)
@@ -155,6 +299,7 @@ export default function JobDetailPage({ params }: { params: Promise<{ id: string
 
   const isFighter = user?.id === job.fighterId
   const isAnalyst = user?.id === job.analystId
+  const canFund = isFighter && job.status === 'CREATED'
   const canClaim =
     user &&
     !isFighter &&
@@ -168,6 +313,16 @@ export default function JobDetailPage({ params }: { params: Promise<{ id: string
   const canDispute =
     (isFighter || isAnalyst) &&
     ['IN_PROGRESS', 'SUBMITTED', 'APPROVED', 'RELEASED'].includes(job.status)
+  const canAddDisputeEvidence =
+    job.status === 'DISPUTED' &&
+    activeDispute &&
+    ['OPEN', 'UNDER_REVIEW'].includes(activeDispute.status) &&
+    (isFighter || isAnalyst)
+  const isDisputeCounterparty =
+    activeDispute &&
+    user &&
+    user.id !== activeDispute.openedById &&
+    (user.id === job.fighterId || user.id === job.analystId)
   const canReview = isFighter && ['RELEASED', 'RESOLVED_RELEASE', 'RESOLVED_SPLIT'].includes(job.status)
 
   return (
@@ -217,39 +372,50 @@ export default function JobDetailPage({ params }: { params: Promise<{ id: string
             <div>
               <h3 className="text-sm font-semibold mb-2 flex items-center gap-1">
                 <Video className="h-4 w-4" />
-                Videos ({job.videos.length})
+                {job.scoutingRequestId ? 'Footage for review' : 'Your clip'} ({job.videos.length})
               </h3>
-              <ul className="space-y-1">
-                {job.videos.map((v, i) => (
-                  <li key={i}>
+              <div className="space-y-4">
+                {job.videos.map((v, i) =>
+                  isLikelyVideoRef(v) ? (
+                    <CoachFeedbackVideo
+                      key={i}
+                      src={v}
+                      title={job.videos.length > 1 ? `Clip ${i + 1}` : undefined}
+                    />
+                  ) : (
                     <a
-                      href={v}
+                      key={i}
+                      href={resolveAssetHref(v)}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="text-sm text-primary hover:underline break-all"
+                      className="text-sm text-primary hover:underline break-all block"
                     >
-                      {v}
+                      {displayAssetLabel(v)}
                     </a>
-                  </li>
-                ))}
-              </ul>
+                  ),
+                )}
+              </div>
             </div>
           )}
 
           {job.deliverableUrl && (
-            <div className="rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3">
-              <h3 className="text-sm font-semibold mb-1 flex items-center gap-1 text-emerald-600">
+            <div className="rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3 space-y-3">
+              <h3 className="text-sm font-semibold flex items-center gap-1 text-emerald-600">
                 <CheckCircle2 className="h-4 w-4" />
-                Deliverable submitted
+                Coach video feedback
               </h3>
-              <a
-                href={job.deliverableUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-sm text-primary hover:underline break-all"
-              >
-                {job.deliverableUrl}
-              </a>
+              {isLikelyVideoRef(job.deliverableUrl) ? (
+                <CoachFeedbackVideo src={job.deliverableUrl} />
+              ) : (
+                <a
+                  href={resolveAssetHref(job.deliverableUrl)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-sm text-primary hover:underline break-all"
+                >
+                  {displayAssetLabel(job.deliverableUrl)}
+                </a>
+              )}
               {job.deliverableNotes && (
                 <p className="text-sm text-muted-foreground mt-2 whitespace-pre-wrap">
                   {job.deliverableNotes}
@@ -264,10 +430,40 @@ export default function JobDetailPage({ params }: { params: Promise<{ id: string
             </div>
           )}
 
+          {job.status === 'DISPUTED' && activeDispute && (
+            <div className="rounded-md border border-amber-500/40 bg-amber-500/5 p-3 space-y-2">
+              <h3 className="text-sm font-semibold flex items-center gap-1 text-amber-700 dark:text-amber-400">
+                <Gavel className="h-4 w-4" />
+                Dispute in progress
+              </h3>
+              <p className="text-xs text-muted-foreground">
+                Reason: {activeDispute.reason.replace(/_/g, ' ')} · Status: {activeDispute.status}
+              </p>
+              <p className="text-sm whitespace-pre-wrap">{activeDispute.description}</p>
+              {activeDispute.counterStatement && (
+                <p className="text-sm whitespace-pre-wrap border-t border-border/50 pt-2">
+                  <span className="font-medium">Response: </span>
+                  {activeDispute.counterStatement}
+                </p>
+              )}
+            </div>
+          )}
+
           <Separator />
 
           {/* Action row */}
           <div className="flex flex-wrap gap-2">
+            {fundingPoll && (
+              <div className="w-full rounded-md bg-muted/50 border border-border/60 px-3 py-2 text-xs text-muted-foreground">
+                Confirming your Stripe payment…
+              </div>
+            )}
+            {canFund && (
+              <Button onClick={handleFund} disabled={acting || fundingPoll}>
+                <Coins className="h-4 w-4 mr-1" />
+                {fundingPoll ? 'Confirming payment…' : 'Complete payment'}
+              </Button>
+            )}
             {canClaim && (
               <Button onClick={() => postAction('/claim')} disabled={acting}>
                 <Play className="h-4 w-4 mr-1" />
@@ -284,22 +480,37 @@ export default function JobDetailPage({ params }: { params: Promise<{ id: string
                 <DialogTrigger asChild>
                   <Button disabled={acting}>
                     <Send className="h-4 w-4 mr-1" />
-                    Submit deliverable
+                    Send video feedback
                   </Button>
                 </DialogTrigger>
                 <DialogContent>
                   <DialogHeader>
-                    <DialogTitle>Submit your analysis</DialogTitle>
+                    <DialogTitle>Send video feedback to fighter</DialogTitle>
                     <DialogDescription>
-                      Paste a shareable link to your breakdown. Notes are optional.
+                      Upload a video breakdown (preferred) with your coaching notes. The fighter watches it before approving payment.
                     </DialogDescription>
                   </DialogHeader>
                   <div className="space-y-3 py-2">
+                    <UploadDropzone
+                      purpose="deliverable"
+                      accept="video/mp4,video/quicktime,video/webm,application/pdf,text/plain,text/markdown"
+                      label="Upload video breakdown"
+                      hint="Video preferred — MP4, MOV, or WebM up to 500 MB."
+                      jobId={job.id}
+                      onUploaded={(asset) => {
+                        setDeliverableAssetId(asset.id)
+                        setDeliverableUrl('')
+                      }}
+                      onRemoved={() => setDeliverableAssetId(null)}
+                    />
                     <div>
-                      <label className="text-sm font-medium mb-1 block">Deliverable URL</label>
+                      <label className="text-sm font-medium mb-1 block">Or paste a URL</label>
                       <Input
                         value={deliverableUrl}
-                        onChange={(e) => setDeliverableUrl(e.target.value)}
+                        onChange={(e) => {
+                          setDeliverableUrl(e.target.value)
+                          if (e.target.value.trim()) setDeliverableAssetId(null)
+                        }}
                         placeholder="https://..."
                       />
                     </div>
@@ -316,15 +527,16 @@ export default function JobDetailPage({ params }: { params: Promise<{ id: string
                   <DialogFooter>
                     <Button variant="outline" onClick={() => setSubmitOpen(false)}>Cancel</Button>
                     <Button
-                      disabled={acting || !deliverableUrl.trim()}
+                      disabled={acting || (!deliverableUrl.trim() && !deliverableAssetId)}
                       onClick={async () => {
                         const ok = await postAction('/submit', {
-                          deliverableUrl: deliverableUrl.trim(),
+                          deliverableUrl: deliverableUrl.trim() || undefined,
+                          deliverableAssetId: deliverableAssetId || undefined,
                           deliverableNotes,
                         })
                         if (ok) {
                           setSubmitOpen(false)
-                          toast({ title: 'Delivered', description: 'Fighter has 72h to approve.' })
+                          toast({ title: 'Video sent', description: 'Fighter has 72h to watch and approve.' })
                         }
                       }}
                     >
@@ -360,6 +572,70 @@ export default function JobDetailPage({ params }: { params: Promise<{ id: string
                 Cancel
               </Button>
             )}
+            {canAddDisputeEvidence && (
+              <Dialog open={evidenceOpen} onOpenChange={setEvidenceOpen}>
+                <DialogTrigger asChild>
+                  <Button variant="outline" disabled={acting}>
+                    <Gavel className="h-4 w-4 mr-1" />
+                    {isDisputeCounterparty && !activeDispute?.counterStatement
+                      ? 'Respond to dispute'
+                      : 'Add evidence'}
+                  </Button>
+                </DialogTrigger>
+                <DialogContent>
+                  <DialogHeader>
+                    <DialogTitle>
+                      {isDisputeCounterparty && !activeDispute?.counterStatement
+                        ? 'Submit your response'
+                        : 'Add dispute evidence'}
+                    </DialogTitle>
+                    <DialogDescription>
+                      Upload files or add a statement. Admin reviews both sides before resolving.
+                    </DialogDescription>
+                  </DialogHeader>
+                  <div className="space-y-3 py-2">
+                    <UploadDropzone
+                      purpose="dispute_evidence"
+                      accept="image/jpeg,image/png,image/webp,application/pdf,video/mp4,video/quicktime,video/webm,text/plain"
+                      label="Upload evidence"
+                      hint="Images, PDF, or video up to 500 MB."
+                      jobId={job.id}
+                      onUploaded={(asset) =>
+                        setExtraEvidenceAssetIds((prev) => [...prev, asset.id])
+                      }
+                      onRemoved={(assetId) =>
+                        setExtraEvidenceAssetIds((prev) => prev.filter((x) => x !== assetId))
+                      }
+                    />
+                    <div>
+                      <label className="text-sm font-medium mb-1 block">
+                        {isDisputeCounterparty && !activeDispute?.counterStatement
+                          ? 'Your statement'
+                          : 'Additional notes'}
+                      </label>
+                      <Textarea
+                        value={evidenceStatement}
+                        onChange={(e) => setEvidenceStatement(e.target.value)}
+                        rows={4}
+                        placeholder="Explain your side..."
+                      />
+                    </div>
+                  </div>
+                  <DialogFooter>
+                    <Button variant="outline" onClick={() => setEvidenceOpen(false)}>Cancel</Button>
+                    <Button
+                      disabled={
+                        acting ||
+                        (!evidenceStatement.trim() && extraEvidenceAssetIds.length === 0)
+                      }
+                      onClick={handleAddEvidence}
+                    >
+                      Submit
+                    </Button>
+                  </DialogFooter>
+                </DialogContent>
+              </Dialog>
+            )}
             {canDispute && (
               <Dialog open={disputeOpen} onOpenChange={setDisputeOpen}>
                 <DialogTrigger asChild>
@@ -393,6 +669,21 @@ export default function JobDetailPage({ params }: { params: Promise<{ id: string
                       </Select>
                     </div>
                     <div>
+                      <label className="text-sm font-medium mb-1 block">Evidence (optional)</label>
+                      <UploadDropzone
+                        purpose="dispute_evidence"
+                        accept="image/jpeg,image/png,image/webp,application/pdf,video/mp4,video/webm,text/plain"
+                        label="Upload evidence files"
+                        jobId={job.id}
+                        onUploaded={(asset) =>
+                          setDisputeEvidenceAssetIds((prev) => [...prev, asset.id])
+                        }
+                        onRemoved={(assetId) =>
+                          setDisputeEvidenceAssetIds((prev) => prev.filter((id) => id !== assetId))
+                        }
+                      />
+                    </div>
+                    <div>
                       <label className="text-sm font-medium mb-1 block">Description</label>
                       <Textarea
                         value={disputeDescription}
@@ -410,6 +701,7 @@ export default function JobDetailPage({ params }: { params: Promise<{ id: string
                         const ok = await postAction('/dispute', {
                           reason: disputeReason,
                           description: disputeDescription.trim(),
+                          evidenceAssetIds: disputeEvidenceAssetIds,
                         })
                         if (ok) {
                           setDisputeOpen(false)

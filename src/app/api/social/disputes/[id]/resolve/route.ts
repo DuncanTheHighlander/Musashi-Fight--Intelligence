@@ -20,6 +20,11 @@ import { getDb } from '@/lib/marketplace/types'
 import type { MarketplaceDisputeRow, MarketplaceJobRow } from '@/lib/marketplace/types'
 import { applyTransition, recordAnalystPayoutStats } from '@/lib/marketplace/jobs'
 import { recordRefund, recordRelease, recordSplit } from '@/lib/marketplace/ledger'
+import {
+  executeJobRefundMoneyMovement,
+  executeJobReleaseMoneyMovement,
+  executeJobSplitMoneyMovement,
+} from '@/lib/marketplace/moneyMovement'
 
 type Params = { id: string }
 
@@ -79,6 +84,14 @@ export async function POST(req: Request, context: { params: Promise<Params> }) {
         )
         .bind(admin.id, now, notes, now, id)
         .run()
+      try {
+        await executeJobRefundMoneyMovement(db, job.id)
+      } catch (e) {
+        return NextResponse.json({
+          status: 'RESOLVED_REFUND',
+          paymentWarning: e instanceof Error ? e.message : 'Refund provider failed',
+        })
+      }
       return NextResponse.json({ status: 'RESOLVED_REFUND' })
     }
 
@@ -111,6 +124,14 @@ export async function POST(req: Request, context: { params: Promise<Params> }) {
         )
         .bind(admin.id, now, notes, now, id)
         .run()
+      try {
+        await executeJobReleaseMoneyMovement(db, job.id)
+      } catch (e) {
+        return NextResponse.json({
+          status: 'RESOLVED_RELEASE',
+          paymentWarning: e instanceof Error ? e.message : 'Payout provider failed',
+        })
+      }
       return NextResponse.json({ status: 'RESOLVED_RELEASE' })
     }
 
@@ -152,6 +173,17 @@ export async function POST(req: Request, context: { params: Promise<Params> }) {
         )
         .bind(admin.id, now, notes, refundAmountCents, analystNetCents, now, id)
         .run()
+      try {
+        await executeJobSplitMoneyMovement(db, job.id)
+      } catch (e) {
+        return NextResponse.json({
+          status: 'RESOLVED_SPLIT',
+          refundAmountCents,
+          payoutAmountCents: analystNetCents,
+          platformFeeCents,
+          paymentWarning: e instanceof Error ? e.message : 'Split payout provider failed',
+        })
+      }
       return NextResponse.json({
         status: 'RESOLVED_SPLIT',
         refundAmountCents,
@@ -190,6 +222,14 @@ export async function POST(req: Request, context: { params: Promise<Params> }) {
         )
         .bind(admin.id, now, notes, now, id)
         .run()
+      try {
+        await executeJobReleaseMoneyMovement(db, job.id)
+      } catch (e) {
+        return NextResponse.json({
+          status: 'DISMISSED',
+          paymentWarning: e instanceof Error ? e.message : 'Payout provider failed',
+        })
+      }
       return NextResponse.json({ status: 'DISMISSED' })
     }
 

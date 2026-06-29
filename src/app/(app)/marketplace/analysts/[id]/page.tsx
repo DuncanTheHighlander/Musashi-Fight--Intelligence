@@ -18,6 +18,7 @@ import { useAuth } from '@/hooks/useAuth'
 import { useToast } from '@/hooks/use-toast'
 import { parseApiResponse } from '@/lib/safeJson'
 import { formatCents } from '@/lib/currency'
+import { fundMarketplaceJob } from '@/lib/marketplace/fundClient'
 import {
   ArrowLeft, CheckCircle2, Sparkles, Star, Clock, Briefcase,
 } from 'lucide-react'
@@ -117,11 +118,14 @@ export default function AnalystProfilePage({ params }: { params: Promise<{ id: s
         }),
       })
       const created = await parseApiResponse<{ job: { id: string } }>(createRes)
-      const fundRes = await fetch(`/api/social/jobs/${created.job.id}/fund`, {
-        method: 'POST',
-        credentials: 'include',
-      })
-      await parseApiResponse(fundRes)
+      const funded = await fundMarketplaceJob(created.job.id)
+      if (funded.redirected) {
+        toast({
+          title: 'Finish payment',
+          description: 'Redirecting to Stripe Checkout.',
+        })
+        return
+      }
       toast({ title: 'Direct hire created' })
       router.push(`/marketplace/jobs/${created.job.id}`)
     } catch (err) {

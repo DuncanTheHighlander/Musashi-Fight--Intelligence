@@ -94,6 +94,27 @@ When you hit a quota, the UI shows a polished card (auth required / rate-limited
 - **Supported Formats**: MP4, MOV, WebM
 - **Frame Rate**: Processes at 5 FPS for analysis
 
+### Labeling workflow (detector tuning loop)
+
+Human corrections from FightLang compile into a labeled dataset used to tune heuristic detectors (not Gemini fine-tuning).
+
+1. **Analyze** — Run a clip in Fight Lab; the compile saves a ledger automatically (requires D1: `pnpm dev:d1` or deployed Workers).
+2. **Review** — Open [`/review`](http://localhost:3000/review); confirm, reject, or relabel each event/fault/pattern.
+3. **Export** — Click **Export dataset** (or `GET /api/fight/ledgers/export`) to download `musashi-corrections-YYYY-MM-DD.jsonl`.
+4. **Analyze corrections** — Run the tuning helper on the export:
+
+```bash
+pnpm analyze:corrections path/to/musashi-corrections-2026-06-23.jsonl
+# machine-readable summary:
+pnpm analyze:corrections --json path/to/export.jsonl
+# smoke test on bundled sample data:
+pnpm analyze:corrections:fixture
+```
+
+The report summarizes confirm/reject/relabel rates, top misclassification pairs, and suggests concrete edits in `src/lib/fightlang/fightlang.defaults.ts`, `src/lib/compiler/detectors/strikes.ts`, and related compiler gates.
+
+**Database:** Ledger tables ship in migration `migrations/0018_ledger_corrections.sql`. Apply with the normal chain: `pnpm db:migrate:local` (local D1) or `pnpm db:migrate:remote` (production). Verify the full chain with `node scripts/test-migrations.mjs`.
+
 ## Project Structure
 
 ```

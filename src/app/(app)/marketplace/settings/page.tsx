@@ -5,6 +5,7 @@
  */
 
 import { useCallback, useEffect, useState } from 'react'
+import { useSearchParams } from 'next/navigation'
 import Link from 'next/link'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -16,7 +17,7 @@ import { useAuth } from '@/hooks/useAuth'
 import { useToast } from '@/hooks/use-toast'
 import { parseApiResponse } from '@/lib/safeJson'
 import { formatCents, centsFromDollars, dollarsFromCents } from '@/lib/currency'
-import { ArrowLeft, Save } from 'lucide-react'
+import { ArrowLeft, Save, ExternalLink, RefreshCw } from 'lucide-react'
 import { BeltBadge, type BeltTier } from '@/components/marketplace/BeltBadge'
 
 type Profile = {
@@ -39,13 +40,16 @@ type Profile = {
   currentCapacity: number
   maxCapacity: number
   stripePayoutsEnabled: boolean
+  stripeConnectId: string | null
 }
 
 export default function AnalystSettingsPage() {
+  const searchParams = useSearchParams()
   const { user, loading: authLoading } = useAuth()
   const { toast } = useToast()
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
+  const [connectLoading, setConnectLoading] = useState(false)
   const [profile, setProfile] = useState<Profile | null>(null)
 
   // Form state (initialized from profile once loaded)
@@ -83,6 +87,61 @@ export default function AnalystSettingsPage() {
   }, [toast])
 
   useEffect(() => { if (!authLoading && user) load() }, [authLoading, user, load])
+
+  useEffect(() => {
+    const connect = searchParams.get('connect')
+    if (connect === 'return' || connect === 'refresh') {
+      void refreshConnect()
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams])
+
+  async function refreshConnect() {
+    setConnectLoading(true)
+    try {
+      const res = await fetch('/api/social/analyst/connect/refresh', {
+        method: 'POST',
+        credentials: 'include',
+      })
+      const data = await parseApiResponse<{
+        stripePayoutsEnabled: boolean
+      }>(res)
+      toast({
+        title: data.stripePayoutsEnabled ? 'Payouts enabled' : 'Connect onboarding incomplete',
+        description: data.stripePayoutsEnabled
+          ? 'You can now enable direct hire in Stripe mode.'
+          : 'Finish Stripe Connect setup to receive payouts.',
+      })
+      await load()
+    } catch (err) {
+      toast({
+        title: 'Connect refresh failed',
+        description: err instanceof Error ? err.message : 'Unknown',
+        variant: 'destructive',
+      })
+    } finally {
+      setConnectLoading(false)
+    }
+  }
+
+  async function startConnect() {
+    setConnectLoading(true)
+    try {
+      const res = await fetch('/api/social/analyst/connect/onboard', {
+        method: 'POST',
+        credentials: 'include',
+      })
+      const data = await parseApiResponse<{ onboardingUrl: string }>(res)
+      window.location.assign(data.onboardingUrl)
+    } catch (err) {
+      toast({
+        title: 'Connect onboarding unavailable',
+        description: err instanceof Error ? err.message : 'Unknown',
+        variant: 'destructive',
+      })
+      setConnectLoading(false)
+    }
+  }
 
   async function save() {
     setSaving(true)
@@ -244,9 +303,56 @@ export default function AnalystSettingsPage() {
                 </div>
               )}
 
-              <div className="rounded-md bg-amber-500/10 border border-amber-500/30 p-3 text-xs text-amber-700 dark:text-amber-400">
-                <strong>Payouts:</strong> Stripe Connect onboarding isn&apos;t wired yet. Your earnings
-                accumulate in the ledger and will be paid out once Connect is live.
+              <div className="rounded-md border border-border/60 bg-muted/20 p-4 space-y-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-medium">Stripe Connect payouts</p>
+                    <p className="text-xs text-muted-foreground">
+                      {profile.stripePayoutsEnabled
+                        ? 'Payouts are enabled for your connected account.'
+                        : profile.stripeConnectId
+                          ? 'Connect account created — finish onboarding to receive payouts.'
+                          : 'Required for direct hire and analyst payouts when Stripe mode is on.'}
+                    </p>
+                  </div>
+                  <span
+                    className={`text-xs font-semibold px-2 py-1 rounded-full ${
+                      profile.stripePayoutsEnabled
+                        ? 'bg-emerald-500/15 text-emerald-600'
+                        : 'bg-amber-500/15 text-amber-700 dark:text-amber-400'
+                    }`}
+                  >
+                    {profile.stripePayoutsEnabled ? 'Ready' : 'Setup needed'}
+                  </span>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={connectLoading}
+                    onClick={() => void startConnect()}
+                  >
+                    <ExternalLink className="h-4 w-4 mr-1" />
+                    {profile.stripeConnectId ? 'Continue Connect setup' : 'Start Connect onboarding'}
+                  </Button>
+                  {profile.stripeConnectId && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      disabled={connectLoading}
+                      onClick={() => void refreshConnect()}
+                    >
+                      <RefreshCw className={`h-4 w-4 mr-1 ${connectLoading ? 'animate-spin' : ''}`} />
+                      Refresh status
+                    </Button>
+                  )}
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  In mock payment mode (`MUSASHI_MARKETPLACE_PAYMENTS=mock`), earnings stay in the
+                  ledger with no real payout. Switch to Stripe mode in production.
+                </p>
               </div>
 
               <div className="flex justify-end">

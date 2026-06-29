@@ -11,7 +11,7 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { getCurrentUser } from '@/lib/musashiAuth'
-import { createApiClient } from '@/lib/apiClient'
+import { createApiClient, resolveApiClientKey } from '@/lib/apiClient'
 
 // Rate limiting storage (in production, use Redis or database)
 const rateLimitStore = new Map<string, { count: number; resetTime: number }>()
@@ -117,14 +117,14 @@ export async function POST(
       return NextResponse.json({ error: 'Rate limit exceeded' }, { status: 429 })
     }
 
-    // Get API key
-    const apiKey = config.apiKeyEnv ? process.env[config.apiKeyEnv] : undefined
+    // Get API key (Secrets Store in production, .dev.vars locally)
+    const apiKey = config.apiKeyEnv ? await resolveApiClientKey(config.apiKeyEnv) : undefined
     if (!apiKey && config.apiKeyEnv) {
       return NextResponse.json({ error: 'Service not configured' }, { status: 500 })
     }
 
     // Create client and make request
-    const client = createApiClient(service, config.baseUrl, config.apiKeyEnv)
+    const client = await createApiClient(service, config.baseUrl, config.apiKeyEnv)
     
     const body = req.body ? await req.json() : undefined
     const response = await client.post(endpoint, body)
@@ -174,14 +174,14 @@ export async function GET(
       return NextResponse.json({ error: 'Rate limit exceeded' }, { status: 429 })
     }
 
-    // Get API key
-    const apiKey = config.apiKeyEnv ? process.env[config.apiKeyEnv] : undefined
+    // Get API key (Secrets Store in production, .dev.vars locally)
+    const apiKey = config.apiKeyEnv ? await resolveApiClientKey(config.apiKeyEnv) : undefined
     if (!apiKey && config.apiKeyEnv) {
       return NextResponse.json({ error: 'Service not configured' }, { status: 500 })
     }
 
     // Create client and make request
-    const client = createApiClient(service, config.baseUrl, config.apiKeyEnv)
+    const client = await createApiClient(service, config.baseUrl, config.apiKeyEnv)
     
     const url = new URL(req.url)
     const queryParams = Object.fromEntries(url.searchParams)

@@ -13,7 +13,7 @@
 ## File Structure
 
 - Create `migrations/0021_launch_critical_api_wiring.sql`
-  - Adds `marketplace_assets`, `auth_email_tokens`, user email/session hardening columns, and indexes.
+- Adds `marketplace_assets`, `auth_email_tokens`, user email hardening columns, and indexes.
 - Create `src/lib/stripe/stripeClient.ts`
   - Shared Stripe REST helper with API version, idempotency, form encoding, and sanitized errors.
 - Create `src/lib/stripe/stripeClient.test.ts`
@@ -96,8 +96,6 @@
 
 ALTER TABLE musashi_users ADD COLUMN email_verified_at TEXT;
 ALTER TABLE musashi_users ADD COLUMN password_updated_at TEXT;
-
-ALTER TABLE musashi_sessions ADD COLUMN created_at TEXT;
 
 CREATE TABLE IF NOT EXISTS auth_email_tokens (
   id TEXT PRIMARY KEY,

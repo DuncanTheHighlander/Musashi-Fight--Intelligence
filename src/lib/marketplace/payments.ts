@@ -1,3 +1,4 @@
+import { getStripeSecretKey } from '@/lib/stripe/getStripeSecretKey'
 import type { MarketplaceJobRow } from './types'
 
 export type MarketplacePaymentMode = 'mock' | 'stripe'
@@ -43,10 +44,13 @@ const stripeRequest = async (
   return data
 }
 
-export function resolveMarketplacePaymentMode(): MarketplacePaymentMode {
-  return String(process.env.MUSASHI_MARKETPLACE_PAYMENTS || 'mock').toLowerCase() === 'stripe'
-    ? 'stripe'
-    : 'mock'
+export async function resolveMarketplacePaymentMode(): Promise<MarketplacePaymentMode> {
+  const forced = String(process.env.MUSASHI_MARKETPLACE_PAYMENTS || 'mock').toLowerCase()
+  if (forced !== 'stripe') return 'mock'
+  if (await getStripeSecretKey()) return 'stripe'
+  // Production must fail loudly if stripe mode is set without keys.
+  if (process.env.NODE_ENV === 'production') return 'stripe'
+  return 'mock'
 }
 
 export function mockMarketplaceFundingSession(): MarketplaceFundingSession {
@@ -66,7 +70,7 @@ export async function createMarketplaceCheckoutSession(args: {
   successUrl?: string | null
   cancelUrl?: string | null
 }): Promise<MarketplaceFundingSession> {
-  const secretKey = process.env.STRIPE_SECRET_KEY
+  const secretKey = await getStripeSecretKey()
   if (!secretKey) throw new Error('STRIPE_NOT_CONFIGURED')
 
   const origin = new URL(args.req.url).origin

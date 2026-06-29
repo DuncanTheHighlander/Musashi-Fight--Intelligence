@@ -1,7 +1,12 @@
 import { NextResponse } from 'next/server'
-import { aiGuard } from '@/lib/ai/aiGuard'
-import { enforceUsage } from '@/lib/musashiUsage'
-import type { MusashiUser } from '@/lib/musashiAuth'
+import { aiGuard, aiErrorResponse } from '@/lib/ai/aiGuard'
+import {
+  enforceVideoAnalysis,
+  extractFightVideoQuotaContext,
+  fightActionConsumesVideoQuota,
+  fightActionToQuotaBucket,
+} from '@/lib/musashiUsage'
+import { requireUser, type MusashiUser } from '@/lib/musashiAuth'
 import { composeSystemPrompt, DEFAULT_PROMPTS } from '@/lib/aiClient'
 import { getDisciplinePrompt } from '@/lib/disciplinePrompts'
 import {
@@ -3087,24 +3092,6 @@ export async function POST(req: Request) {
       })
     }
 
-    const guard = await aiGuard(req, 'chat')
-    if (!guard.ok) return guard.response
-
-    let user: MusashiUser | null = guard.user
-    if (!user && process.env.MUSASHI_DISABLE_AUTH === '1') {
-      user = {
-        id: 'dev',
-        email: 'dev@local',
-        display_name: null,
-        role: 'shogun',
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      }
-    }
-    if (!user) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-    }
-
     const contentType = req.headers.get('content-type') || ''
 
     // Guardrail: prevent OOM from very large multipart bodies before parsing formData()
@@ -3142,6 +3129,39 @@ export async function POST(req: Request) {
 
     if (!action) {
       return NextResponse.json({ error: 'Missing action parameter' }, { status: 400 })
+    }
+
+    const quotaBucket = fightActionToQuotaBucket(action)
+    const guard = await aiGuard(req, quotaBucket)
+    if (!guard.ok) return guard.response
+
+    let user: MusashiUser | null = guard.user
+    if (!user && process.env.MUSASHI_DISABLE_AUTH === '1') {
+      user = {
+        id: 'dev',
+        email: 'dev@local',
+        display_name: null,
+        role: 'shogun',
+        emailVerifiedAt: null,
+        passwordUpdatedAt: null,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      }
+    }
+    if (!user) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    }
+
+    if (fightActionConsumesVideoQuota(action, body)) {
+      const videoCtx = extractFightVideoQuotaContext(action, body, formData)
+      if (!videoCtx) {
+        return aiErrorResponse(new Error('VIDEO_CONTEXT_REQUIRED'))
+      }
+      try {
+        await enforceVideoAnalysis(user.id, user.role, videoCtx)
+      } catch (err) {
+        return aiErrorResponse(err)
+      }
     }
 
     // Streaming actions return a Response directly — bypass the JSON wrapper below
@@ -3283,7 +3303,21 @@ export async function POST(req: Request) {
 // GET endpoint for session status and real-time data
 export async function GET(req: Request) {
   try {
-    const user = await enforceUsage(req, 'chat')
+    let user: MusashiUser
+    if (process.env.MUSASHI_DISABLE_AUTH === '1') {
+      user = {
+        id: 'dev',
+        email: 'dev@local',
+        display_name: null,
+        role: 'shogun',
+        emailVerifiedAt: null,
+        passwordUpdatedAt: null,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      }
+    } else {
+      user = await requireUser(req)
+    }
     const { searchParams } = new URL(req.url)
     const sessionId = searchParams.get('sessionId')
     const action = searchParams.get('action')

@@ -201,7 +201,7 @@ export async function createJob(
 
   // Direct-hire preflight: analyst must be enabled, tier-eligible, and have capacity.
   let requiredBelt = input.requiredBeltTier ?? 'white'
-  let feeBps = 1500
+  let feeBps = 2000 // flat 20% platform commission
   if (input.jobType === 'direct_hire') {
     if (!input.analystId) throw new Error('direct_hire requires analystId')
     const analyst = await fetchAnalystProfile(db, input.analystId)
@@ -329,7 +329,7 @@ export async function applyTransition(
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// FUND (ledger-first Stripe stub)
+// FUND (mock immediate; stripe completes via Checkout webhook)
 // ──────────────────────────────────────────────────────────────────────────
 export async function preflightFundJob(
   db: D1Database,

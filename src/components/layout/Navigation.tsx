@@ -42,7 +42,7 @@ const ALL_NAV_ITEMS: { section: AppSection; label: string; icon: typeof Brain; d
 ]
 
 const ALL_ROUTED_NAV_ITEMS: { href: string; label: string; icon: typeof Brain; description: string; preview?: boolean }[] = [
-  { href: '/marketplace', label: 'Marketplace', icon: ShoppingBag, description: 'Post a bounty or hire an analyst' },
+  { href: '/marketplace', label: 'Coaches', icon: ShoppingBag, description: 'Clip feedback & opponent scouting' },
 ]
 
 const PREVIEW_ENABLED = process.env.NEXT_PUBLIC_MUSASHI_PREVIEW_FEATURES === '1'

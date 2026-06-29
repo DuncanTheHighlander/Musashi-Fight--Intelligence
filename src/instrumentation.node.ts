@@ -7,10 +7,11 @@ import 'server-only'
 import { initLocalD1Binding } from '@/lib/localD1Binding'
 
 export async function registerNodeInstrumentation(): Promise<void> {
-  const { validateEnv } = await import('@/lib/env')
+  const { validateEnv, validateProductionSecrets } = await import('@/lib/env')
   const result = validateEnv()
+  const secretWarnings = await validateProductionSecrets()
 
-  for (const w of result.warnings) {
+  for (const w of [...result.warnings, ...secretWarnings]) {
     console.warn(`[Musashi] WARNING: ${w}`)
   }
 

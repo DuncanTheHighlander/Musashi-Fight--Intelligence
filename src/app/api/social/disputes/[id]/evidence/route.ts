@@ -13,6 +13,8 @@ import { NextResponse } from 'next/server'
 import { enforceUsage } from '@/lib/musashiUsage'
 import { getDb } from '@/lib/marketplace/types'
 import type { MarketplaceDisputeRow, MarketplaceJobRow } from '@/lib/marketplace/types'
+import { assertUploadedAssetsOwned } from '@/lib/storage/assets'
+import { toAssetRef } from '@/lib/storage/assetRef'
 
 type Params = { id: string }
 
@@ -33,12 +35,20 @@ export async function POST(req: Request, context: { params: Promise<Params> }) {
     const evidenceUrls = Array.isArray(body?.evidenceUrls)
       ? (body.evidenceUrls as unknown[]).map(String).filter(Boolean)
       : []
+    const evidenceAssetIds = Array.isArray(body?.evidenceAssetIds)
+      ? (body.evidenceAssetIds as unknown[]).map(String).filter(Boolean)
+      : []
 
-    if (!evidenceUrls.length && !statement) {
+    if (!evidenceUrls.length && !evidenceAssetIds.length && !statement) {
       return NextResponse.json({ error: 'statement or evidenceUrls required' }, { status: 400 })
     }
 
     const db = getDb()
+    if (evidenceAssetIds.length) {
+      await assertUploadedAssetsOwned(db, evidenceAssetIds, user.id, 'dispute_evidence')
+    }
+    const mergedEvidence = [...evidenceUrls, ...evidenceAssetIds.map(toAssetRef)]
+
     const dispute = await db
       .prepare('SELECT * FROM marketplace_disputes WHERE id = ?')
       .bind(id)
@@ -70,7 +80,7 @@ export async function POST(req: Request, context: { params: Promise<Params> }) {
       // Merge into counter fields
       let existing: string[] = []
       try { existing = JSON.parse(dispute.counter_evidence_urls || '[]') } catch {}
-      const merged = uniqMerge(existing, evidenceUrls)
+      const merged = uniqMerge(existing, mergedEvidence)
       await db
         .prepare(
           `UPDATE marketplace_disputes
@@ -86,7 +96,7 @@ export async function POST(req: Request, context: { params: Promise<Params> }) {
       // Merge into opener fields
       let existing: string[] = []
       try { existing = JSON.parse(dispute.evidence_urls || '[]') } catch {}
-      const merged = uniqMerge(existing, evidenceUrls)
+      const merged = uniqMerge(existing, mergedEvidence)
       await db
         .prepare(
           `UPDATE marketplace_disputes

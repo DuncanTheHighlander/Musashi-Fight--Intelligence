@@ -7,6 +7,7 @@
     "check:dev": "node scripts/check-dev-ready.mjs",
     "check:cloud-pose": "node scripts/check-cloud-pose-ready.mjs",
     "check:prod-env": "node scripts/check-prod-env.mjs --production",
+    "check:cf-env": "node scripts/check-prod-env.mjs --cloudflare",
     "prestart": "node scripts/check-prod-env.mjs --production",
     "dev": "cross-env NODE_OPTIONS=--max-old-space-size=3072 next dev -p 3000",
     "dev:turbo": "cross-env NODE_OPTIONS=--max-old-space-size=3072 next dev --turbopack -p 3000",
@@ -31,13 +32,15 @@
     "icons": "node scripts/generate-pwa-icons.mjs",
     "mobile:sync": "npm --prefix mobile run sync",
     "mobile:android": "npm --prefix mobile run android:open",
-    "predeploy": "node scripts/check-prod-env.mjs --production && pnpm test",
+    "predeploy": "node scripts/check-prod-env.mjs --cloudflare && pnpm test",
     "test:loop": "node scripts/qa-loop.mjs",
     "test:loop:e2e": "node scripts/qa-loop.mjs --e2e",
     "test:tracking": "node scripts/trackEval.mjs --compare tracking-eval-2026-06-11/baselines.json clip1=tracking-eval-2026-06-11/clip1_replay_v14.json clip2=tracking-eval-2026-06-11/clip2_replay_v14.json clip3=tracking-eval-2026-06-11/clip3_replay_v14.json",
     "fetch:rtm-model": "node scripts/fetch-rtmpose-model.mjs",
     "db:migrate:local": "wrangler d1 migrations apply musashi-db --local",
-    "db:migrate:remote": "wrangler d1 migrations apply musashi-db --remote"
+    "db:migrate:remote": "wrangler d1 migrations apply musashi-db --remote",
+    "analyze:corrections": "node scripts/analyze-corrections.mjs",
+    "analyze:corrections:fixture": "node scripts/analyze-corrections.mjs --fixture"
   },
   "dependencies": {
     "@google/generative-ai": "^0.21.0",

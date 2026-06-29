@@ -6,7 +6,7 @@ import {
   defaultDeliveryDeadlineAt,
 } from '../deadlines'
 import { createJob, fundJob, preflightFundJob } from '../jobs'
-import { getJobBalance } from '../ledger'
+import { fetchTransactionByIdempotencyKey, getJobBalance, markTransactionFailed } from '../ledger'
 import { createMockD1 } from '../mockD1'
 
 async function seedEnabledAnalyst(db: ReturnType<typeof createMockD1>, userId: string) {
@@ -118,7 +118,7 @@ describe('marketplace funding provider seam', () => {
       jobType: 'open_bounty',
       title: 'Preflight-only funding',
       brief: '',
-      amountCents: 2500,
+      amountCents: 5000,
       clientRequestId: 'test_preflight_funding',
     })
 
@@ -137,7 +137,7 @@ describe('marketplace funding provider seam', () => {
       jobType: 'open_bounty',
       title: 'Stripe completed funding',
       brief: '',
-      amountCents: 3500,
+      amountCents: 5000,
       clientRequestId: 'test_stripe_completed_funding',
     })
 
@@ -167,12 +167,33 @@ describe('createJob deadline defaults', () => {
       jobType: 'open_bounty',
       title: 'Bounty with deadline',
       brief: '',
-      amountCents: 2000,
+      amountCents: 5000,
       clientRequestId: 'test_claim_deadline_default',
     })
     expect(job.claim_deadline_at).toBeTruthy()
     const claimMs = Date.parse(job.claim_deadline_at!) - before
     expect(claimMs).toBeGreaterThanOrEqual(DEFAULT_CLAIM_DEADLINE_MS - 5000)
     expect(claimMs).toBeLessThanOrEqual(DEFAULT_CLAIM_DEADLINE_MS + 5000)
+  })
+})
+
+describe('marketplace transaction reconciliation helpers', () => {
+  test('marks pending transaction failed with sanitized reason', async () => {
+    const db = createMockD1()
+    const job = await createJob(db, {
+      fighterId: 'dev',
+      jobType: 'open_bounty',
+      title: 'Failed refund',
+      brief: '',
+      amountCents: 5000,
+      clientRequestId: 'test_failed_refund',
+    })
+    await fundJob(db, { jobId: job.id, actorUserId: 'dev' })
+
+    await markTransactionFailed(db, `job_${job.id}_hold`, 'card secret sk_test_123 failed')
+    const txn = await fetchTransactionByIdempotencyKey(db, `job_${job.id}_hold`)
+
+    expect(txn?.status).toBe('failed')
+    expect(txn?.failure_reason).not.toContain('sk_test_123')
   })
 })

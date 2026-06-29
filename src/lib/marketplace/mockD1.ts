@@ -190,3 +190,16 @@ export function getMockD1(): D1Database {
   if (!g[GLOBAL_KEY]) g[GLOBAL_KEY] = createMockD1()
   return g[GLOBAL_KEY]
 }
+
+/** Pin a specific in-memory DB for route-handler tests (avoids singleton drift). */
+export function pinMockD1(db: D1Database): void {
+  const g = globalThis as Record<string, unknown> & { [GLOBAL_KEY]?: D1Database }
+  g[GLOBAL_KEY] = db
+  ;(process.env as { DB?: D1Database }).DB = db
+}
+
+export function unpinMockD1(): void {
+  const g = globalThis as Record<string, unknown> & { [GLOBAL_KEY]?: D1Database }
+  delete g[GLOBAL_KEY]
+  delete (process.env as { DB?: D1Database }).DB
+}

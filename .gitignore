@@ -98,3 +98,6 @@ write-test.txt
 
 # RTMPose model binary — 55MB, reproducible from RTMPOSE_SETUP.md / OpenMMLab
 public/models/*.onnx
+
+# Stray local OAuth helper file
+.codex-wrangler-long-oauth-url.txt

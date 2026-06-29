@@ -48,7 +48,7 @@ export default function AdminDisputesPage() {
 
   const load = useCallback(async () => {
     try {
-      const res = await fetch('/api/social/disputes?status=OPEN', { credentials: 'include' })
+      const res = await fetch('/api/social/disputes?status=active', { credentials: 'include' })
       const data = await parseApiResponse<{ disputes: Dispute[] }>(res)
       setDisputes(data.disputes || [])
     } catch (err) {

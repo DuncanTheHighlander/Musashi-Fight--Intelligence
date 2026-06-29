@@ -7,19 +7,34 @@
  * call and run it from cron.
  */
 import { NextResponse } from 'next/server'
-import { enforceUsage } from '@/lib/musashiUsage'
+import { requireUser } from '@/lib/musashiAuth'
 import { getDb } from '@/lib/marketplace/types'
 import { approveJob, releaseJob } from '@/lib/marketplace/jobs'
+import { executeJobReleaseMoneyMovement } from '@/lib/marketplace/moneyMovement'
 
 type Params = { id: string }
 
 export async function POST(req: Request, context: { params: Promise<Params> }) {
   try {
-    const user = await enforceUsage(req, 'chat')
+    const user = await requireUser(req)
     const { id } = await context.params
     const db = getDb()
     await approveJob(db, { jobId: id, actorUserId: user.id })
     const job = await releaseJob(db, { jobId: id, actorUserId: user.id, autoReleased: false })
+    try {
+      await executeJobReleaseMoneyMovement(db, id)
+    } catch (e) {
+      return NextResponse.json(
+        {
+          jobId: job.id,
+          status: job.status,
+          releasedAt: job.released_at,
+          analystPayoutCents: job.analyst_payout_cents,
+          paymentWarning: e instanceof Error ? e.message : 'Payout provider failed',
+        },
+        { status: 200 },
+      )
+    }
     return NextResponse.json({
       jobId: job.id,
       status: job.status,

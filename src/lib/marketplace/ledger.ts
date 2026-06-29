@@ -151,18 +151,27 @@ export async function markTransactionSucceeded(
     .run()
 }
 
+/** Minimum platform commission per marketplace transaction (in cents). $10. */
+export const MIN_PLATFORM_FEE_CENTS = 1000
+
 /**
  * Compute fee split for a job. Returns integer cents (no float drift).
- *   platformFee = floor(amount * bps / 10_000)
+ *   platformFee = max(floor(amount * bps / 10_000), minFeeCents), capped at amount
  *   analystPayout = amount - platformFee
  */
-export function computeFeeSplit(amountCents: number, feeBps: number): {
+export function computeFeeSplit(
+  amountCents: number,
+  feeBps: number,
+  minFeeCents: number = MIN_PLATFORM_FEE_CENTS,
+): {
   platformFeeCents: number
   analystPayoutCents: number
 } {
   const amt = Math.max(0, Math.trunc(amountCents))
   const bps = Math.max(0, Math.trunc(feeBps))
-  const platformFeeCents = Math.floor((amt * bps) / 10_000)
+  const rawFeeCents = Math.floor((amt * bps) / 10_000)
+  const floorCents = Math.max(0, Math.trunc(minFeeCents))
+  const platformFeeCents = Math.min(amt, Math.max(rawFeeCents, floorCents))
   const analystPayoutCents = Math.max(0, amt - platformFeeCents)
   return { platformFeeCents, analystPayoutCents }
 }
@@ -348,6 +357,36 @@ export async function recordSplit(
  * Compute the current escrow balance for a job from succeeded rows.
  * Exposed mainly for admin dashboards + reconciliation jobs.
  */
+export async function fetchTransactionByIdempotencyKey(
+  db: D1Database,
+  idempotencyKey: string,
+): Promise<MarketplaceTransactionRow | null> {
+  return db
+    .prepare('SELECT * FROM marketplace_transactions WHERE idempotency_key = ?')
+    .bind(idempotencyKey)
+    .first<MarketplaceTransactionRow>()
+}
+
+const sanitizeProviderFailure = (reason: string): string =>
+  String(reason || 'Provider request failed')
+    .replace(/sk_(test|live)_[A-Za-z0-9_]+/g, 'sk_***')
+    .slice(0, 500)
+
+export async function markTransactionFailed(
+  db: D1Database,
+  idempotencyKey: string,
+  reason: string,
+): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE marketplace_transactions
+          SET status = 'failed', failure_reason = ?, updated_at = ?
+        WHERE idempotency_key = ?`,
+    )
+    .bind(sanitizeProviderFailure(reason), new Date().toISOString(), idempotencyKey)
+    .run()
+}
+
 export async function getJobBalance(
   db: D1Database,
   jobId: string,

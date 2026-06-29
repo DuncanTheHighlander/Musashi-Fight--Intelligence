@@ -1,5 +1,7 @@
 import { NextResponse } from 'next/server'
 import { readSecretEnv } from '@/lib/env'
+import { aiGuard, aiErrorResponse } from '@/lib/ai/aiGuard'
+import { enforceCloudPoseRateLimit } from '@/lib/musashiUsage'
 
 export const maxDuration = 300
 
@@ -95,7 +97,10 @@ async function callUpstream(args: {
   }
 }
 
-export async function GET() {
+export async function GET(request: Request) {
+  const guard = await aiGuard(request, 'track')
+  if (!guard.ok) return guard.response
+
   return NextResponse.json({
     success: true,
     configured: {
@@ -109,6 +114,17 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
+  const guard = await aiGuard(request, 'track')
+  if (!guard.ok) return guard.response
+
+  if (guard.user && process.env.MUSASHI_DISABLE_AUTH !== '1') {
+    try {
+      await enforceCloudPoseRateLimit(guard.user.id)
+    } catch (err) {
+      return aiErrorResponse(err)
+    }
+  }
+
   const contentType = request.headers.get('content-type') || ''
   if (!contentType.includes('multipart/form-data')) {
     return jsonError(400, 'Expected multipart/form-data with a video file.')

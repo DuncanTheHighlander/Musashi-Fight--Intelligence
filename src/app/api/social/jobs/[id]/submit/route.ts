@@ -4,29 +4,39 @@
  * Transition: IN_PROGRESS → SUBMITTED. Arms a 72h approval deadline.
  */
 import { NextResponse } from 'next/server'
-import { enforceUsage } from '@/lib/musashiUsage'
+import { requireUser } from '@/lib/musashiAuth'
 import { getDb } from '@/lib/marketplace/types'
 import { submitJob } from '@/lib/marketplace/jobs'
+import { assertUploadedAssetsOwned } from '@/lib/storage/assets'
+import { toAssetRef } from '@/lib/storage/assetRef'
 
 type Params = { id: string }
 
 export async function POST(req: Request, context: { params: Promise<Params> }) {
   try {
-    const user = await enforceUsage(req, 'chat')
+    const user = await requireUser(req)
     const { id } = await context.params
     const body = (await req.json()) as Record<string, unknown>
 
     const deliverableUrl = String(body?.deliverableUrl || '').trim()
+    const deliverableAssetId = String(body?.deliverableAssetId || '').trim()
     const deliverableNotes = String(body?.deliverableNotes || '').trim() || undefined
-    if (!deliverableUrl) {
-      return NextResponse.json({ error: 'deliverableUrl required' }, { status: 400 })
+
+    let resolvedDeliverableUrl = deliverableUrl
+    if (deliverableAssetId) {
+      const db = getDb()
+      await assertUploadedAssetsOwned(db, [deliverableAssetId], user.id, 'deliverable')
+      resolvedDeliverableUrl = toAssetRef(deliverableAssetId)
+    }
+    if (!resolvedDeliverableUrl) {
+      return NextResponse.json({ error: 'deliverableUrl or deliverableAssetId required' }, { status: 400 })
     }
 
     const db = getDb()
     const job = await submitJob(db, {
       jobId: id,
       analystId: user.id,
-      deliverableUrl,
+      deliverableUrl: resolvedDeliverableUrl,
       deliverableNotes,
     })
     return NextResponse.json({

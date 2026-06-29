@@ -1,4 +1,5 @@
 import { getDbOrNull } from '@/lib/db'
+import { requireUser } from '@/lib/musashiAuth'
 import { exportCorrectionDataset } from '@/lib/ledgerStore'
 
 /**
@@ -7,6 +8,16 @@ import { exportCorrectionDataset } from '@/lib/ledgerStore'
  * plus the human verdict. This is the training data for tuning detectors.
  */
 export async function GET(request: Request) {
+  try {
+    await requireUser(request, { role: 'shogun' })
+  } catch (e) {
+    const code = e instanceof Error ? e.message : 'UNKNOWN'
+    const status = code === 'UNAUTHORIZED' ? 401 : 403
+    return new Response(
+      JSON.stringify({ success: false, error: status === 401 ? 'Login required' : 'Forbidden' }),
+      { status, headers: { 'content-type': 'application/json' } },
+    )
+  }
   const db = getDbOrNull()
   if (!db) {
     return new Response(JSON.stringify({ success: false, error: 'Database not available' }), {

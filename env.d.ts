@@ -7,4 +7,17 @@ interface CloudflareEnv {
   VECTORIZE: VectorizeIndex
   AI: Ai
   WORKER_SELF_REFERENCE: Fetcher
+
+  /** Secrets Store: account secret "Ai" → GEMINI / AI API key */
+  SECRET_AI: SecretsStoreSecret
+  /** Secrets Store: account secret "Modal" */
+  SECRET_MODAL: SecretsStoreSecret
+  /** Secrets Store: account secret "revcat1" */
+  SECRET_REVCAT1: SecretsStoreSecret
+  /** Secrets Store: account secret "revcat2" */
+  SECRET_REVCAT2: SecretsStoreSecret
+  /** Secrets Store: account secret "Stripe" → STRIPE_SECRET_KEY */
+  SECRET_STRIPE: SecretsStoreSecret
+  /** Secrets Store: account secret "Supabase" */
+  SECRET_SUPABASE: SecretsStoreSecret
 }

@@ -241,9 +241,9 @@ export default function MarketplaceSection() {
       <SectionShell>
         <SectionHeader
           icon={Briefcase}
-          eyebrow="Coach marketplace"
-          title="Hire a fight analyst"
-          subtitle="Post a bounty, browse analysts, and get breakdowns delivered to your inbox."
+          eyebrow="Coach feedback"
+          title="Get video feedback from coaches"
+          subtitle="Upload a clip for technique review, or scout an opponent before your next fight."
         />
         <Card className="border-border/60 bg-card">
           <CardContent className="flex flex-col items-center gap-4 p-10 text-center sm:p-12">
@@ -251,17 +251,25 @@ export default function MarketplaceSection() {
               <Briefcase className="h-7 w-7" />
             </div>
             <div className="max-w-md space-y-2">
-              <CardTitle className="text-xl">Coach marketplace is live</CardTitle>
+              <CardTitle className="text-xl">Coaches send video breakdowns back</CardTitle>
               <CardDescription>
-                Post open bounties, browse verified analysts, and get fight breakdowns delivered.
+                Post your sparring clip or scout an opponent. Verified coaches analyze your footage and upload a video response.
               </CardDescription>
             </div>
-            <Button asChild size="lg" className="gap-2">
-              <Link href="/marketplace">
-                Open Marketplace
-                <ArrowRight className="h-4 w-4" />
-              </Link>
-            </Button>
+            <div className="flex flex-col sm:flex-row gap-2">
+              <Button asChild size="lg" className="gap-2">
+                <Link href="/marketplace/jobs/new">
+                  Review my clip
+                  <ArrowRight className="h-4 w-4" />
+                </Link>
+              </Button>
+              <Button asChild size="lg" variant="outline" className="gap-2">
+                <Link href="/marketplace/scout">
+                  Scout opponent
+                  <ArrowRight className="h-4 w-4" />
+                </Link>
+              </Button>
+            </div>
           </CardContent>
         </Card>
       </SectionShell>

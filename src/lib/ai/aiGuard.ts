@@ -182,6 +182,49 @@ export const aiErrorResponse = (err: unknown): NextResponse => {
     )
   }
 
+  if (message === 'VIDEO_DURATION_EXCEEDED') {
+    return errorResponse(
+      {
+        error: 'Clip exceeds your plan max length.',
+        code: 'VIDEO_DURATION_EXCEEDED',
+        hint: 'Free: 10s max. Pro: 30s max. Trim your clip or upgrade.',
+      },
+      402
+    )
+  }
+
+  if (message === 'FREE_VIDEO_QUOTA') {
+    return errorResponse(
+      {
+        error: 'Free video analysis limit reached.',
+        code: 'FREE_VIDEO_QUOTA',
+        hint: 'Free includes 1 AI video (10s max). Upgrade to Pro for weekly 30s clips. Marketplace stays available.',
+      },
+      402
+    )
+  }
+
+  if (message === 'WEEKLY_VIDEO_QUOTA') {
+    return errorResponse(
+      {
+        error: 'Weekly Pro video limit reached.',
+        code: 'WEEKLY_VIDEO_QUOTA',
+        hint: 'Pro includes 10 AI videos per week (30s max). Resets Monday UTC.',
+      },
+      402
+    )
+  }
+
+  if (message === 'VIDEO_CONTEXT_REQUIRED') {
+    return errorResponse(
+      {
+        error: 'Missing clip duration or clip id for video analysis.',
+        code: 'VIDEO_CONTEXT_REQUIRED',
+      },
+      400
+    )
+  }
+
   // requireUser throws plain "Unauthorized" or "Invalid session" strings.
   if (/unauthorized|invalid session|no session/i.test(message)) {
     return errorResponse({ error: 'Unauthorized', code: 'UNAUTHORIZED' }, 401)

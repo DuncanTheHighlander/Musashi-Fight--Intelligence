@@ -13,6 +13,7 @@
 
 import { safeParseResponse } from '@/lib/safeJson'
 import { readSecretEnv } from '@/lib/env'
+import { getServerSecret } from '@/lib/cloudflare/secrets'
 
 export interface ApiClientOptions {
   timeout?: number
@@ -165,12 +166,20 @@ export class SecureApiClient {
  * Pre-configured API clients for common services
  */
 
-// Stripe client (for billing)
-export const stripeClient = new SecureApiClient(
-  'https://api.stripe.com/v1',
-  readSecretEnv('STRIPE_SECRET_KEY'),
-  { timeout: 60000 } // Stripe can be slower
-)
+/** Resolve an API key from Secrets Store (production) or `.dev.vars` (local). */
+export async function resolveApiClientKey(apiKeyEnvVar?: string): Promise<string | undefined> {
+  if (!apiKeyEnvVar) return undefined
+  const fromStore = await getServerSecret(apiKeyEnvVar)
+  if (fromStore) return fromStore
+  return readSecretEnv(apiKeyEnvVar)
+}
+
+/** Stripe REST client — resolves key from Secrets Store binding SECRET_STRIPE. */
+export async function getStripeClient(): Promise<SecureApiClient> {
+  const apiKey = await resolveApiClientKey('STRIPE_SECRET_KEY')
+  if (!apiKey) throw new Error('STRIPE_NOT_CONFIGURED')
+  return new SecureApiClient('https://api.stripe.com/v1', apiKey, { timeout: 60000 })
+}
 
 // OpenAI client (if not using the built-in chat endpoint)
 export const openaiClient = new SecureApiClient(
@@ -224,13 +233,13 @@ export const storageClient = new SecureApiClient(
 /**
  * Utility function to create custom API clients
  */
-export function createApiClient(
+export async function createApiClient(
   serviceName: string,
   baseUrl: string,
   apiKeyEnvVar?: string
-): SecureApiClient {
-  const apiKey = apiKeyEnvVar ? process.env[apiKeyEnvVar] : undefined
-  
+): Promise<SecureApiClient> {
+  const apiKey = await resolveApiClientKey(apiKeyEnvVar)
+
   if (!apiKey && apiKeyEnvVar) {
     console.warn(`[API] ${serviceName}: Environment variable ${apiKeyEnvVar} not set`)
   }

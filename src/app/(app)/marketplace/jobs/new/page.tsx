@@ -3,15 +3,14 @@
 /**
  * /marketplace/jobs/new — post a bounty form.
  *
- * MVP flow:
- *   1. Fighter fills title + brief + budget + (optional) video URLs.
+ * Flow:
+ *   1. Fighter fills title + brief + budget + (optional) video.
  *   2. POST /api/social/jobs creates status=CREATED.
- *   3. Client immediately POSTs /fund which writes HOLD + flips to FUNDED.
- *      (Stripe call is stubbed — the ledger records pending_stripe.)
- *   4. Redirect to the job detail.
+ *   3. POST /fund — mock funds immediately; stripe redirects to Checkout.
+ *   4. Redirect to job detail (or Stripe).
  */
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { Button } from '@/components/ui/button'
@@ -25,11 +24,13 @@ import { useToast } from '@/hooks/use-toast'
 import { useAuth } from '@/hooks/useAuth'
 import { parseApiResponse } from '@/lib/safeJson'
 import { centsFromDollars, formatCents } from '@/lib/currency'
-import { ArrowLeft, Briefcase, Upload } from 'lucide-react'
+import { ArrowLeft, Video } from 'lucide-react'
 import { SectionHeader } from '@/components/ui/section-header'
 import type { BeltTier } from '@/components/marketplace/BeltBadge'
 import { platformFeeBps } from '@/lib/marketplace/beltTier'
 import { computeFeeSplit } from '@/lib/marketplace/ledger'
+import { UploadDropzone } from '@/components/marketplace/UploadDropzone'
+import { fundMarketplaceJob } from '@/lib/marketplace/fundClient'
 
 const BELT_OPTIONS: { value: BeltTier; label: string }[] = [
   { value: 'white',  label: 'Any coach' },
@@ -49,7 +50,27 @@ export default function NewJobPage() {
   const [budget, setBudget] = useState<string>('50')
   const [requiredBeltTier, setRequiredBeltTier] = useState<BeltTier>('blue')
   const [videos, setVideos] = useState<string>('')
+  const [videoAssetIds, setVideoAssetIds] = useState<string[]>([])
   const [submitting, setSubmitting] = useState(false)
+  const [paymentMode, setPaymentMode] = useState<'mock' | 'stripe' | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    fetch('/api/social/marketplace/config')
+      .then(async (res) => {
+        if (!res.ok) return null
+        return (await res.json()) as { payments?: string }
+      })
+      .then((data) => {
+        if (!cancelled && data?.payments) {
+          setPaymentMode(data.payments === 'stripe' ? 'stripe' : 'mock')
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setPaymentMode('mock')
+      })
+    return () => { cancelled = true }
+  }, [])
 
   const amountCents = centsFromDollars(budget)
   const feeBps = platformFeeBps(requiredBeltTier)
@@ -76,18 +97,21 @@ export default function NewJobPage() {
       toast({ title: 'Title required', variant: 'destructive' })
       return
     }
-    if (amountCents < 100) {
-      toast({ title: 'Minimum budget is $1.00', variant: 'destructive' })
+    if (amountCents < 5000) {
+      toast({ title: 'Minimum budget is $50.00', variant: 'destructive' })
+      return
+    }
+    const videoList = videos.split('\n').map((s) => s.trim()).filter(Boolean)
+    if (videoList.length === 0 && videoAssetIds.length === 0) {
+      toast({
+        title: 'Upload your clip',
+        description: 'Add at least one video file or URL so the coach can review your footage.',
+        variant: 'destructive',
+      })
       return
     }
     setSubmitting(true)
     try {
-      const videoList = videos
-        .split('\n')
-        .map((s) => s.trim())
-        .filter(Boolean)
-
-      // Step 1 — create
       const createRes = await fetch('/api/social/jobs', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -99,41 +123,25 @@ export default function NewJobPage() {
           amountCents,
           requiredBeltTier,
           videos: videoList,
+          assetIds: videoAssetIds,
           clientRequestId: crypto.randomUUID(),
         }),
       })
       const created = await parseApiResponse<{ job: { id: string } }>(createRes)
       const jobId = created.job.id
 
-      // Step 2 — fund (Stripe stub — ledger row pending)
-      const fundRes = await fetch(`/api/social/jobs/${jobId}/fund`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({
-          successUrl: `${window.location.origin}/marketplace/jobs/${jobId}?funding=success`,
-          cancelUrl: `${window.location.origin}/marketplace/jobs/${jobId}?funding=cancelled`,
-        }),
-      })
-      const funded = await parseApiResponse<{
-        payment?: {
-          requiresRedirect?: boolean
-          checkoutUrl?: string | null
-        }
-      }>(fundRes)
-
-      if (funded.payment?.requiresRedirect && funded.payment.checkoutUrl) {
+      const funded = await fundMarketplaceJob(jobId)
+      if (funded.redirected) {
         toast({
           title: 'Finish payment',
           description: 'Redirecting to Stripe Checkout.',
         })
-        window.location.assign(funded.payment.checkoutUrl)
         return
       }
 
       toast({
-        title: 'Bounty posted',
-        description: 'Verified analysts can now claim it.',
+        title: 'Clip posted',
+        description: 'A coach will claim this and send a video breakdown back.',
       })
       router.push(`/marketplace/jobs/${jobId}`)
     } catch (err) {
@@ -157,10 +165,10 @@ export default function NewJobPage() {
       </Button>
 
       <SectionHeader
-        icon={Briefcase}
-        eyebrow="New Bounty"
-        title="Post a Bounty"
-        subtitle="Describe what you need analyzed. An analyst will claim it, deliver, and you review."
+        icon={Video}
+        eyebrow="Clip review"
+        title="Get coach feedback on your clip"
+        subtitle="Upload sparring or technique footage. A verified coach analyzes it and sends a video breakdown back to you."
         className="mb-6"
       />
 
@@ -172,7 +180,7 @@ export default function NewJobPage() {
               <Input
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
-                placeholder="e.g. Break down my sparring footage vs. southpaw"
+                placeholder="e.g. Review my jab-cross timing in round 2 sparring"
                 maxLength={120}
                 required
               />
@@ -191,7 +199,23 @@ export default function NewJobPage() {
 
             <div>
               <label className="text-sm font-medium mb-1.5 block">
-                Video URLs <span className="text-muted-foreground font-normal">(one per line)</span>
+                Your clip <span className="text-destructive">*</span>
+              </label>
+              <UploadDropzone
+                purpose="job_video"
+                accept="video/mp4,video/quicktime,video/webm"
+                label="Upload your fight clip"
+                hint="Sparring, pad work, or competition — MP4, MOV, or WebM up to 500 MB."
+                onUploaded={(asset) => setVideoAssetIds((prev) => [...prev, asset.id])}
+                onRemoved={(assetId) =>
+                  setVideoAssetIds((prev) => prev.filter((id) => id !== assetId))
+                }
+              />
+            </div>
+
+            <div>
+              <label className="text-sm font-medium mb-1.5 block">
+                Video URLs <span className="text-muted-foreground font-normal">(optional fallback)</span>
               </label>
               <Textarea
                 value={videos}
@@ -199,9 +223,8 @@ export default function NewJobPage() {
                 placeholder="https://..."
                 rows={3}
               />
-              <p className="text-xs text-muted-foreground mt-1 flex items-center gap-1">
-                <Upload className="h-3 w-3" />
-                Direct upload coming soon — paste a shareable link for now.
+              <p className="text-xs text-muted-foreground mt-1">
+                Paste shareable links if direct upload is unavailable in your environment.
               </p>
             </div>
 
@@ -254,17 +277,28 @@ export default function NewJobPage() {
               </CardContent>
             </Card>
 
-            <div className="rounded-md bg-amber-500/10 border border-amber-500/30 p-3 text-xs text-amber-700 dark:text-amber-400">
-              <strong>Test mode:</strong> Stripe isn&apos;t wired yet. Posting creates the job and
-              a pending escrow entry; no real card is charged.
-            </div>
+            <p className="text-xs text-muted-foreground">
+              Coaches reply with a <strong>video breakdown</strong> (not just text). You approve before payment releases.
+            </p>
+
+            {paymentMode === 'mock' && (
+              <div className="rounded-md bg-amber-500/10 border border-amber-500/30 p-3 text-xs text-amber-700 dark:text-amber-400">
+                <strong>Dev mode:</strong> Payments are simulated — no real card is charged.
+                Escrow is recorded instantly so you can test the full job flow.
+              </div>
+            )}
+            {paymentMode === 'stripe' && (
+              <div className="rounded-md bg-emerald-500/10 border border-emerald-500/30 p-3 text-xs text-emerald-700 dark:text-emerald-400">
+                You&apos;ll be redirected to Stripe Checkout to fund escrow before analysts can claim.
+              </div>
+            )}
 
             <div className="flex gap-2 justify-end pt-2">
               <Button type="button" variant="outline" onClick={() => router.back()}>
                 Cancel
               </Button>
               <Button type="submit" disabled={submitting}>
-                {submitting ? 'Posting...' : 'Post Bounty'}
+                {submitting ? 'Posting…' : 'Request clip review'}
               </Button>
             </div>
           </form>

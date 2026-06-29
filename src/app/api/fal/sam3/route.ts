@@ -2,6 +2,8 @@ import { NextResponse } from 'next/server'
 import { readSecretEnv } from '@/lib/env'
 import { runSam3VideoRle, SAM3_FAL_MODEL_ID } from '@/lib/fal/sam3Client'
 import { requireUser } from '@/lib/musashiAuth'
+import { aiGuard } from '@/lib/ai/aiGuard'
+import { assertPublicHttpUrl } from '@/lib/urlAllowlist'
 
 export const maxDuration = 300
 
@@ -31,11 +33,8 @@ export async function GET(req: Request) {
  * POST { "videoUrl": "https://...", "prompt": "person" }
  */
 export async function POST(req: Request) {
-  try {
-    await requireUser(req)
-  } catch {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  }
+  const guard = await aiGuard(req, 'track')
+  if (!guard.ok) return guard.response
 
   if (isFalDryRun()) {
     return NextResponse.json({
@@ -74,6 +73,22 @@ export async function POST(req: Request) {
   if (!videoUrl || !/^https?:\/\//i.test(videoUrl)) {
     return NextResponse.json(
       { error: 'videoUrl required (must be http or https)' },
+      { status: 400 }
+    )
+  }
+
+  try {
+    assertPublicHttpUrl(videoUrl, { requestOrigin: new URL(req.url).origin })
+  } catch (e) {
+    const code = e instanceof Error ? e.message : 'VIDEO_URL_NOT_ALLOWED'
+    return NextResponse.json(
+      {
+        error:
+          code === 'INVALID_VIDEO_URL'
+            ? 'videoUrl must be a valid http or https URL'
+            : 'videoUrl must be hosted on this app or an allowed CDN',
+        code,
+      },
       { status: 400 }
     )
   }

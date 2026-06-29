@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server'
 import { getDbOrNull } from '@/lib/db'
+import { requireUser } from '@/lib/musashiAuth'
 import { getAnalysisLedger, listAnalysisLedgers } from '@/lib/ledgerStore'
 
 /**
@@ -7,6 +8,14 @@ import { getAnalysisLedger, listAnalysisLedgers } from '@/lib/ledgerStore'
  * GET /api/fight/ledgers?id=...   → one ledger with its items + corrections
  */
 export async function GET(request: Request) {
+  try {
+    await requireUser(request, { role: 'shogun' })
+  } catch (e) {
+    const code = e instanceof Error ? e.message : 'UNKNOWN'
+    if (code === 'UNAUTHORIZED') return NextResponse.json({ success: false, error: 'Login required' }, { status: 401 })
+    return NextResponse.json({ success: false, error: 'Forbidden' }, { status: 403 })
+  }
+
   const db = getDbOrNull()
   if (!db) {
     return NextResponse.json({ success: false, error: 'Database not available' }, { status: 503 })

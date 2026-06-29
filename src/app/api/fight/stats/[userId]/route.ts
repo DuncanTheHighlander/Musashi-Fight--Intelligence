@@ -2,16 +2,53 @@ import { NextResponse } from 'next/server'
 import { requireUser } from '@/lib/musashiAuth'
 import { getDb } from '@/lib/db'
 
-export async function GET(req: Request) {
+type RouteParams = { userId: string }
+
+function resolveTargetUserId(args: {
+  pathUserId: string | undefined
+  queryUserId: string | null
+  sessionUserId: string
+  role: string
+}): { userId: string } | { error: 'forbidden' | 'conflict' } {
+  const fromPath = args.pathUserId?.trim()
+  const fromQuery = args.queryUserId?.trim()
+
+  if (fromQuery && fromPath && fromQuery !== fromPath) {
+    return { error: 'conflict' }
+  }
+
+  const requested = fromPath || fromQuery || args.sessionUserId
+
+  if (requested !== args.sessionUserId && args.role !== 'shogun') {
+    return { error: 'forbidden' }
+  }
+  return { userId: requested }
+}
+
+export async function GET(req: Request, context: { params: Promise<RouteParams> }) {
   try {
     const user = await requireUser(req)
     const { searchParams } = new URL(req.url)
-    const userId = searchParams.get('userId') || user.id
+    const { userId: pathUserId } = await context.params
+    const resolved = resolveTargetUserId({
+      pathUserId,
+      queryUserId: searchParams.get('userId'),
+      sessionUserId: user.id,
+      role: user.role,
+    })
+    if ('error' in resolved) {
+      return NextResponse.json(
+        { error: resolved.error === 'conflict' ? 'Conflicting userId parameters' : 'Forbidden' },
+        { status: 403 }
+      )
+    }
+    const userId = resolved.userId
     const period = searchParams.get('period') || '30' // days
     const includeTechniques = searchParams.get('includeTechniques') === 'true'
 
     const db = getDb()
-    const daysAgo = parseInt(period)
+    const parsedPeriod = Number.parseInt(period, 10)
+    const daysAgo = Number.isFinite(parsedPeriod) ? Math.min(365, Math.max(1, parsedPeriod)) : 30
     const cutoffDate = new Date(Date.now() - daysAgo * 24 * 60 * 60 * 1000).toISOString()
 
     // Get overall stats

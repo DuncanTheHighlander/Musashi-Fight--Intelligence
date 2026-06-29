@@ -10,7 +10,8 @@ import { seedFightKnowledge } from '@/lib/retrieval/fight-knowledge-seed'
 import { embedAndStoreSegments } from '@/lib/retrieval/ingestVideoSegments'
 import { retrieveForLedger } from '@/lib/retrieval/orchestrate'
 import { cleanupOldFiles } from '@/services/videoUpload'
-import { aiGuard } from '@/lib/ai/aiGuard'
+import { aiGuard, aiErrorResponse } from '@/lib/ai/aiGuard'
+import { maybeEnforceVideoFromAnalyzeRequest } from '@/lib/musashiUsage'
 import { getDbOrNull } from '@/lib/db'
 import { getCurrentUser } from '@/lib/musashiAuth'
 import { saveAnalysisLedger } from '@/lib/ledgerStore'
@@ -37,7 +38,7 @@ type AnalyzeRequest = {
   kinematics?: any
   userIntent?: string
   actors?: Array<'A' | 'B'>
-  clip?: { durationMs?: number; fps?: number; sourceId?: string }
+  clip?: { durationMs?: number; fps?: number; sourceId?: string; assetRef?: string }
   llm?: { enabled?: boolean }
   videoFileUri?: string
   videoMimeType?: string
@@ -99,6 +100,17 @@ export async function POST(request: Request) {
   // the kill switch (handy when proving quota UX during a demo).
   const guard = await aiGuard(request, 'analyze')
   if (!guard.ok) return guard.response
+
+  try {
+    await maybeEnforceVideoFromAnalyzeRequest(guard.user, {
+      clipDurationMs: data.clip?.durationMs,
+      videoFileUri: data.videoFileUri,
+      sourceId: data.clip?.sourceId,
+      enabled: data.llm?.enabled !== false && Boolean(data.videoFileUri || (data.clip?.durationMs && data.clip.durationMs > 0)),
+    })
+  } catch (err) {
+    return aiErrorResponse(err)
+  }
 
   try {
     // OFFLINE MODE — return a deterministic mock. Lets the user exercise every
@@ -165,7 +177,7 @@ export async function POST(request: Request) {
             db: dbForLedger,
             ledger,
             userId: user?.id ?? null,
-            sourceId: data.clip?.sourceId ?? null,
+            sourceId: data.clip?.assetRef ?? data.clip?.sourceId ?? null,
           })
         } catch (e) {
           console.warn('[FightLang] Ledger save failed (non-fatal):', e instanceof Error ? e.message : e)

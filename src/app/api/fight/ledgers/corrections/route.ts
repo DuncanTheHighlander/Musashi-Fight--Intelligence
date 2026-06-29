@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import { getDbOrNull } from '@/lib/db'
-import { getCurrentUser } from '@/lib/musashiAuth'
+import { requireUser } from '@/lib/musashiAuth'
 import { addLedgerCorrection, type CorrectionItemType, type CorrectionVerdict } from '@/lib/ledgerStore'
 
 type CorrectionRequest = {
@@ -19,6 +19,15 @@ const VERDICTS: CorrectionVerdict[] = ['confirm', 'reject', 'relabel']
 
 /** POST /api/fight/ledgers/corrections → record a human verdict on a detected item. */
 export async function POST(request: Request) {
+  let user
+  try {
+    user = await requireUser(request, { role: 'shogun' })
+  } catch (e) {
+    const code = e instanceof Error ? e.message : 'UNKNOWN'
+    if (code === 'UNAUTHORIZED') return NextResponse.json({ success: false, error: 'Login required' }, { status: 401 })
+    return NextResponse.json({ success: false, error: 'Forbidden' }, { status: 403 })
+  }
+
   const db = getDbOrNull()
   if (!db) {
     return NextResponse.json({ success: false, error: 'Database not available' }, { status: 503 })
@@ -48,7 +57,6 @@ export async function POST(request: Request) {
   }
 
   try {
-    const user = await getCurrentUser(request)
     const id = await addLedgerCorrection({
       db,
       ledgerId: body.ledgerId,
@@ -59,7 +67,7 @@ export async function POST(request: Request) {
       correctedKind: body.correctedKind ?? null,
       actorId: body.actorId ?? null,
       note: body.note ?? null,
-      createdBy: user?.id ?? null,
+      createdBy: user.id,
     })
     return NextResponse.json({ success: true, correctionId: id })
   } catch (err) {

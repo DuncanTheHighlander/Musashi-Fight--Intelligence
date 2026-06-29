@@ -1,13 +1,19 @@
 import { NextResponse } from 'next/server'
 import { getDb } from '@/lib/db'
+import { requireUser } from '@/lib/musashiAuth'
 
 export async function POST(req: Request) {
   try {
+    const user = await requireUser(req)
     const body = await req.json() as { userId?: string }
-    const { userId } = body
+    const userId = String(body?.userId || '').trim()
 
     if (!userId) {
       return NextResponse.json({ error: 'User ID required' }, { status: 400 })
+    }
+
+    if (userId !== user.id && user.role !== 'shogun') {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
     }
 
     const db = getDb()
@@ -140,6 +146,13 @@ export async function POST(req: Request) {
       updatedAt: new Date().toISOString()
     })
   } catch (error) {
+    const msg = error instanceof Error ? error.message : 'Unknown error'
+    if (msg === 'UNAUTHORIZED') {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    }
+    if (msg === 'FORBIDDEN') {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+    }
     console.error('Failed to update fighter profile performance stats:', error)
     return NextResponse.json({ error: 'Failed to update performance stats' }, { status: 500 })
   }

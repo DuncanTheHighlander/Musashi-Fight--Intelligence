@@ -14,24 +14,40 @@ C:\Users\smith\Desktop\codiing\Musashi\fight app\download_package
 ```powershell
 cd "C:\Users\smith\Desktop\codiing\Musashi\fight app\download_package"
 pnpm test:marketplace:full          # 53 tests + next build
+pnpm check:cf-env                   # wrangler.toml production gate
 node scripts/marketplace-plug-in-check.mjs   # shows missing keys (dev OK)
 node scripts/marketplace-plug-in-check.mjs --strict   # fails if keys missing
 ```
 
-## Production secrets (Cloudflare Worker)
+**Full deploy runbook:** `docs/DEPLOY_CHECKLIST.md`
+
+## Production secrets
+
+### Account-level (Cloudflare Secrets Store)
+
+Already bound in `wrangler.toml` — verify with `wrangler secrets-store secret list`. **Do not** duplicate via `wrangler secret put`:
+
+| Binding | Store name | Purpose |
+|---------|------------|---------|
+| `SECRET_AI` | `Ai` | Gemini AI |
+| `SECRET_STRIPE` | `Stripe` | Stripe secret key |
+| `SECRET_MODAL` | `Modal` | Modal API |
+| `SECRET_REVCAT1` / `SECRET_REVCAT2` | `revcat1` / `revcat2` | RevenueCat |
+| `SECRET_SUPABASE` | `Supabase` | Supabase service role |
+
+See `docs/CLOUDFLARE_SECRETS_STORE.md`.
+
+### Per-Worker (`wrangler secret put`)
 
 Set via `wrangler secret put KEY` or Cloudflare dashboard:
 
 | Secret | Purpose |
 |--------|---------|
-| `GEMINI_API_KEY` | AI coaching / analysis |
 | `MUSASHI_SESSION_SECRET` | Auth sessions (64+ random chars) |
 | `MUSASHI_SHOGUN_EMAIL` | Admin login |
 | `MUSASHI_SHOGUN_PASSWORD` | Admin password (strong, not default) |
 | `MUSASHI_CRON_SECRET` | Protects `/api/cron/marketplace` |
 | `MUSASHI_APP_URL` | e.g. `https://app.musashi.ai` (Connect return URLs) |
-| `STRIPE_SECRET_KEY` | Marketplace + billing |
-| `STRIPE_PUBLISHABLE_KEY` | Client (if needed) |
 | `STRIPE_WEBHOOK_SECRET` | Webhook signature |
 | `STORAGE_SERVICE_URL` | R2 S3 endpoint |
 | `STORAGE_ACCESS_KEY` | R2 key |

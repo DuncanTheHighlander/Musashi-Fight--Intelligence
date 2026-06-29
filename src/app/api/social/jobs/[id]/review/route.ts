@@ -9,7 +9,7 @@
  * (avg_* + belt_score + eligible belt_tier promotion).
  */
 import { NextResponse } from 'next/server'
-import { enforceUsage } from '@/lib/musashiUsage'
+import { requireUser } from '@/lib/musashiAuth'
 import { getDb, newId } from '@/lib/marketplace/types'
 import type { MarketplaceJobRow, MarketplaceReviewRow } from '@/lib/marketplace/types'
 import { computeBeltScore, computeEligibleTier } from '@/lib/marketplace/beltTier'
@@ -25,7 +25,7 @@ const clamp1to5 = (n: unknown): number => {
 
 export async function POST(req: Request, context: { params: Promise<Params> }) {
   try {
-    const user = await enforceUsage(req, 'chat')
+    const user = await requireUser(req)
     const { id } = await context.params
     const body = (await req.json()) as Record<string, unknown>
 

@@ -1,13 +1,11 @@
 /**
  * POST /api/social/jobs/[id]/fund — fighter funds the escrow.
  *
- * Stripe is not yet wired. This writes a HOLD row with status='pending_stripe'
- * and flips the job to FUNDED. When the Stripe webhook lands later, the HOLD
- * row flips to 'succeeded' and the money becomes real. The UX can still
- * proceed end-to-end in dev/test with the pending row.
+ * mock mode: records escrow immediately (no card charge).
+ * stripe mode: returns a Checkout URL; job stays CREATED until webhook completes funding.
  */
 import { NextResponse } from 'next/server'
-import { enforceUsage } from '@/lib/musashiUsage'
+import { requireUser } from '@/lib/musashiAuth'
 import { getDb } from '@/lib/marketplace/types'
 import { fundJob, preflightFundJob } from '@/lib/marketplace/jobs'
 import {
@@ -20,7 +18,7 @@ type Params = { id: string }
 
 export async function POST(req: Request, context: { params: Promise<Params> }) {
   try {
-    const user = await enforceUsage(req, 'chat')
+    const user = await requireUser(req)
     const { id } = await context.params
     const db = getDb()
 
@@ -32,7 +30,7 @@ export async function POST(req: Request, context: { params: Promise<Params> }) {
       body = {}
     }
 
-    if (resolveMarketplacePaymentMode() === 'stripe') {
+    if ((await resolveMarketplacePaymentMode()) === 'stripe') {
       const job = await preflightFundJob(db, { jobId: id, actorUserId: user.id })
       const payment = await createMarketplaceCheckoutSession({
         req,

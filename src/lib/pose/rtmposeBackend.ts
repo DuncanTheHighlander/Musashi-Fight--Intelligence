@@ -65,9 +65,9 @@ const STD = [58.395, 57.12, 57.375]
 
 // `onnxruntime-web` is not installed in this repo; keep types loose so the
 // project builds. Real types come for free once the package is added.
-type Ort = any // eslint-disable-line @typescript-eslint/no-explicit-any
-type OrtSession = any // eslint-disable-line @typescript-eslint/no-explicit-any
-type OrtTensor = any // eslint-disable-line @typescript-eslint/no-explicit-any
+type Ort = any
+type OrtSession = any
+type OrtTensor = any
 
 let ort: Ort = null
 let session: OrtSession = null

@@ -2,7 +2,7 @@
  * POST /api/social/jobs/[id]/start — assigned analyst flips CLAIMED → IN_PROGRESS.
  */
 import { NextResponse } from 'next/server'
-import { enforceUsage } from '@/lib/musashiUsage'
+import { requireUser } from '@/lib/musashiAuth'
 import { getDb } from '@/lib/marketplace/types'
 import { applyTransition, fetchJob } from '@/lib/marketplace/jobs'
 
@@ -10,7 +10,7 @@ type Params = { id: string }
 
 export async function POST(req: Request, context: { params: Promise<Params> }) {
   try {
-    const user = await enforceUsage(req, 'chat')
+    const user = await requireUser(req)
     const { id } = await context.params
     const db = getDb()
     const job = await fetchJob(db, id)

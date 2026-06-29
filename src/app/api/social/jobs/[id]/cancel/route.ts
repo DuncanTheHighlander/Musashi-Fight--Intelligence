@@ -9,15 +9,16 @@
  * Auto-refund is appended to the ledger if the job was already FUNDED.
  */
 import { NextResponse } from 'next/server'
-import { enforceUsage } from '@/lib/musashiUsage'
+import { requireUser } from '@/lib/musashiAuth'
 import { getDb } from '@/lib/marketplace/types'
 import { cancelJob, fetchJob } from '@/lib/marketplace/jobs'
+import { executeJobRefundMoneyMovement } from '@/lib/marketplace/moneyMovement'
 
 type Params = { id: string }
 
 export async function POST(req: Request, context: { params: Promise<Params> }) {
   try {
-    const user = await enforceUsage(req, 'chat')
+    const user = await requireUser(req)
     const { id } = await context.params
     const body = (await req.json().catch(() => ({}))) as Record<string, unknown>
     const reason = String(body?.reason || '').trim() || undefined
@@ -35,6 +36,15 @@ export async function POST(req: Request, context: { params: Promise<Params> }) {
     }
 
     const next = await cancelJob(db, { jobId: id, actorUserId: user.id, reason })
+    try {
+      await executeJobRefundMoneyMovement(db, id)
+    } catch (e) {
+      return NextResponse.json({
+        jobId: next.id,
+        status: next.status,
+        paymentWarning: e instanceof Error ? e.message : 'Refund provider failed',
+      })
+    }
 
     // Analyst-initiated cancels bump the jobs_cancelled + free capacity
     if (isAnalyst && !isFighter && job.analyst_id) {

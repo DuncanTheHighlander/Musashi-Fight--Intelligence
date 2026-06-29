@@ -134,22 +134,35 @@ Needed product work:
 - Keep hosted Checkout funding enabled for bounties.
 - Create Connect transfers on release and refunds on cancel/dispute.
 
-Current status: bounty funding has a Stripe Checkout scaffold; coach payout,
-refund, and dispute money movement still need Connect wiring.
+Current status: Connect onboarding routes, payout status refresh, webhook
+`account.updated` handling, and ledger-driven transfer/refund/split executors are
+wired. In mock payment mode (`MUSASHI_MARKETPLACE_PAYMENTS=mock`) money movement
+no-ops safely. Switch to Stripe mode + Connect keys for real payouts.
 
 ### 6. Cloudflare R2
 
 Purpose: uploaded fight videos, marketplace deliverables, and analysis assets.
 Do not put raw videos in D1.
 
-Required env when upload storage is wired:
+Required env when switching from mock to real R2:
 
 ```bash
+MUSASHI_STORAGE_MODE=r2
 STORAGE_SERVICE_URL=https://<account-id>.r2.cloudflarestorage.com
 STORAGE_ACCESS_KEY=
 STORAGE_SECRET_KEY=
 STORAGE_BUCKET_NAME=musashi-uploads
 ```
+
+Dev default (no keys needed):
+
+```bash
+MUSASHI_STORAGE_MODE=mock
+```
+
+Mock mode stores files under `.uploads/` locally and serves them via
+`/api/uploads/[id]/content`. Marketplace jobs reference uploads as `asset:<id>`
+strings alongside legacy pasted URLs.
 
 Recommended setup:
 
@@ -158,8 +171,8 @@ Recommended setup:
 - Add a 7-30 day lifecycle rule for raw videos.
 - Keep generated reports and ledger data longer than raw video.
 
-Current status: env/client scaffolding exists, but marketplace job posting still
-uses pasted video URLs.
+Current status: upload scaffold is built. Mock mode works without API keys.
+Set the four `STORAGE_*` vars and `MUSASHI_STORAGE_MODE=r2` for production R2.
 
 ## Optional / Later Keys
 
@@ -315,20 +328,18 @@ Needed:
 
 ### P1: Marketplace Payments
 
-Needed:
+Status: wired in code. Mock mode works without keys. Production needs:
 
-- Stripe PaymentIntent on job funding.
-- Stripe Connect onboarding for coaches.
-- Webhook reconciliation into the existing marketplace ledger.
-- Real release/refund/transfer behavior.
+- `MUSASHI_MARKETPLACE_PAYMENTS=stripe`
+- `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`
+- Stripe Connect onboarding for coaches (`/marketplace/settings`)
+- Webhook endpoint: `/api/billing/webhook` (handles funding + `account.updated`)
 
 ### P1: Uploads Instead Of URL Paste
 
-Needed:
-
-- R2 direct upload or server-mediated upload.
-- Store asset records with owner/job links.
-- Replace pasted URLs in bounty posting and deliverables.
+Status: done. Mock storage works without keys. Production needs four `STORAGE_*`
+vars and `MUSASHI_STORAGE_MODE=r2`. Upload UI is on bounty post, deliverable
+submit, and dispute forms.
 
 ### P1: Account Front Door Polish
 
@@ -350,8 +361,9 @@ Needed:
 ## Quick Local Checks
 
 ```powershell
+pnpm test:marketplace
+pnpm test:marketplace:full
 node scripts\check-prod-env.mjs --production
 node scripts\test-migrations.mjs
-.\node_modules\.bin\vitest.cmd run src/lib/marketplace/__tests__
 node scripts\check-cloud-pose-ready.mjs
 ```

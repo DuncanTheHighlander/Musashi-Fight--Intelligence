@@ -1,7 +1,40 @@
-# Copy to .dev.vars for `pnpm preview` / wrangler dev (never commit .dev.vars).
-# Loads Next.js .env* files when NEXTJS_ENV=development.
-NEXTJS_ENV=development
+# Local Wrangler / OpenNext preview fallbacks when Secrets Store bindings are unavailable.
+# Copy to `.dev.vars` — never commit `.dev.vars`.
+#
+# Production: account secrets live in Cloudflare Secrets Store (see wrangler.toml SECRET_*).
+# Per-Worker secrets use `wrangler secret put` (see docs/DEPLOY_CHECKLIST.md).
 
-# Secrets for local Workers preview — mirror production vars from .env.local:
-# GEMINI_API_KEY=your-gemini-api-key-here
-# MUSASHI_SESSION_SECRET=generate-a-strong-random-string-here-min-32-chars
+# ── Secrets Store aliases (wrangler dev reads these when bindings are not live) ──
+GEMINI_API_KEY=your-gemini-api-key-here
+MODAL_API_KEY=your-modal-token-here
+REVENUECAT_API_KEY=your-revenuecat-key-here
+REVENUECAT_API_KEY_SECONDARY=your-revenuecat-key-2-here
+STRIPE_SECRET_KEY=sk_test_your_stripe_secret_key_here
+SUPABASE_SERVICE_ROLE_KEY=your-supabase-service-role-key-here
+
+# ── Per-Worker secrets (same names as `wrangler secret put` in production) ──
+MUSASHI_SESSION_SECRET=generate-a-strong-random-string-here-min-64-chars
+MUSASHI_SHOGUN_EMAIL=shogun@musashi.ai
+MUSASHI_SHOGUN_PASSWORD=ChangeThisSecurePassword123!@#
+# Or use a bcrypt hash instead of raw password:
+# MUSASHI_SHOGUN_PASSWORD_HASH=
+MUSASHI_CRON_SECRET=generate-a-strong-random-string-here
+MUSASHI_APP_URL=http://localhost:8787
+STRIPE_WEBHOOK_SECRET=whsec_your_stripe_webhook_secret_here
+
+# R2 (use real test bucket keys for upload testing, or leave placeholders for mock)
+STORAGE_SERVICE_URL=https://your-account-id.r2.cloudflarestorage.com
+STORAGE_ACCESS_KEY=YOUR_STORAGE_ACCESS_KEY
+STORAGE_SECRET_KEY=YOUR_STORAGE_SECRET_KEY
+STORAGE_BUCKET_NAME=musashi-uploads
+
+# ── Local dev modes (wrangler.toml uses stripe/r2 in production) ──
+MUSASHI_MARKETPLACE_PAYMENTS=mock
+MUSASHI_STORAGE_MODE=mock
+NODE_ENV=development
+
+# Optional — Stripe publishable key for client checkout UI
+# STRIPE_PUBLISHABLE_KEY=pk_test_your_stripe_publishable_key_here
+
+# Public Supabase URL if store secret is a plain key (not JSON)
+# NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co

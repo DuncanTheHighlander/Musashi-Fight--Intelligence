@@ -12,7 +12,7 @@
  * which migration 0013 already added. No new schema required.
  */
 import type { D1Database } from './types'
-import { computeCoachRank, type CoachRankResult, type CoachSignals } from './coachRank'
+import { computeCoachRank, RANK_LADDER, type CoachRankResult, type CoachSignals } from './coachRank'
 
 export interface CoachLeaderboardEntry {
   userId: string
@@ -75,6 +75,19 @@ function toSignals(raw: RawCoachStats): CoachSignals {
 const num = (v: unknown): number => {
   const n = Number(v)
   return Number.isFinite(n) ? n : 0
+}
+
+/**
+ * Display the sticky EARNED belt (from coach_ranks) when the coach has been
+ * promoted; otherwise the live-computed rank. The score stays live either way,
+ * so leaderboard order still reflects current form.
+ */
+function displayRank(signals: CoachSignals, earnedRankIndex?: number): CoachRankResult {
+  const live = computeCoachRank(signals)
+  if (earnedRankIndex != null && RANK_LADDER[earnedRankIndex]) {
+    return { ...RANK_LADDER[earnedRankIndex], score: live.score, volume: live.volume }
+  }
+  return live
 }
 
 type DisplayRow = {
@@ -202,6 +215,15 @@ export async function getCoachLeaderboard(
     s.jobsCompleted = num(row.jobs_completed)
   }
 
+  // Sticky earned belt (coach_ranks) — the displayed credential, if promoted.
+  const earned = await db
+    .prepare('SELECT user_id AS id, earned_rank_index FROM coach_ranks')
+    .bind()
+    .all<{ id: string; earned_rank_index: number }>()
+  const earnedMap = new Map<string, number>(
+    (earned.results || []).map((r) => [r.id, num(r.earned_rank_index)]),
+  )
+
   const entries: CoachLeaderboardEntry[] = (candidates.results || []).map((c) => {
     const signals = toSignals(stats.get(c.id) ?? { ...ZERO })
     return {
@@ -211,7 +233,7 @@ export async function getCoachLeaderboard(
       isVerified: Boolean(c.is_verified),
       isPro: Boolean(c.is_pro),
       signals,
-      rank: computeCoachRank(signals),
+      rank: displayRank(signals, earnedMap.get(c.id)),
     }
   })
 
@@ -294,6 +316,11 @@ export async function getCoachRankForUser(
     .first<{ s: number }>()
   raw.salesCount = num(sl?.s)
 
+  const earnedRow = await db
+    .prepare('SELECT earned_rank_index FROM coach_ranks WHERE user_id = ?')
+    .bind(userId)
+    .first<{ earned_rank_index: number }>()
+
   const signals = toSignals(raw)
   return {
     userId,
@@ -302,6 +329,6 @@ export async function getCoachRankForUser(
     isVerified: Boolean(display.is_verified),
     isPro: Boolean(display.is_pro),
     signals,
-    rank: computeCoachRank(signals),
+    rank: displayRank(signals, earnedRow ? num(earnedRow.earned_rank_index) : undefined),
   }
 }

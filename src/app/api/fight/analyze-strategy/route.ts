@@ -10,7 +10,8 @@
 import { NextResponse } from 'next/server'
 import { generateJson } from '@/lib/gemini/gemini-client'
 import { resolvedModels } from '@/lib/gemini/models'
-import { aiGuard } from '@/lib/ai/aiGuard'
+import { aiGuard, aiErrorResponse } from '@/lib/ai/aiGuard'
+import { maybeEnforceVideoFromAnalyzeRequest } from '@/lib/musashiUsage'
 
 interface PoseTimelineEntry {
   tMs: number
@@ -181,6 +182,16 @@ export async function POST(request: Request) {
 
   const guard = await aiGuard(request, 'analyze')
   if (!guard.ok) return guard.response
+
+  try {
+    await maybeEnforceVideoFromAnalyzeRequest(guard.user, {
+      clipDurationMs: data.durationMs,
+      videoFileUri: data.videoFileUri,
+      enabled: Boolean(data.videoFileUri),
+    })
+  } catch (err) {
+    return aiErrorResponse(err)
+  }
 
   try {
 

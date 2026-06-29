@@ -7,6 +7,8 @@ export type MusashiUser = {
   email: string
   display_name: string | null
   role: MusashiRole
+  emailVerifiedAt: string | null
+  passwordUpdatedAt: string | null
   createdAt: string
   updatedAt: string
 }
@@ -154,7 +156,12 @@ export const verifySessionCookie = async (cookieValue: string): Promise<string |
 
   const db = getDb()
   const row = await db
-    .prepare('SELECT id, user_id, expires_at, revoked_at FROM musashi_sessions WHERE id = ?')
+    .prepare(
+      `SELECT s.id, s.user_id, s.expires_at, s.revoked_at, s.created_at, u.password_updated_at
+         FROM musashi_sessions s
+         JOIN musashi_users u ON u.id = s.user_id
+        WHERE s.id = ?`,
+    )
     .bind(sessionId)
     .first()
 
@@ -163,6 +170,17 @@ export const verifySessionCookie = async (cookieValue: string): Promise<string |
 
   const expires = Date.parse(String(row.expires_at || ''))
   if (!Number.isFinite(expires) || expires <= Date.now()) return null
+
+  const passwordUpdatedAt = row.password_updated_at ? Date.parse(String(row.password_updated_at)) : null
+  const sessionCreatedAt = Date.parse(String(row.created_at || ''))
+  if (
+    passwordUpdatedAt !== null &&
+    Number.isFinite(passwordUpdatedAt) &&
+    Number.isFinite(sessionCreatedAt) &&
+    passwordUpdatedAt > sessionCreatedAt
+  ) {
+    return null
+  }
 
   return String(row.user_id)
 }
@@ -175,6 +193,8 @@ const DEV_BYPASS_USER: MusashiUser = {
   email: 'dev@local',
   display_name: 'Dev User',
   role: 'shogun',
+  emailVerifiedAt: null,
+  passwordUpdatedAt: null,
   createdAt: new Date(0).toISOString(),
   updatedAt: new Date(0).toISOString(),
 }
@@ -192,7 +212,9 @@ export const getCurrentUser = async (req: Request): Promise<MusashiUser | null> 
 
   const db = getDb()
   const row = await db
-    .prepare('SELECT id, email, display_name, role, created_at, updated_at FROM musashi_users WHERE id = ?')
+    .prepare(
+      'SELECT id, email, display_name, role, email_verified_at, password_updated_at, created_at, updated_at FROM musashi_users WHERE id = ?',
+    )
     .bind(userId)
     .first()
 
@@ -203,6 +225,8 @@ export const getCurrentUser = async (req: Request): Promise<MusashiUser | null> 
     email: String(row.email),
     display_name: row.display_name ? String(row.display_name) : null,
     role: String(row.role) as MusashiRole,
+    emailVerifiedAt: row.email_verified_at ? String(row.email_verified_at) : null,
+    passwordUpdatedAt: row.password_updated_at ? String(row.password_updated_at) : null,
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
   }
@@ -213,6 +237,14 @@ export const requireUser = async (req: Request, opts?: { role?: MusashiRole }) =
   if (!user) throw new Error('UNAUTHORIZED')
   if (opts?.role && user.role !== opts.role) throw new Error('FORBIDDEN')
   return user
+}
+
+export const revokeAllUserSessions = async (userId: string): Promise<void> => {
+  const db = getDb()
+  await db
+    .prepare('UPDATE musashi_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL')
+    .bind(new Date().toISOString(), userId)
+    .run()
 }
 
 export const revokeCurrentSession = async (req: Request): Promise<void> => {
@@ -291,7 +323,16 @@ export const createUser = async (params: { email: string; password: string; role
     .bind(id, email, passwordHash, params.role, displayName, now, now)
     .run()
 
-  const user: MusashiUser = { id, email, display_name: displayName, role: params.role, createdAt: now, updatedAt: now }
+  const user: MusashiUser = {
+    id,
+    email,
+    display_name: displayName,
+    role: params.role,
+    emailVerifiedAt: null,
+    passwordUpdatedAt: null,
+    createdAt: now,
+    updatedAt: now,
+  }
   await syncLegacyUserRow(user)
   return user
 }
@@ -308,7 +349,9 @@ export const ensureShogunUserExists = async (): Promise<MusashiUser> => {
 
   const db = getDb()
   const existing = await db
-    .prepare('SELECT id, email, display_name, role, created_at, updated_at FROM musashi_users WHERE email = ?')
+    .prepare(
+      'SELECT id, email, display_name, role, email_verified_at, password_updated_at, created_at, updated_at FROM musashi_users WHERE email = ?',
+    )
     .bind(email)
     .first()
 
@@ -318,6 +361,8 @@ export const ensureShogunUserExists = async (): Promise<MusashiUser> => {
       email: String(existing.email),
       display_name: existing.display_name ? String(existing.display_name) : null,
       role: String(existing.role) as MusashiRole,
+      emailVerifiedAt: existing.email_verified_at ? String(existing.email_verified_at) : null,
+      passwordUpdatedAt: existing.password_updated_at ? String(existing.password_updated_at) : null,
       createdAt: String(existing.created_at),
       updatedAt: String(existing.updated_at),
     }
@@ -335,14 +380,25 @@ export const ensureShogunUserExists = async (): Promise<MusashiUser> => {
     .run()
 
   await syncLegacyUserRow({ id, email, display_name: null })
-  return { id, email, display_name: null, role: 'shogun', createdAt: now, updatedAt: now }
+  return {
+    id,
+    email,
+    display_name: null,
+    role: 'shogun',
+    emailVerifiedAt: null,
+    passwordUpdatedAt: null,
+    createdAt: now,
+    updatedAt: now,
+  }
 }
 
 export const verifyLogin = async (params: { email: string; password: string }): Promise<MusashiUser> => {
   const email = String(params.email || '').trim().toLowerCase()
   const db = getDb()
   const row = await db
-    .prepare('SELECT id, email, display_name, role, password_hash, created_at, updated_at FROM musashi_users WHERE email = ?')
+    .prepare(
+      'SELECT id, email, display_name, role, password_hash, email_verified_at, password_updated_at, created_at, updated_at FROM musashi_users WHERE email = ?',
+    )
     .bind(email)
     .first()
 
@@ -356,10 +412,30 @@ export const verifyLogin = async (params: { email: string; password: string }): 
     email: String(row.email),
     display_name: row.display_name ? String(row.display_name) : null,
     role: String(row.role) as MusashiRole,
+    emailVerifiedAt: row.email_verified_at ? String(row.email_verified_at) : null,
+    passwordUpdatedAt: row.password_updated_at ? String(row.password_updated_at) : null,
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
   }
   // Self-heals accounts created before the users-table sync shipped.
   await syncLegacyUserRow(user)
   return user
+}
+
+const assertPasswordPolicy = (password: string): void => {
+  if (!password || password.length < 10) throw new Error('Password must be at least 10 characters')
+  if (!/[A-Z]/.test(password)) throw new Error('Password must contain an uppercase letter')
+  if (!/[a-z]/.test(password)) throw new Error('Password must contain a lowercase letter')
+  if (!/[0-9]/.test(password)) throw new Error('Password must contain a number')
+}
+
+export const updateUserPassword = async (userId: string, password: string): Promise<void> => {
+  assertPasswordPolicy(password)
+  const passwordHash = await hashPassword(password)
+  const now = new Date().toISOString()
+  const db = getDb()
+  await db
+    .prepare('UPDATE musashi_users SET password_hash = ?, password_updated_at = ?, updated_at = ? WHERE id = ?')
+    .bind(passwordHash, now, now, userId)
+    .run()
 }

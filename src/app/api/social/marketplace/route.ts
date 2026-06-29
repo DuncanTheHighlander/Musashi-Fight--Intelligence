@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { enforceUsage } from '@/lib/musashiUsage'
+import { requireUser } from '@/lib/musashiAuth'
 import { getDb } from '@/lib/db'
 
 const parseJsonArray = (value: any): string[] => {
@@ -58,8 +58,6 @@ const mapProductRow = (row: any) => ({
 
 export async function GET(req: Request) {
   try {
-    await enforceUsage(req, 'chat')
-
     const { searchParams } = new URL(req.url)
     const search = searchParams.get('search')?.trim() || ''
     const type = searchParams.get('type')
@@ -148,7 +146,7 @@ export async function GET(req: Request) {
 
 export async function POST(req: Request) {
   try {
-    const user = await enforceUsage(req, 'chat')
+    const user = await requireUser(req)
     const body = await req.json() as Record<string, any>
 
     const title = String(body?.title || '').trim()

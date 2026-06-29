@@ -175,6 +175,40 @@ export interface JobEventRow {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
+// marketplace_assets
+// ──────────────────────────────────────────────────────────────────────────
+export type MarketplaceAssetPurpose =
+  | 'job_video'
+  | 'deliverable'
+  | 'dispute_evidence'
+  | 'profile_media'
+  | 'analysis_clip'
+
+export type MarketplaceAssetStatus =
+  | 'pending_upload'
+  | 'uploaded'
+  | 'failed'
+  | 'deleted'
+
+export interface MarketplaceAssetRow {
+  id: string
+  owner_user_id: string
+  job_id: string | null
+  dispute_id: string | null
+  purpose: MarketplaceAssetPurpose
+  bucket: string
+  object_key: string
+  original_name: string
+  content_type: string
+  size_bytes: number
+  sha256: string | null
+  status: MarketplaceAssetStatus
+  created_at: string
+  uploaded_at: string | null
+  updated_at: string
+}
+
+// ──────────────────────────────────────────────────────────────────────────
 // small id helper shared across routes
 // ──────────────────────────────────────────────────────────────────────────
 export const newId = (prefix = ''): string => {

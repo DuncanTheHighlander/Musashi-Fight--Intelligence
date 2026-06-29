@@ -14,10 +14,12 @@
  *   }
  */
 import { NextResponse } from 'next/server'
-import { enforceUsage } from '@/lib/musashiUsage'
+import { requireUser } from '@/lib/musashiAuth'
 import { getDb, newId } from '@/lib/marketplace/types'
 import type { DisputeReason } from '@/lib/marketplace/types'
 import { applyTransition, fetchJob } from '@/lib/marketplace/jobs'
+import { assertUploadedAssetsOwned } from '@/lib/storage/assets'
+import { toAssetRef } from '@/lib/storage/assetRef'
 
 const VALID_REASONS: DisputeReason[] = [
   'not_delivered',
@@ -34,7 +36,7 @@ type Params = { id: string }
 
 export async function POST(req: Request, context: { params: Promise<Params> }) {
   try {
-    const user = await enforceUsage(req, 'chat')
+    const user = await requireUser(req)
     const { id } = await context.params
     const body = (await req.json()) as Record<string, unknown>
 
@@ -42,6 +44,9 @@ export async function POST(req: Request, context: { params: Promise<Params> }) {
     const description = String(body?.description || '').trim()
     const evidenceUrls = Array.isArray(body?.evidenceUrls)
       ? (body.evidenceUrls as unknown[]).map(String).filter(Boolean)
+      : []
+    const evidenceAssetIds = Array.isArray(body?.evidenceAssetIds)
+      ? (body.evidenceAssetIds as unknown[]).map(String).filter(Boolean)
       : []
 
     if (!VALID_REASONS.includes(reason)) {
@@ -52,6 +57,11 @@ export async function POST(req: Request, context: { params: Promise<Params> }) {
     }
 
     const db = getDb()
+    if (evidenceAssetIds.length) {
+      await assertUploadedAssetsOwned(db, evidenceAssetIds, user.id, 'dispute_evidence')
+    }
+    const mergedEvidence = [...evidenceUrls, ...evidenceAssetIds.map(toAssetRef)]
+
     const job = await fetchJob(db, id)
     if (!job) return NextResponse.json({ error: 'Not found' }, { status: 404 })
     if (job.fighter_id !== user.id && job.analyst_id !== user.id) {
@@ -76,7 +86,7 @@ export async function POST(req: Request, context: { params: Promise<Params> }) {
            status, created_at, updated_at
          ) VALUES (?, ?, ?, ?, ?, ?, 'OPEN', ?, ?)`,
       )
-      .bind(disputeId, id, user.id, reason, description, JSON.stringify(evidenceUrls), now, now)
+      .bind(disputeId, id, user.id, reason, description, JSON.stringify(mergedEvidence), now, now)
       .run()
 
     await applyTransition(db, {

@@ -35,6 +35,8 @@ import type { NormalizedLandmark } from '@mediapipe/tasks-vision'
 import { segmentExchanges, type ExchangeTimeline } from '@/services/exchangeSegmenter'
 import { detectPatterns, exportPatternsForAI, type PatternAnalysisResult } from '@/services/patternDetector'
 import { parseApiResponse } from '@/lib/safeJson'
+import { uploadMarketplaceFile } from '@/lib/storage/uploadClient'
+import { toAssetRef } from '@/lib/storage/assetRef'
 import { getPerformanceProfile, SERVER_DEFAULT_PROFILE } from '@/lib/performanceProfile'
 import { cn } from '@/lib/utils'
 import { useVideoKeyboardShortcuts } from '@/hooks/useVideoKeyboardShortcuts'
@@ -662,6 +664,8 @@ export default function FightCoachExperience({
   const [geminiFileUri, setGeminiFileUri] = useState<string | null>(null)
   const geminiFileUriRef = useRef<string | null>(null)
   const videoFileRef = useRef<File | null>(null)
+  // Isolated + fail-safe: R2 asset ref for the current clip, so it's reviewable/labelable later.
+  const clipAssetRefRef = useRef<string | null>(null)
   const [compiledLedger, setCompiledLedger] = useState<Record<string, unknown> | null>(null)
 
   // Streaming auto-analysis (SSE from /api/fight action:analyze_video_stream)
@@ -1033,6 +1037,19 @@ export default function FightCoachExperience({
 
     setVideoFile(file)
     videoFileRef.current = file
+    // Auto-save the analyzed clip to R2 so it can be reviewed/labeled later.
+    // Fully isolated + fail-safe: any failure here cannot affect analysis or playback.
+    clipAssetRefRef.current = null
+    if (source === 'upload') {
+      void (async () => {
+        try {
+          const asset = await uploadMarketplaceFile({ file, purpose: 'analysis_clip' })
+          clipAssetRefRef.current = toAssetRef(asset.id)
+        } catch (err) {
+          console.warn('[clip upload]', err)
+        }
+      })()
+    }
     setGeminiFileUri(null)
     geminiFileUriRef.current = null
     const url = URL.createObjectURL(file)
@@ -1337,7 +1354,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
           body: JSON.stringify({
             poseFrames: slice,
             llm: { enabled: false },
-            clip: { durationMs: mode === 'full' && durMs > 0 ? durMs : windowMs },
+            clip: { durationMs: mode === 'full' && durMs > 0 ? durMs : windowMs, ...(clipAssetRefRef.current ? { assetRef: clipAssetRefRef.current } : {}) },
           }),
         })
         const json = await parseApiResponse<any>(res)
@@ -1427,7 +1444,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
             poseFrames: slice,
             userIntent: `Give tactical coaching: openings, counters, habits, and who is controlling space. Ground every claim in the ledger.${dense}${replay}`,
             llm: { enabled: true },
-            clip: { durationMs: mode === 'full' && durMs > 0 ? durMs : windowMs },
+            clip: { durationMs: mode === 'full' && durMs > 0 ? durMs : windowMs, ...(clipAssetRefRef.current ? { assetRef: clipAssetRefRef.current } : {}) },
             ...(geminiFileUriRef.current ? { videoFileUri: geminiFileUriRef.current, videoMimeType: videoFileRef.current?.type || 'video/mp4' } : {}),
           }),
         })

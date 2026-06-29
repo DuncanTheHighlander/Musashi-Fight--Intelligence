@@ -199,6 +199,19 @@ export async function queryByPosition(
 }
 
 // ============================================================================
+// Query — Entries by category (vocabulary lookup for clip tagging)
+// ============================================================================
+
+export async function getEntriesByCategory(categoryId: string): Promise<TechniqueEntry[]> {
+  const db = getDb()
+  const rows = await db
+    .prepare('SELECT * FROM technique_entries WHERE category_id = ? ORDER BY effectiveness_score DESC')
+    .bind(categoryId)
+    .all()
+  return (rows.results || []).map(rowToEntry)
+}
+
+// ============================================================================
 // Query — By Submission / Tag
 // ============================================================================
 

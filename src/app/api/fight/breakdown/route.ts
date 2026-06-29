@@ -8,7 +8,8 @@
  */
 
 import { NextResponse } from 'next/server'
-import { aiGuard } from '@/lib/ai/aiGuard'
+import { aiGuard, aiErrorResponse } from '@/lib/ai/aiGuard'
+import { maybeEnforceVideoFromAnalyzeRequest } from '@/lib/musashiUsage'
 import { compileFightLang } from '@/lib/compiler/fightlang.compiler'
 import { inferStyle } from '@/lib/strategy/style-inference'
 import type { PoseFrame, PoseLandmark, FightEvidenceLedger } from '@/lib/fightlang/fightlang.types'
@@ -77,6 +78,16 @@ export async function POST(request: Request) {
 
   const guard = await aiGuard(request, 'analyze')
   if (!guard.ok) return guard.response
+
+  try {
+    await maybeEnforceVideoFromAnalyzeRequest(guard.user, {
+      clipDurationMs: data.clip?.durationMs,
+      sourceId: data.clip?.sourceId,
+      enabled: Boolean(data.clip?.durationMs && data.clip.durationMs > 0),
+    })
+  } catch (err) {
+    return aiErrorResponse(err)
+  }
 
   try {
     const poseFrames = normalizePoseFrames(data)

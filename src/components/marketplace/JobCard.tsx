@@ -18,6 +18,7 @@ export interface JobCardData {
   currency: string
   status: JobStatus
   videos: string[]
+  scoutingRequestId?: string | null
   claimDeadlineAt?: string | null
   deliveryDeadlineAt?: string | null
   createdAt: string
@@ -46,7 +47,11 @@ export function JobCard({ job }: { job: JobCardData }) {
           </div>
           <div className="flex flex-wrap items-center gap-2 pt-1">
             <Badge variant="secondary" className="gap-1 text-xs">
-              {job.jobType === 'direct_hire' ? 'Direct Hire' : 'Open Bounty'}
+              {job.scoutingRequestId
+                ? 'Opponent scout'
+                : job.jobType === 'direct_hire'
+                  ? 'Direct hire'
+                  : 'Clip review'}
             </Badge>
             <BeltBadge tier={job.requiredBeltTier} showLabel={false} className="text-[10px] py-0 px-2" />
           </div>

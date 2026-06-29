@@ -41,7 +41,13 @@ SELECT
     ELSE NULL
   END AS read_at,
   created_at
-FROM messages;
+FROM messages
+-- 0007's demo seed (msg_1/msg_2/msg_3) references the legacy `users` table,
+-- not `musashi_users`; skip rows that don't satisfy the new FK rather than
+-- relying on PRAGMA foreign_keys=OFF, which SQLite treats as a no-op while
+-- a transaction is open (true for D1's migration executor).
+WHERE EXISTS (SELECT 1 FROM musashi_users u WHERE u.id = messages.sender_id)
+  AND EXISTS (SELECT 1 FROM musashi_users u WHERE u.id = messages.receiver_id);
 
 DROP TABLE IF EXISTS messages;
 ALTER TABLE __musashi_messages_migration RENAME TO messages;

@@ -97,27 +97,15 @@ export function meetsBeltRequirement(
   return BELT_ORDER.indexOf(candidate) >= BELT_ORDER.indexOf(required)
 }
 
+/** Flat platform commission in basis points (1 bps = 0.01%). 2000 = 20%. */
+export const PLATFORM_FEE_BPS = 2000 // 20%
+
 /**
- * Platform fee in basis points (1 bps = 0.01%). Higher-belt analysts get a
- * lower cut extracted — a "respect tax" discount. These are starting values;
- * they can move into DB config later without touching code.
+ * Platform fee in basis points. Flat 20% on every marketplace transaction,
+ * regardless of analyst belt tier.
  */
-export function platformFeeBps(tier: BeltTier): number {
-  switch (tier) {
-    case 'red':
-      return 1000 // 10%
-    case 'black':
-      return 1100 // 11%
-    case 'brown':
-      return 1200 // 12%
-    case 'purple':
-      return 1300 // 13%
-    case 'blue':
-      return 1400 // 14%
-    case 'white':
-    default:
-      return 1500 // 15%
-  }
+export function platformFeeBps(_tier: BeltTier): number {
+  return PLATFORM_FEE_BPS
 }
 
 /**

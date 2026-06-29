@@ -14,7 +14,7 @@
  */
 import type { D1Database } from './types'
 import { newId } from './types'
-import { BELT_SUMMARY, type BeltColorKey } from './coachRank'
+import { BELT_SUMMARY, coachTitle, type BeltColorKey } from './coachRank'
 import {
   evaluatePromotion,
   POSITIVE_REVIEW_MIN_RATING,
@@ -173,6 +173,31 @@ export async function buildPromotionState(
 // ──────────────────────────────────────────────────────────────────────────
 // Mutations
 // ──────────────────────────────────────────────────────────────────────────
+/** Best-effort in-app notification on promotion — never blocks the rank change. */
+async function notifyPromotion(db: D1Database, userId: string, toBelt: BeltColorKey): Promise<void> {
+  const title = coachTitle({ beltKey: toBelt, degree: toBelt === 'black' ? 1 : 0 })
+  const beltName = toBelt.charAt(0).toUpperCase() + toBelt.slice(1)
+  try {
+    await db
+      .prepare(
+        `INSERT INTO musashi_notifications (id, user_id, type, title, body, payload, is_read, created_at)
+         VALUES (?, ?, 'coach_rank', ?, ?, ?, 0, ?)`,
+      )
+      .bind(
+        newId('ntf'),
+        userId,
+        'Promotion earned',
+        `You've reached ${title} — ${beltName} Rank.`,
+        JSON.stringify({ belt: toBelt, title }),
+        nowIso(),
+      )
+      .run()
+  } catch {
+    // Notifications are best-effort (e.g. FK to musashi_users may not exist for
+    // a non-account coach). A failure here must never roll back a promotion.
+  }
+}
+
 async function applyPromotion(
   db: D1Database,
   userId: string,
@@ -198,6 +223,7 @@ async function applyPromotion(
     actorUserId: opts.actorUserId ?? null,
     notes: opts.notes ?? null,
   })
+  await notifyPromotion(db, userId, toBelt)
 }
 
 async function queueReview(db: D1Database, userId: string, toBelt: BeltColorKey): Promise<void> {

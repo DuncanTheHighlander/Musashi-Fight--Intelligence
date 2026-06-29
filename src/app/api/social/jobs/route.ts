@@ -1,20 +1,20 @@
 /**
- * POST /api/social/jobs      — create a marketplace job (open_bounty | direct_hire)
- * GET  /api/social/jobs      — list/filter jobs
+ * POST /api/social/jobs — create a marketplace job (open_bounty | direct_hire)
+ * GET  /api/social/jobs — list/filter jobs
  *
- * IMPORTANT: Stripe is NOT yet wired. Creating a job writes a `CREATED` row.
- * The fighter then calls the (not-yet-implemented) fund endpoint to move it to
- * FUNDED. The ledger appends a HOLD row with status='pending_stripe' so that
- * when Stripe lands we can reconcile rather than re-architect.
+ * Create writes status=CREATED. POST /api/social/jobs/[id]/fund moves to FUNDED
+ * (mock immediately, stripe via Checkout + webhook).
  */
 import { NextResponse } from 'next/server'
-import { enforceUsage } from '@/lib/musashiUsage'
+import { requireUser } from '@/lib/musashiAuth'
 import { getDb } from '@/lib/marketplace/types'
 import type { JobType, MarketplaceJobRow } from '@/lib/marketplace/types'
 import { createJob } from '@/lib/marketplace/jobs'
 import { MIN_JOB_AMOUNT_CENTS } from '@/lib/marketplace/deadlines'
 import type { BeltTier } from '@/lib/marketplace/beltTier'
 import type { JobStatus } from '@/lib/marketplace/stateMachine'
+import { assertUploadedAssetsOwned } from '@/lib/storage/assets'
+import { toAssetRef } from '@/lib/storage/assetRef'
 
 const VALID_JOB_TYPES: JobType[] = ['open_bounty', 'direct_hire']
 const VALID_BELT_TIERS: BeltTier[] = ['white', 'blue', 'purple', 'brown', 'black', 'red']
@@ -68,7 +68,7 @@ function handleError(e: unknown, fallback: string) {
 // ──────────────────────────────────────────────────────────────────────────
 export async function POST(req: Request) {
   try {
-    const user = await enforceUsage(req, 'chat')
+    const user = await requireUser(req)
     const body = (await req.json()) as Record<string, unknown>
 
     const jobType = String(body?.jobType || 'open_bounty') as JobType
@@ -82,7 +82,7 @@ export async function POST(req: Request) {
     const amountCents = Math.trunc(Number(body?.amountCents) || 0)
     if (amountCents < MIN_JOB_AMOUNT_CENTS) {
       return NextResponse.json(
-        { error: `minimum amount is ${MIN_JOB_AMOUNT_CENTS} cents ($1.00)` },
+        { error: `minimum amount is ${MIN_JOB_AMOUNT_CENTS} cents ($50.00)` },
         { status: 400 },
       )
     }
@@ -90,6 +90,10 @@ export async function POST(req: Request) {
 
     const videos = Array.isArray(body?.videos)
       ? (body.videos as unknown[]).map(String).filter(Boolean)
+      : []
+
+    const assetIds = Array.isArray(body?.assetIds)
+      ? (body.assetIds as unknown[]).map(String).filter(Boolean)
       : []
 
     const requiredBeltTier = VALID_BELT_TIERS.includes(body?.requiredBeltTier as BeltTier)
@@ -104,12 +108,17 @@ export async function POST(req: Request) {
       : null
 
     const db = getDb()
+    if (assetIds.length) {
+      await assertUploadedAssetsOwned(db, assetIds, user.id, 'job_video')
+    }
+    const mergedVideos = [...videos, ...assetIds.map(toAssetRef)]
+
     const job = await createJob(db, {
       fighterId: user.id,
       jobType,
       title,
       brief,
-      videos,
+      videos: mergedVideos,
       amountCents,
       requiredBeltTier,
       analystId,
@@ -131,7 +140,7 @@ export async function POST(req: Request) {
 // ──────────────────────────────────────────────────────────────────────────
 export async function GET(req: Request) {
   try {
-    const user = await enforceUsage(req, 'chat')
+    const user = await requireUser(req)
     const { searchParams } = new URL(req.url)
 
     const mine = searchParams.get('mine') === '1'
@@ -176,6 +185,13 @@ export async function GET(req: Request) {
     if (requiredBeltTier && VALID_BELT_TIERS.includes(requiredBeltTier as BeltTier)) {
       where.push('required_belt_tier = ?')
       params.push(requiredBeltTier)
+    }
+
+    const category = searchParams.get('category')
+    if (category === 'clip') {
+      where.push("(scouting_request_id IS NULL OR scouting_request_id = '')")
+    } else if (category === 'scout') {
+      where.push("scouting_request_id IS NOT NULL AND scouting_request_id != ''")
     }
 
     const fighterId = searchParams.get('fighterId')

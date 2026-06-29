@@ -12,16 +12,26 @@ import { SectionHeader, SectionShell } from '@/components/ui/section-header'
 // Display-only labels. The actual billed amount is controlled by the Stripe
 // price (MUSASHI_STRIPE_PRICE_ID_PRO) — keep this in sync with Stripe.
 const FREE_PRICE_LABEL = '$0'
-const PRO_PRICE_LABEL = '$19'
+
+// Display labels only — the actual charge comes from the Stripe price for each
+// plan key. Create matching Stripe prices and set MUSASHI_STRIPE_PRICE_ID_PRO,
+// _PRO_6MO and _PRO_YEARLY so each interval works at checkout.
+const PLAN_OPTIONS = [
+  { key: 'pro_monthly', label: 'Monthly', price: '$19', period: '/month', note: 'Billed monthly' },
+  { key: 'pro_6mo', label: '6 months', price: '$99', period: '/6 mo', note: '$16.50/mo · save ~13%' },
+  { key: 'pro_yearly', label: 'Yearly', price: '$179', period: '/year', note: '$14.92/mo · save ~21%' },
+] as const
 
 const FREE_FEATURES = [
-  'Daily AI analysis quota',
-  'Fight Lab skeleton tracking',
-  'Basic chat & coaching limits',
+  '3 free AI video analyses (10 seconds max)',
+  'Marketplace access (browse, post jobs, hire analysts)',
+  'Fight Lab skeleton tracking on uploaded clips',
+  'Daily chat & coaching limits',
 ]
 
 const PRO_FEATURES = [
-  'Higher analyze, chat, reflex & track quotas',
+  '10 AI video analyses per week (30 seconds max)',
+  'Higher analyze, chat, reflex & track daily quotas',
   'Higher per-minute rate limit',
   'Faster iteration, fewer interruptions',
 ]
@@ -30,6 +40,8 @@ export default function PricingPage() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [active, setActive] = useState<boolean | null>(null)
+  const [planKey, setPlanKey] = useState<(typeof PLAN_OPTIONS)[number]['key']>('pro_monthly')
+  const selectedPlan = PLAN_OPTIONS.find((p) => p.key === planKey) ?? PLAN_OPTIONS[0]
 
   const loadStatus = async () => {
     try {
@@ -56,7 +68,7 @@ export default function PricingPage() {
       const res = await fetch('/api/billing/create-checkout-session', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ plan: 'pro' }),
+        body: JSON.stringify({ plan: planKey }),
       })
 
       if (res.status === 401) {
@@ -115,7 +127,7 @@ export default function PricingPage() {
         iconAccent="gold"
         eyebrow="Plans & Billing"
         title="Pricing"
-        subtitle="Upgrade for higher daily limits and faster iteration."
+        subtitle="Free: three 10-second AI clips. Pro: ten 30-second clips each week."
         action={
           <Button asChild variant="ghost" className="h-10 text-muted-foreground hover:text-foreground">
             <Link href="/">
@@ -130,7 +142,7 @@ export default function PricingPage() {
         <Card className="musashi-card-lift flex flex-col border-border/60 bg-card/60">
           <CardHeader className="space-y-1.5">
             <CardTitle className="text-xl">Free</CardTitle>
-            <CardDescription>Good for learning and quick checks.</CardDescription>
+            <CardDescription>Three free AI clips, then marketplace & tracking.</CardDescription>
             <div className="flex items-baseline gap-1 pt-1">
               <span className="text-4xl font-bold tracking-tight">{FREE_PRICE_LABEL}</span>
               <span className="text-sm text-muted-foreground">/month</span>
@@ -166,10 +178,27 @@ export default function PricingPage() {
                 </Badge>
               )}
             </CardTitle>
-            <CardDescription>More reps, more coaching, fewer interruptions.</CardDescription>
-            <div className="flex items-baseline gap-1 pt-1">
-              <span className="text-4xl font-bold tracking-tight">{PRO_PRICE_LABEL}</span>
-              <span className="text-sm text-muted-foreground">/month</span>
+            <CardDescription>Weekly video quota plus higher daily AI limits.</CardDescription>
+            <div className="pt-1">
+              <div className="mb-2 inline-flex rounded-md border border-border/60 p-0.5">
+                {PLAN_OPTIONS.map((opt) => (
+                  <button
+                    key={opt.key}
+                    type="button"
+                    onClick={() => setPlanKey(opt.key)}
+                    className={`rounded px-2.5 py-1 text-xs font-medium transition ${
+                      planKey === opt.key ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+              <div className="flex items-baseline gap-1">
+                <span className="text-4xl font-bold tracking-tight">{selectedPlan.price}</span>
+                <span className="text-sm text-muted-foreground">{selectedPlan.period}</span>
+              </div>
+              <p className="mt-1 text-xs text-muted-foreground">{selectedPlan.note}</p>
             </div>
           </CardHeader>
           <CardContent className="flex-1">

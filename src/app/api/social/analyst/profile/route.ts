@@ -25,6 +25,7 @@ import { getDb } from '@/lib/marketplace/types'
 import { ensureAnalystProfile } from '@/lib/marketplace/jobs'
 import { canEnableDirectHire, maxCapacity as tierMaxCapacity } from '@/lib/marketplace/beltTier'
 import { ensureCoachRank } from '@/lib/marketplace/coachRankStore'
+import { resolveMarketplacePaymentMode } from '@/lib/marketplace/payments'
 
 export async function GET(req: Request) {
   try {
@@ -67,6 +68,7 @@ export async function GET(req: Request) {
         currentCapacity: num(profile.current_capacity),
         maxCapacity: num(profile.max_capacity, 3),
         stripePayoutsEnabled: Boolean(profile.stripe_payouts_enabled),
+        stripeConnectId: profile.stripe_connect_id,
       },
     })
   } catch (e) {
@@ -126,7 +128,16 @@ export async function PATCH(req: Request) {
           { status: 400 },
         )
       }
-      // TODO(stripe): require stripe_payouts_enabled=1 before allowing true here.
+      if (
+        body.directHireEnabled &&
+        (await resolveMarketplacePaymentMode()) === 'stripe' &&
+        !profile.stripe_payouts_enabled
+      ) {
+        return NextResponse.json(
+          { error: 'Complete Stripe Connect onboarding before enabling direct hire' },
+          { status: 400 },
+        )
+      }
       updates.push('direct_hire_enabled = ?')
       values.push(body.directHireEnabled ? 1 : 0)
     }

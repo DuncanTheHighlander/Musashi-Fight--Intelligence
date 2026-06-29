@@ -7,7 +7,7 @@
  * Coach Rank at White automatically once their analyst profile is enabled.
  */
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -46,6 +46,33 @@ export default function OnboardingPage() {
   const router = useRouter()
   const { user } = useAuth()
   const { toast } = useToast()
+
+  const [checkingStatus, setCheckingStatus] = useState(true)
+
+  useEffect(() => {
+    if (!user) {
+      setCheckingStatus(false)
+      return
+    }
+    let cancelled = false
+    ;(async () => {
+      try {
+        const res = await fetch('/api/auth/onboarding-status', { credentials: 'include' })
+        if (!res.ok) return
+        const data = (await res.json()) as { complete?: boolean; redirectTo?: string }
+        if (!cancelled && data.complete) {
+          router.replace(data.redirectTo || '/')
+        }
+      } catch {
+        /* stay on onboarding */
+      } finally {
+        if (!cancelled) setCheckingStatus(false)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [user, router])
 
   const [step, setStep] = useState<Step>('path')
   const [path, setPath] = useState<Path>('train')
@@ -134,6 +161,13 @@ export default function OnboardingPage() {
 
   return (
     <div className="container mx-auto max-w-2xl px-4 py-10 lg:py-14">
+      {checkingStatus ? (
+        <div className="flex flex-col items-center justify-center py-24 gap-3 text-muted-foreground">
+          <Loader2 className="h-8 w-8 animate-spin" />
+          <p className="text-sm">Checking your profile…</p>
+        </div>
+      ) : (
+      <>
       <div className="mb-8 text-center">
         <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">Welcome to Musashi</h1>
         <p className="mt-2 text-sm text-muted-foreground">
@@ -272,6 +306,8 @@ export default function OnboardingPage() {
             </div>
           </CardContent>
         </Card>
+      )}
+      </>
       )}
     </div>
   )

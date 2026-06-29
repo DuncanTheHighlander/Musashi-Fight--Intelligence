@@ -42,6 +42,8 @@ export async function GET(req: Request) {
     if (status && VALID_STATUSES.includes(status)) {
       where.push('d.status = ?')
       params.push(status)
+    } else if (status === 'active') {
+      where.push("d.status IN ('OPEN', 'UNDER_REVIEW')")
     }
 
     if (mine) {

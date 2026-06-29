@@ -6,6 +6,10 @@ import type { D1Database, MarketplaceJobRow } from './types'
 import { applyTransition, releaseJob } from './jobs'
 import { recordRefund } from './ledger'
 import { runPromotionSweep } from './coachRankStore'
+import {
+  executeJobRefundMoneyMovement,
+  executeJobReleaseMoneyMovement,
+} from './moneyMovement'
 
 const MAX_JOBS_PER_RUN = 100
 
@@ -47,6 +51,14 @@ export async function runMarketplaceCron(db: D1Database): Promise<MarketplaceCro
         event: 'EXPIRE',
         payload: { reason: 'claim_deadline_expired' },
       })
+      try {
+        await executeJobRefundMoneyMovement(db, job.id)
+      } catch (e) {
+        errors.push({
+          jobId: job.id,
+          error: e instanceof Error ? e.message : 'refund provider failed',
+        })
+      }
       expiredClaimCount++
     } catch (e) {
       errors.push({ jobId: job.id, error: e instanceof Error ? e.message : 'unknown' })
@@ -90,6 +102,14 @@ export async function runMarketplaceCron(db: D1Database): Promise<MarketplaceCro
           .bind(new Date().toISOString(), job.analyst_id)
           .run()
       }
+      try {
+        await executeJobRefundMoneyMovement(db, job.id)
+      } catch (e) {
+        errors.push({
+          jobId: job.id,
+          error: e instanceof Error ? e.message : 'refund provider failed',
+        })
+      }
       expiredDeliveryCount++
     } catch (e) {
       errors.push({ jobId: job.id, error: e instanceof Error ? e.message : 'unknown' })
@@ -111,6 +131,14 @@ export async function runMarketplaceCron(db: D1Database): Promise<MarketplaceCro
   for (const job of autoRelease.results || []) {
     try {
       await releaseJob(db, { jobId: job.id, autoReleased: true })
+      try {
+        await executeJobReleaseMoneyMovement(db, job.id)
+      } catch (e) {
+        errors.push({
+          jobId: job.id,
+          error: e instanceof Error ? e.message : 'auto-release payout failed',
+        })
+      }
       autoReleasedCount++
     } catch (e) {
       errors.push({ jobId: job.id, error: e instanceof Error ? e.message : 'unknown' })

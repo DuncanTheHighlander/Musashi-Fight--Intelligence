@@ -2,6 +2,7 @@ import { safeParseResponse } from '@/lib/safeJson'
 import type { FightEvidenceLedger } from '@/lib/fightlang/fightlang.types'
 import type { CoachingPayload } from '@/lib/validators/llm-output.validator'
 import { GEMINI_MODEL_DEFAULT, GEMINI_EMBED_MODEL_DEFAULT, resolvedModels } from '@/lib/gemini/models'
+import { getServerSecret, requireGeminiApiKey } from '@/lib/cloudflare/secrets'
 import { getCoachingCache, sha256Hex } from '@/lib/ai/coachingCache'
 
 class GeminiQuotaError extends Error {
@@ -26,10 +27,9 @@ type GeminiGenerateResponse = {
   error?: { message?: string }
 }
 
-const getKey = (explicit?: string): string => {
-  const key = explicit || process.env.GEMINI_API_KEY
-  if (!key) throw new Error('GEMINI_API_KEY not configured')
-  return key
+const resolveKey = async (explicit?: string): Promise<string> => {
+  if (explicit) return explicit
+  return requireGeminiApiKey()
 }
 
 const defaultEmbedModel = (): GeminiModelName =>
@@ -198,7 +198,7 @@ export async function generateJson<T>(args: {
   maxOutputTokens?: number
   apiKey?: string
 }): Promise<{ model: string; data: T; rawText: string }> {
-  const apiKey = getKey(args.apiKey)
+  const apiKey = await resolveKey(args.apiKey)
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(args.model)}:generateContent?key=${encodeURIComponent(apiKey)}`
 
   const body = JSON.stringify({
@@ -337,7 +337,7 @@ export async function generateGroundedCoaching(args: {
     return { model: 'dry-run-mock', payload: mockPayload, rawText: JSON.stringify(mockPayload) }
   }
 
-  const apiKey = getKey(args.config?.apiKey)
+  const apiKey = await resolveKey(args.config?.apiKey)
   const prompt = buildGroundedCoachingPrompt({
     ledger: args.ledger,
     retrievedSnippets: args.retrievedSnippets,

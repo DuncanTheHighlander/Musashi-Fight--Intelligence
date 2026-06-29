@@ -1,7 +1,9 @@
 /**
  * Production environment validation.
  * Call validateEnv() at app startup to ensure all required env vars are set.
+ * Secrets Store-backed secrets (e.g. STRIPE) are validated via validateProductionSecrets().
  */
+import { getServerSecret } from '@/lib/cloudflare/secrets'
 
 type EnvVar = {
   key: string
@@ -81,9 +83,22 @@ export function validateEnv(): { valid: boolean; errors: string[]; warnings: str
     errors.push('MUSASHI_DISABLE_AUTH=1 must NOT be set in production. Remove it.')
   }
 
-  if (isProd && !process.env.STRIPE_SECRET_KEY?.startsWith('sk_live')) {
-    warnings.push('STRIPE_SECRET_KEY is not a live key. Payments will not work in production.')
+  return { valid: errors.length === 0, errors, warnings }
+}
+
+/** Async checks for Secrets Store-backed production secrets (Stripe, etc.). */
+export async function validateProductionSecrets(): Promise<string[]> {
+  const warnings: string[] = []
+  if (process.env.NODE_ENV !== 'production') return warnings
+
+  const stripeKey = await getServerSecret('STRIPE_SECRET_KEY')
+  if (!stripeKey) {
+    warnings.push(
+      'STRIPE secret is not configured (Secrets Store binding SECRET_STRIPE). Payments will not work in production.',
+    )
+  } else if (!stripeKey.startsWith('sk_live')) {
+    warnings.push('STRIPE secret is not a live key. Payments will not work in production.')
   }
 
-  return { valid: errors.length === 0, errors, warnings }
+  return warnings
 }

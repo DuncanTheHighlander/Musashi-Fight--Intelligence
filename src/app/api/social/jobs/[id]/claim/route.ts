@@ -3,7 +3,7 @@
  * Gated on: is_analyst_enabled, belt_tier >= required_belt_tier, capacity not full.
  */
 import { NextResponse } from 'next/server'
-import { enforceUsage } from '@/lib/musashiUsage'
+import { requireUser } from '@/lib/musashiAuth'
 import { getDb } from '@/lib/marketplace/types'
 import { claimJob } from '@/lib/marketplace/jobs'
 
@@ -11,7 +11,7 @@ type Params = { id: string }
 
 export async function POST(req: Request, context: { params: Promise<Params> }) {
   try {
-    const user = await enforceUsage(req, 'chat')
+    const user = await requireUser(req)
     const { id } = await context.params
     const db = getDb()
     const job = await claimJob(db, { jobId: id, analystId: user.id })

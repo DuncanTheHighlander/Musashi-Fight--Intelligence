@@ -3,6 +3,22 @@ import { getDb } from '@/lib/db'
 
 export type MusashiAction = 'analyze' | 'chat' | 'reflex' | 'track'
 
+/** Max clip length for free-tier AI video analysis (seconds). */
+export const FREE_MAX_VIDEO_SEC = 10
+/** Max clip length for Pro AI video analysis (seconds). */
+export const PRO_MAX_VIDEO_SEC = 30
+/** Lifetime free AI video analyses before upgrade required. */
+export const FREE_LIFETIME_VIDEOS = 3
+/**
+ * Pro weekly AI video analyses.
+ * Rationale: at ~$0.08–0.12 per 30s multimodal pipeline (Gemini + optional cloud pose),
+ * 10/week ≈ $1.00/week COGS on ~$4.75/week revenue share at $19/mo — safe margin with
+ * headroom for token spikes while allowing ~1–2 training clips per day.
+ */
+export const PRO_WEEKLY_VIDEOS = 10
+/** Shogun / admin bypass ceiling (seconds). */
+export const SHOGUN_MAX_VIDEO_SEC = 600
+
 type Limits = {
   perMinute: number
   dailyAnalyze: number
@@ -70,21 +86,8 @@ const loadOverrides = async (userId: string): Promise<Partial<Limits>> => {
 const resolveLimits = async (userId: string, role: MusashiRole): Promise<Limits> => {
   let base = defaultLimitsForRole(role)
   if (role === 'user') {
-    try {
-      const db = getDb()
-      const nowIso = new Date().toISOString()
-      const row = await db
-        .prepare(
-          "SELECT stripe_subscription_id FROM musashi_stripe_subscriptions WHERE user_id = ? AND status IN ('active','trialing') AND (current_period_end IS NULL OR current_period_end >= ?) LIMIT 1"
-        )
-        .bind(userId, nowIso)
-        .first()
-
-      if (row?.stripe_subscription_id) {
-        base = paidLimits
-      }
-    } catch {
-      void 0
+    if (await isProSubscriber(userId, role)) {
+      base = paidLimits
     }
   }
   const overrides = await loadOverrides(userId)
@@ -101,9 +104,9 @@ const resolveLimits = async (userId: string, role: MusashiRole): Promise<Limits>
   }
 }
 
-const enforceRateLimit = async (userId: string, perMinute: number) => {
+const enforceRateLimit = async (userId: string, perMinute: number, bucketMinute = getMinuteBucket()) => {
   const db = getDb()
-  const bucket = getMinuteBucket()
+  const bucket = bucketMinute
 
   const row = await db
     .prepare('SELECT count FROM musashi_rate_limit_minute WHERE user_id = ? AND bucket_minute = ?')
@@ -122,6 +125,19 @@ const enforceRateLimit = async (userId: string, perMinute: number) => {
     )
     .bind(userId, bucket, now)
     .run()
+}
+
+/** Separate bucket namespace for expensive cloud pose proxy calls. */
+const CLOUD_POSE_BUCKET_OFFSET = 1_000_000_000
+
+export const cloudPosePerMinuteLimit = (): number => {
+  const configured = Number(process.env.MUSASHI_POSE_PROXY_PER_MINUTE)
+  if (Number.isFinite(configured) && configured > 0) return Math.trunc(configured)
+  return 6
+}
+
+export const enforceCloudPoseRateLimit = async (userId: string): Promise<void> => {
+  await enforceRateLimit(userId, cloudPosePerMinuteLimit(), getMinuteBucket() + CLOUD_POSE_BUCKET_OFFSET)
 }
 
 const usageColumnForAction = (action: MusashiAction) => {
@@ -170,12 +186,259 @@ const enforceDailyUsage = async (userId: string, limits: Limits, action: Musashi
     .run()
 }
 
+const getWeekStartKey = (): string => {
+  const now = new Date()
+  const day = now.getUTCDay()
+  const diff = day === 0 ? -6 : 1 - day
+  const monday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + diff))
+  return monday.toISOString().slice(0, 10)
+}
+
+export const isProSubscriber = async (userId: string, role: MusashiRole): Promise<boolean> => {
+  if (role === 'shogun') return true
+  try {
+    const db = getDb()
+    const nowIso = new Date().toISOString()
+    const row = await db
+      .prepare(
+        "SELECT stripe_subscription_id FROM musashi_stripe_subscriptions WHERE user_id = ? AND status IN ('active','trialing') AND (current_period_end IS NULL OR current_period_end >= ?) LIMIT 1"
+      )
+      .bind(userId, nowIso)
+      .first()
+    return Boolean(row?.stripe_subscription_id)
+  } catch {
+    return false
+  }
+}
+
+type VideoTierLimits = {
+  maxDurationSec: number
+  weeklyVideos: number
+  lifetimeFreeVideos: number
+}
+
+const loadVideoOverrides = async (userId: string): Promise<Partial<VideoTierLimits>> => {
+  const db = getDb()
+  const row = await db
+    .prepare('SELECT weekly_video_limit, max_video_duration_sec FROM musashi_user_limits WHERE user_id = ?')
+    .bind(userId)
+    .first()
+
+  if (!row) return {}
+  const out: Partial<VideoTierLimits> = {}
+  if (row.max_video_duration_sec != null) out.maxDurationSec = Number(row.max_video_duration_sec)
+  if (row.weekly_video_limit != null) out.weeklyVideos = Number(row.weekly_video_limit)
+  return out
+}
+
+export const resolveVideoTierLimits = async (userId: string, role: MusashiRole): Promise<VideoTierLimits> => {
+  if (role === 'shogun') {
+    return {
+      maxDurationSec: SHOGUN_MAX_VIDEO_SEC,
+      weeklyVideos: 10_000,
+      lifetimeFreeVideos: FREE_LIFETIME_VIDEOS,
+    }
+  }
+
+  const isPro = await isProSubscriber(userId, role)
+  const overrides = await loadVideoOverrides(userId)
+  const baseMaxSec = isPro ? PRO_MAX_VIDEO_SEC : FREE_MAX_VIDEO_SEC
+  const baseWeekly = isPro ? PRO_WEEKLY_VIDEOS : 0
+
+  return {
+    maxDurationSec: Number.isFinite(overrides.maxDurationSec as number)
+      ? Math.max(1, overrides.maxDurationSec as number)
+      : baseMaxSec,
+    weeklyVideos: Number.isFinite(overrides.weeklyVideos as number)
+      ? Math.max(0, overrides.weeklyVideos as number)
+      : baseWeekly,
+    lifetimeFreeVideos: FREE_LIFETIME_VIDEOS,
+  }
+}
+
+export type VideoAnalysisOpts = {
+  clipDurationSec: number
+  /** Stable id for this clip (e.g. Gemini file URI) — dedupes follow-up coaching. */
+  clipKey: string
+}
+
+/**
+ * Enforce per-tier video duration + lifetime (free) / weekly (Pro) quotas.
+ * Skips increment when the same clipKey was already charged for this user.
+ */
+export const enforceVideoAnalysis = async (
+  userId: string,
+  role: MusashiRole,
+  opts: VideoAnalysisOpts
+): Promise<void> => {
+  if (process.env.MUSASHI_DISABLE_AUTH === '1') return
+
+  const clipDurationSec = Number(opts.clipDurationSec)
+  const clipKey = String(opts.clipKey || '').trim().slice(0, 256)
+  if (!clipKey || !Number.isFinite(clipDurationSec) || clipDurationSec <= 0) {
+    throw new Error('VIDEO_CONTEXT_REQUIRED')
+  }
+
+  const limits = await resolveVideoTierLimits(userId, role)
+  if (clipDurationSec > limits.maxDurationSec) {
+    throw new Error('VIDEO_DURATION_EXCEEDED')
+  }
+
+  const db = getDb()
+  const alreadyConsumed = await db
+    .prepare('SELECT 1 AS ok FROM musashi_video_clips_consumed WHERE user_id = ? AND clip_key = ?')
+    .bind(userId, clipKey)
+    .first()
+  if (alreadyConsumed) return
+
+  const isPro = role === 'shogun' || (await isProSubscriber(userId, role))
+  const now = new Date().toISOString()
+
+  if (!isPro) {
+    const row = await db
+      .prepare('SELECT free_videos_used FROM musashi_video_lifetime WHERE user_id = ?')
+      .bind(userId)
+      .first()
+    const used = row?.free_videos_used != null ? Number(row.free_videos_used) : 0
+    if (used >= limits.lifetimeFreeVideos) {
+      throw new Error('FREE_VIDEO_QUOTA')
+    }
+
+    await db
+      .prepare(
+        `INSERT INTO musashi_video_lifetime (user_id, free_videos_used, updated_at)
+         VALUES (?, 1, ?)
+         ON CONFLICT(user_id) DO UPDATE SET
+           free_videos_used = free_videos_used + 1,
+           updated_at = excluded.updated_at`
+      )
+      .bind(userId, now)
+      .run()
+  } else if (role !== 'shogun') {
+    const weekStart = getWeekStartKey()
+    const row = await db
+      .prepare('SELECT video_count FROM musashi_video_weekly WHERE user_id = ? AND week_start = ?')
+      .bind(userId, weekStart)
+      .first()
+    const count = row?.video_count != null ? Number(row.video_count) : 0
+    if (count >= limits.weeklyVideos) {
+      throw new Error('WEEKLY_VIDEO_QUOTA')
+    }
+
+    await db
+      .prepare(
+        `INSERT INTO musashi_video_weekly (user_id, week_start, video_count, updated_at)
+         VALUES (?, ?, 1, ?)
+         ON CONFLICT(user_id, week_start) DO UPDATE SET
+           video_count = video_count + 1,
+           updated_at = excluded.updated_at`
+      )
+      .bind(userId, weekStart, now)
+      .run()
+  }
+
+  await db
+    .prepare(
+      'INSERT OR IGNORE INTO musashi_video_clips_consumed (user_id, clip_key, consumed_at) VALUES (?, ?, ?)'
+    )
+    .bind(userId, clipKey, now)
+    .run()
+}
+
+/** Map `/api/fight` action names to the correct daily + per-minute quota bucket. */
+export const fightActionToQuotaBucket = (action: string): MusashiAction => {
+  switch (action) {
+    case 'upload_video':
+    case 'analyze_frame':
+    case 'analyze_frames':
+    case 'analyze_video_stream':
+    case 'strategy':
+      return 'analyze'
+    case 'reflex':
+      return 'reflex'
+    case 'track':
+      return 'track'
+    case 'presets':
+      return 'chat'
+    case 'chat':
+    default:
+      return 'chat'
+  }
+}
+
+/** Whether this fight-hub action can start a billable AI video analysis session. */
+export const fightActionConsumesVideoQuota = (action: string, body: Record<string, unknown>): boolean => {
+  if (['analyze_frame', 'analyze_frames', 'analyze_video_stream'].includes(action)) return true
+  if (action === 'chat' || action === 'strategy') {
+    const ctx = body?.context as Record<string, unknown> | undefined
+    return Boolean(
+      ctx?.nativeVideo &&
+        ctx?.videoFileUri &&
+        typeof ctx?.clipDuration === 'number' &&
+        Number(ctx.clipDuration) > 0
+    )
+  }
+  return false
+}
+
+export const extractFightVideoQuotaContext = (
+  action: string,
+  body: Record<string, unknown>,
+  formData: FormData | null
+): VideoAnalysisOpts | null => {
+  if (action === 'analyze_video_stream') {
+    const clipDurationSec = Number(body?.clipDuration)
+    const clipKey = String(
+      body?.videoFileUri ||
+        (body?.clip as { sourceId?: string } | undefined)?.sourceId ||
+        '',
+    ).trim()
+    if (!clipKey || !Number.isFinite(clipDurationSec) || clipDurationSec <= 0) return null
+    return { clipDurationSec, clipKey }
+  }
+
+  if (['analyze_frame', 'analyze_frames'].includes(action) && formData) {
+    const clipDurationSec = Number(formData.get('clipDuration') || formData.get('clipDurationSec') || 0)
+    const clipKey = String(
+      formData.get('videoFileUri') || formData.get('clipKey') || formData.get('sessionId') || ''
+    ).trim()
+    if (!clipKey || !Number.isFinite(clipDurationSec) || clipDurationSec <= 0) return null
+    return { clipDurationSec, clipKey }
+  }
+
+  if (action === 'chat' || action === 'strategy') {
+    const ctx = body?.context as Record<string, unknown> | undefined
+    if (!ctx?.nativeVideo || !ctx?.videoFileUri) return null
+    const clipDurationSec = Number(ctx.clipDuration)
+    const clipKey = String(ctx.videoFileUri || ctx.sourceId || '').trim()
+    if (!clipKey || !Number.isFinite(clipDurationSec) || clipDurationSec <= 0) return null
+    return { clipDurationSec, clipKey }
+  }
+
+  return null
+}
+
+/** Shared helper for standalone analyze routes (`/api/fight/analyze`, etc.). */
+export const maybeEnforceVideoFromAnalyzeRequest = async (
+  user: { id: string; role: MusashiRole } | null,
+  opts: { clipDurationMs?: number; videoFileUri?: string; sourceId?: string; enabled?: boolean }
+): Promise<void> => {
+  if (!user || opts.enabled === false) return
+  const clipKey = String(opts.videoFileUri || opts.sourceId || '').trim()
+  const clipDurationSec = Number(opts.clipDurationMs ?? 0) / 1000
+  if (!clipKey || !Number.isFinite(clipDurationSec) || clipDurationSec <= 0) return
+  await enforceVideoAnalysis(user.id, user.role, { clipDurationSec, clipKey })
+}
+
 export const enforceUsage = async (req: Request, action: MusashiAction) => {
   if (process.env.MUSASHI_DISABLE_AUTH === '1') {
     return {
       id: 'dev',
       email: 'dev@local',
+      display_name: 'Dev User',
       role: 'shogun' as MusashiRole,
+      emailVerifiedAt: null,
+      passwordUpdatedAt: null,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     }
