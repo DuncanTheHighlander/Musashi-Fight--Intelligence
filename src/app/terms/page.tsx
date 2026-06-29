@@ -116,8 +116,10 @@ export default function TermsPage() {
 
             <Section title="10. Contact">
               <p>
-                Questions about these terms can be sent to support via the contact options in the
-                app or to the Musashi support email listed on our website.
+                Questions about these terms can be sent to{' '}
+                <a href="mailto:support@musashi.ai" className="text-foreground underline">
+                  support@musashi.ai
+                </a>.
               </p>
             </Section>
 

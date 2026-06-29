@@ -24,7 +24,7 @@ import {
   Menu,
   X,
   Brain,
-  Briefcase,
+  ShieldCheck,
 } from 'lucide-react'
 import { MusashiIcon, MusashiWordmark } from '@/components/icons/MusashiIcon'
 import { ThemeToggle } from '@/components/ThemeToggle'
@@ -34,7 +34,6 @@ import { useSection, type AppSection } from '@/contexts/SectionContext'
 const ALL_NAV_ITEMS: { section: AppSection; label: string; icon: typeof Brain; description: string; preview?: boolean }[] = [
   { section: 'coach', label: 'Fight Lab', icon: Brain, description: 'Upload clips for tactical analysis' },
   { section: 'fighters', label: 'Fighters', icon: Users, description: 'Connect with fighters' },
-  { section: 'marketplace', label: 'Marketplace', icon: ShoppingBag, description: 'Techniques & coaching', preview: true },
   { section: 'scouting', label: 'Scouting', icon: Target, description: 'Opponent analysis', preview: true },
   { section: 'coaches', label: 'Coaches', icon: Crown, description: 'Top-ranked coaches', preview: true },
   { section: 'messages', label: 'Messages', icon: MessageSquare, description: 'Chat with fighters', preview: true },
@@ -43,7 +42,7 @@ const ALL_NAV_ITEMS: { section: AppSection; label: string; icon: typeof Brain; d
 ]
 
 const ALL_ROUTED_NAV_ITEMS: { href: string; label: string; icon: typeof Brain; description: string; preview?: boolean }[] = [
-  { href: '/marketplace', label: 'Hire Coach', icon: Briefcase, description: 'Post a bounty or hire an analyst', preview: true },
+  { href: '/marketplace', label: 'Marketplace', icon: ShoppingBag, description: 'Post a bounty or hire an analyst' },
 ]
 
 const PREVIEW_ENABLED = process.env.NEXT_PUBLIC_MUSASHI_PREVIEW_FEATURES === '1'
@@ -194,12 +193,20 @@ export default function Navigation() {
                   Profile
                 </DropdownMenuItem>
                 {user.role === 'shogun' && (
-                  <DropdownMenuItem asChild>
-                    <Link href="/shogun" className="flex items-center gap-2">
-                      <Crown className="h-4 w-4" />
-                      Admin Panel
-                    </Link>
-                  </DropdownMenuItem>
+                  <>
+                    <DropdownMenuItem asChild>
+                      <Link href="/shogun" className="flex items-center gap-2">
+                        <Crown className="h-4 w-4" />
+                        Admin Panel
+                      </Link>
+                    </DropdownMenuItem>
+                    <DropdownMenuItem asChild>
+                      <Link href="/admin/coach-review" className="flex items-center gap-2">
+                        <ShieldCheck className="h-4 w-4" />
+                        Quality Review
+                      </Link>
+                    </DropdownMenuItem>
+                  </>
                 )}
                 <DropdownMenuSeparator />
                 <DropdownMenuItem

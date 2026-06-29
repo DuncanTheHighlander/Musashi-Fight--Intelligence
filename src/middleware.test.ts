@@ -26,6 +26,21 @@ describe('middleware decisions', () => {
     expect(isAuthRateBucket('/api/auth/logout')).toBe(true)
   })
 
+  it('keeps password reset and email verify routes public for logged-out recovery', () => {
+    expect(isPublicPath('/forgot-password')).toBe(true)
+    expect(isPublicPath('/reset-password')).toBe(true)
+    expect(isPublicPath('/verify-email')).toBe(true)
+    expect(isPublicPath('/api/auth/password/reset/request')).toBe(true)
+    expect(isPublicPath('/api/auth/password/reset/confirm')).toBe(true)
+    expect(isPublicPath('/api/auth/email/verify/confirm')).toBe(true)
+  })
+
+  it('counts password reset routes in the auth rate bucket', () => {
+    expect(isAuthRateBucket('/api/auth/password/reset/request')).toBe(true)
+    expect(isAuthRateBucket('/api/auth/password/reset/confirm')).toBe(true)
+    expect(isAuthRateBucket('/api/auth/email/verify/confirm')).toBe(true)
+  })
+
   it('does not count generic api endpoints in the auth bucket', () => {
     expect(isAuthRateBucket('/api/fight/analyze')).toBe(false)
     expect(isAuthRateBucket('/api/social/profiles')).toBe(false)

@@ -39,6 +39,15 @@ describe('validateEnv', () => {
     expect(result.errors).toContain('Missing required env var: GEMINI_API_KEY')
   })
 
+  test('rejects MUSASHI_DISABLE_AUTH in production', () => {
+    setProdEnv({ MUSASHI_DISABLE_AUTH: '1' })
+
+    const result = validateEnv()
+
+    expect(result.valid).toBe(false)
+    expect(result.errors).toContain('MUSASHI_DISABLE_AUTH=1 must NOT be set in production. Remove it.')
+  })
+
   test('rejects the default shogun password in production', () => {
     setProdEnv({ MUSASHI_SHOGUN_PASSWORD: 'ChangeThisSecurePassword123!@#' })
 

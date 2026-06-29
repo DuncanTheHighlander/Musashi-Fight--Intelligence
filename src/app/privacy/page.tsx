@@ -92,8 +92,10 @@ export default function PrivacyPage() {
 
             <Section title="8. Contact">
               <p>
-                Privacy questions or deletion requests can be sent to support via the contact
-                options in the app or to the Musashi support email listed on our website.
+                Privacy questions or deletion requests can be sent to{' '}
+                <a href="mailto:support@musashi.ai" className="text-foreground underline">
+                  support@musashi.ai
+                </a>.
               </p>
             </Section>
 

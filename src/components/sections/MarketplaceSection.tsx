@@ -1,6 +1,7 @@
 'use client'
 
 import React, { useState, useEffect } from 'react'
+import Link from 'next/link'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -25,12 +26,14 @@ import {
   Zap,
   Target,
   Award,
+  Briefcase,
+  ArrowRight,
 } from 'lucide-react'
 import { parseApiResponse } from '@/lib/safeJson'
 import { useSection, type AppSection } from '@/contexts/SectionContext'
+import { useAuth } from '@/hooks/useAuth'
 import { SectionHeader, SectionShell } from '@/components/ui/section-header'
 import { cn } from '@/lib/utils'
-import { ComingSoonSection } from './ComingSoonSection'
 
 interface MarketplaceProduct {
   id: string
@@ -74,9 +77,11 @@ const PREVIEW_ENABLED = process.env.NEXT_PUBLIC_MUSASHI_PREVIEW_FEATURES === '1'
 
 export default function MarketplaceSection() {
   const { toast } = useToast()
+  const { user } = useAuth()
   const { setActiveSection } = useSection()
   const [products, setProducts] = useState<MarketplaceProduct[]>([])
   const [loading, setLoading] = useState(true)
+  const [purchasingId, setPurchasingId] = useState<string | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
   const [selectedType, setSelectedType] = useState<string | null>(null)
   const [selectedLevel, setSelectedLevel] = useState<string | null>(null)
@@ -106,11 +111,53 @@ export default function MarketplaceSection() {
     return () => { cancelled = true }
   }, [])
 
-  const handlePurchase = (contentId: string) => {
-    toast({
-      title: 'Coming Soon',
-      description: 'Purchases will be available when Stripe integration is complete.',
-    })
+  const handlePurchase = async (contentId: string) => {
+    if (!user) {
+      toast({ title: 'Log in required', description: 'Sign in to purchase content.', variant: 'destructive' })
+      return
+    }
+    setPurchasingId(contentId)
+    try {
+      const origin = window.location.origin
+      const res = await fetch(`/api/social/marketplace/${contentId}/purchase`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          successUrl: `${origin}/?section=marketplace&purchase=success&productId=${contentId}`,
+          cancelUrl: `${origin}/?section=marketplace&purchase=cancelled&productId=${contentId}`,
+        }),
+      })
+      const data = await parseApiResponse<{
+        alreadyOwned?: boolean
+        videoUrl?: string | null
+        payment?: { requiresRedirect?: boolean; checkoutUrl?: string | null }
+      }>(res)
+
+      if (data.payment?.requiresRedirect && data.payment.checkoutUrl) {
+        window.location.assign(data.payment.checkoutUrl)
+        return
+      }
+
+      if (data.videoUrl) {
+        window.open(data.videoUrl, '_blank', 'noopener,noreferrer')
+      }
+
+      toast({
+        title: data.alreadyOwned ? 'Already purchased' : 'Purchase complete',
+        description: data.videoUrl
+          ? 'Your content is ready to view.'
+          : 'Check your library for access.',
+      })
+    } catch (err) {
+      toast({
+        title: 'Purchase failed',
+        description: err instanceof Error ? err.message : 'Unknown error',
+        variant: 'destructive',
+      })
+    } finally {
+      setPurchasingId(null)
+    }
   }
 
   const handlePreview = (contentId: string) => {
@@ -191,12 +238,33 @@ export default function MarketplaceSection() {
 
   if (!PREVIEW_ENABLED) {
     return (
-      <ComingSoonSection
-        title="Marketplace"
-        icon={ShoppingCart}
-        description="Premium techniques and coaching products from verified fighters."
-        details="Available soon. We're finishing payment integration before opening this up."
-      />
+      <SectionShell>
+        <SectionHeader
+          icon={Briefcase}
+          eyebrow="Coach marketplace"
+          title="Hire a fight analyst"
+          subtitle="Post a bounty, browse analysts, and get breakdowns delivered to your inbox."
+        />
+        <Card className="border-border/60 bg-card">
+          <CardContent className="flex flex-col items-center gap-4 p-10 text-center sm:p-12">
+            <div className="flex h-14 w-14 items-center justify-center rounded-full bg-primary/15 text-primary">
+              <Briefcase className="h-7 w-7" />
+            </div>
+            <div className="max-w-md space-y-2">
+              <CardTitle className="text-xl">Coach marketplace is live</CardTitle>
+              <CardDescription>
+                Post open bounties, browse verified analysts, and get fight breakdowns delivered.
+              </CardDescription>
+            </div>
+            <Button asChild size="lg" className="gap-2">
+              <Link href="/marketplace">
+                Open Marketplace
+                <ArrowRight className="h-4 w-4" />
+              </Link>
+            </Button>
+          </CardContent>
+        </Card>
+      </SectionShell>
     )
   }
 
@@ -422,9 +490,12 @@ export default function MarketplaceSection() {
               </div>
               <DialogFooter>
                 <Button variant="outline" onClick={() => setPreviewProduct(null)}>Close</Button>
-                <Button onClick={() => { handlePurchase(previewProduct.id); setPreviewProduct(null) }}>
+                <Button
+                  onClick={() => { void handlePurchase(previewProduct.id); setPreviewProduct(null) }}
+                  disabled={purchasingId === previewProduct.id}
+                >
                   <ShoppingCart className="h-4 w-4 mr-2" />
-                  Purchase ${previewProduct.price}
+                  {purchasingId === previewProduct.id ? 'Processing…' : `Purchase $${previewProduct.price}`}
                 </Button>
               </DialogFooter>
             </>

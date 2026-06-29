@@ -68,7 +68,11 @@ Thumbs.db
 .dev.vars
 wrangler.toml.backup
 
+# Capacitor mobile shell (commit android/ source; ignore build output)
+mobile/node_modules/
+
 # Custom
+.uploads/
 .windsurf/plans/*.md
 temp/
 tmp/

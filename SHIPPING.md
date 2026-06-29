@@ -1,5 +1,59 @@
 # Ship Musashi to Web + App Store (ASAP path)
 
+## Customer MVP — Fight Lab only (fastest path to paying users)
+
+Ship **upload → skeleton → AI coaching** first. Marketplace, Stripe, and R2 can wait.
+
+### Before deploy (one-time)
+
+```bash
+cd "C:\Users\smith\Desktop\codiing\Musashi\fight app\download_package"
+pnpm install
+pnpm icons                    # PWA PNG icons (192 + 512)
+pnpm check:launch             # see what's set vs missing
+```
+
+Set these in **Cloudflare Worker secrets** (`wrangler secret put NAME`):
+
+| Secret | Purpose |
+|--------|---------|
+| `GEMINI_API_KEY` | AI coaching |
+| `MUSASHI_SESSION_SECRET` | Login sessions (random 32+ chars) |
+| `MUSASHI_SHOGUN_EMAIL` | Admin account |
+| `MUSASHI_SHOGUN_PASSWORD` | Strong admin password |
+| `MUSASHI_CRON_SECRET` | Marketplace cron (random string) |
+
+Set in **wrangler.toml `[vars]`** or Cloudflare dashboard:
+
+| Var | MVP value |
+|-----|-----------|
+| `MUSASHI_APP_URL` | Your public URL, e.g. `https://app.yourdomain.com` |
+| `MUSASHI_MARKETPLACE_PAYMENTS` | `mock` (default in wrangler.toml) |
+| `MUSASHI_STORAGE_MODE` | `mock` (Fight Lab does not need R2) |
+
+**Do NOT** set `MUSASHI_DISABLE_AUTH=1` in production.
+
+### Deploy
+
+```bash
+pnpm db:migrate:remote
+pnpm predeploy          # prod env check + 226 unit tests
+pnpm deploy
+```
+
+### First customer test (Android)
+
+1. Open your deployed URL in **Chrome on Android**
+2. Sign up at `/signup` → onboarding → home **Fight Lab**
+3. Upload a short clip → confirm skeleton + coaching appear
+4. Chrome menu → **Add to Home screen** (PWA)
+
+### Optional: Android app icon (Capacitor)
+
+Edit `mobile/capacitor.config.json` → set `server.url` to your deployed URL, then follow the Capacitor section below.
+
+---
+
 ## What runs where (cheapest)
 
 | Work | Where | Cost |
@@ -84,28 +138,29 @@ curl -H "X-Cron-Secret: $MUSASHI_CRON_SECRET" https://YOUR_DOMAIN/api/cron/marke
 
 ## App Store / Play Store (2–3 weeks)
 
-Musashi is a **Next.js web app**. Fastest store path: **Capacitor WebView** loading your production URL (no native rewrite).
+Musashi is a **Next.js web app**. Store path: existing **Capacitor WebView shell** in `mobile/` loading your production URL (no native rewrite).
+
+**Google Play:** full step-by-step → [`docs/ANDROID.md`](docs/ANDROID.md) and [`mobile/README.md`](mobile/README.md).
+
+Quick path after web deploy:
 
 ```bash
-cd mobile
-npm init -y
-npm install @capacitor/core @capacitor/cli @capacitor/ios @capacitor/android
-npx cap init Musashi com.musashi.fightcoach --web-dir .
-# Edit capacitor.config.json → set server.url to your deployed URL
-npx cap add ios
-npx cap add android
-npx cap sync
-npx cap open ios    # Xcode → Archive → App Store Connect
-npx cap open android # Android Studio → Release bundle
+pnpm icons                    # 192 + 512 PNG from public/musashi-icon.svg
+# Edit mobile/capacitor.config.json → server.url = your live HTTPS URL
+pnpm mobile:sync
+pnpm mobile:android           # Android Studio → Generate Signed Bundle (AAB)
 ```
+
+Package name for Play Console: **`ai.musashi.app`** (must match `appId` in `mobile/capacitor.config.json`).
 
 **Store checklist**
 
-- [ ] PNG app icons 1024×1024 (generate from `public/musashi-icon.svg`)
-- [ ] Privacy policy + Terms URLs on your domain
-- [ ] Apple Developer ($99/yr) + Google Play ($25 one-time)
-- [ ] Screenshots from Fight Lab on real phone
-- [ ] Age rating questionnaire (sports / fitness)
+- [ ] Web deployed; `server.url` matches live URL (`cleartext: false`)
+- [ ] `pnpm icons` — Play listing icon 512×512 from `public/musashi-icon-512.png`
+- [ ] Privacy policy + Terms at `https://YOUR_DOMAIN/privacy` and `/terms`
+- [ ] Google Play developer account ($25 one-time)
+- [ ] Signed release AAB + Play Console listing (screenshots, data safety, content rating)
+- [ ] Apple Developer ($99/yr) if shipping iOS later
 
 **Apple note:** WebView apps need clear native value — camera roll upload + offline skeleton cache count. Capacitor file picker plugin recommended.
 

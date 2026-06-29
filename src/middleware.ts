@@ -65,9 +65,9 @@ export function middleware(request: NextRequest) {
     }
   }
 
-  // Auth check: if MUSASHI_DISABLE_AUTH is set, skip auth redirect
-  // In production, this env var should NOT be set
-  if (process.env.MUSASHI_DISABLE_AUTH === '1') {
+  // Auth check: if MUSASHI_DISABLE_AUTH is set, skip auth redirect (dev/local only).
+  // In production, auth bypass is never honored even if the env var is mis-set.
+  if (process.env.MUSASHI_DISABLE_AUTH === '1' && process.env.NODE_ENV !== 'production') {
     return response
   }
 

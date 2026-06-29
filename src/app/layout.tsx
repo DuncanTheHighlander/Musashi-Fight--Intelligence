@@ -28,11 +28,23 @@ const orbitron = Orbitron({
 export const metadata: Metadata = {
   title: 'Musashi - AI Combat Coach & Social Platform',
   description: 'AI-powered fight analysis, coaching, and combat sports community',
+  applicationName: 'Musashi',
   manifest: '/manifest.json',
   appleWebApp: { capable: true, title: 'Musashi' },
+  icons: {
+    icon: [
+      { url: '/musashi-icon-192.png', sizes: '192x192', type: 'image/png' },
+      { url: '/musashi-icon-512.png', sizes: '512x512', type: 'image/png' },
+    ],
+    apple: '/musashi-icon-192.png',
+  },
 }
 
 export const viewport: Viewport = {
+  width: 'device-width',
+  initialScale: 1,
+  maximumScale: 5,
+  viewportFit: 'cover',
   themeColor: [
     { media: '(prefers-color-scheme: light)', color: '#8b7355' },
     { media: '(prefers-color-scheme: dark)', color: '#1a1816' },

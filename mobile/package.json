@@ -1,0 +1,22 @@
+{
+  "name": "musashi-mobile",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Capacitor WebView shell for Musashi (loads production web app URL)",
+  "scripts": {
+    "sync": "cap sync",
+    "copy": "cap copy",
+    "android:open": "cap open android",
+    "android:add": "cap add android"
+  },
+  "dependencies": {
+    "@capacitor/android": "^8.4.1",
+    "@capacitor/core": "^8.4.1",
+    "@capacitor/splash-screen": "^8.0.1",
+    "@capacitor/status-bar": "^8.0.1"
+  },
+  "devDependencies": {
+    "@capacitor/assets": "^3.0.5",
+    "@capacitor/cli": "^8.4.1"
+  }
+}
