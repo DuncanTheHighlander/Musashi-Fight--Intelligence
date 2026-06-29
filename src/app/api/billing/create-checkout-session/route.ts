@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { requireUser } from '@/lib/musashiAuth'
 import { getDb } from '@/lib/db'
+import { requireStripeSecretKey } from '@/lib/stripe/getStripeSecretKey'
 
 const stripeRequest = async (secretKey: string, method: string, path: string, body?: URLSearchParams) => {
   const resp = await fetch(`https://api.stripe.com${path}`, {
@@ -29,8 +30,10 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
   }
 
-  const secretKey = process.env.STRIPE_SECRET_KEY
-  if (!secretKey) {
+  let secretKey: string
+  try {
+    secretKey = await requireStripeSecretKey()
+  } catch {
     return NextResponse.json({ error: 'Stripe not configured' }, { status: 501 })
   }
 
@@ -44,19 +47,34 @@ export async function POST(req: Request) {
   const plan = String(body?.plan || '').trim().toLowerCase()
   const explicitPriceId = String(body?.priceId || '').trim()
 
-  const proPriceId = String(process.env.MUSASHI_STRIPE_PRICE_ID_PRO || process.env.STRIPE_PRICE_ID_PRO || '').trim()
+  // Plan key → ordered env vars holding its Stripe price id. Create each price
+  // in Stripe and set the env var to enable that billing interval.
+  const PLAN_PRICE_ENV: Record<string, string[]> = {
+    pro: ['MUSASHI_STRIPE_PRICE_ID_PRO', 'STRIPE_PRICE_ID_PRO'],
+    pro_monthly: ['MUSASHI_STRIPE_PRICE_ID_PRO', 'STRIPE_PRICE_ID_PRO'],
+    pro_6mo: ['MUSASHI_STRIPE_PRICE_ID_PRO_6MO'],
+    pro_yearly: ['MUSASHI_STRIPE_PRICE_ID_PRO_YEARLY'],
+  }
+  const resolvePlanPriceId = (planKey: string): string => {
+    for (const k of PLAN_PRICE_ENV[planKey] ?? []) {
+      const v = String(process.env[k] || '').trim()
+      if (v) return v
+    }
+    return ''
+  }
+
   const allowlistRaw = String(process.env.MUSASHI_STRIPE_ALLOWED_PRICE_IDS || '').trim()
   const allowlist = allowlistRaw ? allowlistRaw.split(',').map((s) => s.trim()).filter(Boolean) : []
 
   let priceId = ''
   if (plan) {
-    if (plan !== 'pro') {
+    if (!(plan in PLAN_PRICE_ENV)) {
       return NextResponse.json({ error: 'Invalid plan' }, { status: 400 })
     }
-    if (!proPriceId) {
+    priceId = resolvePlanPriceId(plan)
+    if (!priceId) {
       return NextResponse.json({ error: 'Plan not configured' }, { status: 501 })
     }
-    priceId = proPriceId
   } else if (explicitPriceId) {
     if (allowlist.length > 0 && !allowlist.includes(explicitPriceId)) {
       return NextResponse.json({ error: 'Invalid price' }, { status: 400 })
@@ -100,6 +118,7 @@ export async function POST(req: Request) {
   form.set('success_url', successUrl)
   form.set('cancel_url', cancelUrl)
 
+  form.set('allow_promotion_codes', 'true')
   form.set('client_reference_id', user.id)
   form.set('metadata[musashi_user_id]', user.id)
   form.set('subscription_data[metadata][musashi_user_id]', user.id)

@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { requireUser } from '@/lib/musashiAuth'
 import { getDb } from '@/lib/db'
+import { requireStripeSecretKey } from '@/lib/stripe/getStripeSecretKey'
 
 const stripeRequest = async (secretKey: string, method: string, path: string, body?: URLSearchParams) => {
   const resp = await fetch(`https://api.stripe.com${path}`, {
@@ -30,8 +31,12 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
   }
 
-  const secretKey = process.env.STRIPE_SECRET_KEY
-  if (!secretKey) return NextResponse.json({ error: 'Stripe not configured' }, { status: 501 })
+  let secretKey: string
+  try {
+    secretKey = await requireStripeSecretKey()
+  } catch {
+    return NextResponse.json({ error: 'Stripe not configured' }, { status: 501 })
+  }
 
   const db = getDb()
   const row = await db

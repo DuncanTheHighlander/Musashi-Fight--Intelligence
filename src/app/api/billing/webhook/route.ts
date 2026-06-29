@@ -1,7 +1,10 @@
 import { NextResponse } from 'next/server'
 
 import { getDb, type D1Database } from '@/lib/db'
+import { getStripeSecretKey } from '@/lib/stripe/getStripeSecretKey'
 import { completeJobFunding } from '@/lib/marketplace/jobs'
+import { completeContentPurchaseFromCheckout } from '@/lib/marketplace/contentPurchases'
+import { refreshConnectPayoutStatusByAccountId } from '@/lib/marketplace/connect'
 
 const enc = new TextEncoder()
 
@@ -126,7 +129,7 @@ const completeMarketplaceCheckoutSession = async (db: D1Database, session: any) 
 }
 
 export async function POST(req: Request) {
-  const secretKey = process.env.STRIPE_SECRET_KEY
+  const secretKey = await getStripeSecretKey()
   const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET
   if (!secretKey || !webhookSecret) {
     return NextResponse.json({ error: 'Stripe not configured' }, { status: 501 })
@@ -176,7 +179,17 @@ export async function POST(req: Request) {
       const customerId = String(obj?.customer || '').trim()
       const fallbackUserId = customerId ? await lookupUserIdByCustomerId(db, customerId) : null
       await upsertSubscription(db, obj, fallbackUserId)
+    } else if (type === 'account.updated') {
+      const accountId = String(obj?.id || '').trim()
+      if (accountId) {
+        await refreshConnectPayoutStatusByAccountId(db, accountId)
+      }
     } else if (type === 'checkout.session.completed') {
+      const handledContent = await completeContentPurchaseFromCheckout(db, obj?.metadata || {})
+      if (handledContent) {
+        return NextResponse.json({ received: true }, { status: 200 })
+      }
+
       const handledMarketplace = await completeMarketplaceCheckoutSession(db, obj)
       if (handledMarketplace) {
         return NextResponse.json({ received: true }, { status: 200 })
