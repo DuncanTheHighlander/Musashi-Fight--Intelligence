@@ -4,6 +4,7 @@ import type { CoachingPayload } from '@/lib/validators/llm-output.validator'
 import { GEMINI_MODEL_DEFAULT, GEMINI_EMBED_MODEL_DEFAULT, resolvedModels } from '@/lib/gemini/models'
 import { getServerSecret, requireGeminiApiKey } from '@/lib/cloudflare/secrets'
 import { getCoachingCache, sha256Hex } from '@/lib/ai/coachingCache'
+import { buildCoachBrainBlock, type CoachBrainContext } from '@/lib/coachBrain/coachBrain'
 
 class GeminiQuotaError extends Error {
   status: number
@@ -15,6 +16,7 @@ class GeminiQuotaError extends Error {
 }
 
 export type GeminiModelName = string & {}
+export type CoachingFocusTarget = 'A' | 'B' | 'both'
 
 export type GeminiClientConfig = Readonly<{
   apiKey?: string
@@ -38,9 +40,54 @@ const defaultEmbedModel = (): GeminiModelName =>
 const defaultReasonModel = (): GeminiModelName =>
   ((process.env.GEMINI_REASON_MODEL || process.env.GEMINI_MODEL || GEMINI_MODEL_DEFAULT) as GeminiModelName)
 
+const normalizeCoachingFocus = (focus?: CoachingFocusTarget): CoachingFocusTarget =>
+  focus === 'A' || focus === 'B' ? focus : 'both'
+
+function buildCoachingFocusBlock(focus?: CoachingFocusTarget): string {
+  const normalized = normalizeCoachingFocus(focus)
+  if (normalized === 'A') {
+    return [
+      'FOCUS TARGET: Fighter A / blue corner',
+      '- quickCues MUST use actorId "A".',
+      '- suggestedCorrections MUST use actorId "A".',
+      '- overlayAnnotations MUST use actorId "A".',
+      '- You may mention Fighter B only as context for the opening, threat, or tactical consequence.',
+    ].join('\n')
+  }
+  if (normalized === 'B') {
+    return [
+      'FOCUS TARGET: Fighter B / red corner',
+      '- quickCues MUST use actorId "B".',
+      '- suggestedCorrections MUST use actorId "B".',
+      '- overlayAnnotations MUST use actorId "B".',
+      '- You may mention Fighter A only as context for the opening, threat, or tactical consequence.',
+    ].join('\n')
+  }
+  return [
+    'FOCUS TARGET: both fighters',
+    '- Return the most important cues across A and B.',
+    '- Use actorId "A" or "B" on every cue, correction, and overlay annotation.',
+  ].join('\n')
+}
+
+export function applyCoachingFocus(payload: CoachingPayload, focus?: CoachingFocusTarget): CoachingPayload {
+  const normalized = normalizeCoachingFocus(focus)
+  if (normalized === 'both') return payload
+
+  return {
+    ...payload,
+    quickCues: payload.quickCues.filter((cue) => cue.actorId === normalized),
+    suggestedCorrections: payload.suggestedCorrections.filter((correction) => correction.actorId === normalized),
+    overlayAnnotations: payload.overlayAnnotations.filter((annotation) => annotation.actorId === normalized),
+  }
+}
+
 export function buildGroundedCoachingPrompt(args: {
   ledger: FightEvidenceLedger
   retrievedSnippets: Array<{ score: number; text: string; metadata?: Record<string, unknown> }>
+  focusTarget?: CoachingFocusTarget
+  /** Coach-brain context: selectedSport, clipType, userQuestion, poseEngine, poseQuality. */
+  coachBrain?: CoachBrainContext
 }): string {
   // Keep the model constrained: ledger is truth; everything must cite evidence ids when available.
   const ledgerJson = JSON.stringify(
@@ -75,10 +122,19 @@ export function buildGroundedCoachingPrompt(args: {
 SHORT CLIP MODE (under ~16s): Every sentence must earn its place. Lead with the sharpest tactical read. Prefer ONE killer mainDiagnosis over three vague ones. quickCues: max 4 items, each a compressed broadcast line (viewer has seconds, not minutes).`
     : ''
 
-  return `You are Musashi Fight Intelligence — a world-class fight analyst providing YouTube-style tactical breakdowns.
+  // Coach brain: global coach rules always, plus the selected sport's brain
+  // when it resolves. Appended context — never replaces the ledger contract.
+  const coachBrainBlock = buildCoachBrainBlock({
+    ...args.coachBrain,
+    fighterFocus: args.coachBrain?.fighterFocus ?? normalizeCoachingFocus(args.focusTarget),
+  })
 
-YOUR JOB: Analyze the fight evidence and produce TACTICAL, CONCEPTUAL coaching — not just "guard is low" or "stance is orthodox." Explain WHAT IS HAPPENING in the fight: who is controlling range, who is creating openings, what counters are available, what habits are forming, and what each fighter should do differently.
+  return `You are Musashi Fight Intelligence - an elite combat-sports coach and tactical fight analyst.
+
+YOUR JOB: Analyze the fight evidence and produce serious, technical, useful coaching. The feedback must feel like a high-level coach reviewed the exchange: what happened, why it happened, what danger or opportunity it creates, and exactly what the selected fighter should fix next.
 ${shortClipBlock}
+
+${buildCoachingFocusBlock(args.focusTarget)}
 
 CRITICAL CONTRACT:
 - The FightEvidenceLedger is the ONLY source of truth for what was detected.
@@ -92,6 +148,41 @@ CRITICAL CONTRACT:
 - Example: Don't say "Strike detected." Instead say "A lands a cross — B's guard was low after the hook, creating a clean line."
 - Cite evidence IDs when available.
 - Output MUST be valid JSON. No markdown.
+- Do not sound like generic ChatGPT, a hype commentator, a motivational coach, or a robotic timestamp summarizer.
+- Do not structure the response as Moment 1 / Moment 2 / Moment 3. Timestamps are evidence, not the main structure.
+- When evidence allows, return exactly 3 high-value adjustments: technical, tactical, and training/habit.
+
+SOURCE INFLUENCE LIBRARY:
+Use these as analytical lenses only. Do not copy any creator, do not cite paid instructionals, and do not imitate a living person's voice. Musashi must have its own original voice: direct, precise, serious, evidence-based, and coach-like.
+- tactical pattern recognition: stance matchups, entries, exits, traps, feints, counters, range games, and why a technique works against this opponent.
+- Disciplined reasoning: separate what looked good from what was repeatable, what was accidental, and what still creates danger.
+- Striking dynamics: rhythm, pocket exchanges, pressure, who wins the first beat, who wins the second beat, and whether the fighter is safe after landing.
+- Simplicity and interception: remove wasted movement, attack preparation, use the shortest effective answer.
+- Timing and initiative: attack on the opponent's reset beat, break rhythm, control distance, and know when not to attack.
+- Boxing fundamentals and power mechanics: stance, base, footwork, hand return, weight transfer, compact punching, pivots, counters, and aggressive defense.
+- Wrestling systems: stance discipline, hand fighting, lead-foot exposure, level-change timing, angle, penetration, finishes, mat returns, and re-attacks.
+- Grappling systems and systems thinking: frames, posture, hip line, shoulder control, passing stability, back control, positional hierarchy, and control before submission.
+- MMA transitions: safe pressure across striking, clinch, takedown, cage/wall, and ground ranges; blend attacks without exposing the next range.
+- Training design: turning corrections into drills, reps, constraints, and clear success conditions.
+
+Use this higher-level structure inside the existing JSON:
+- mainDiagnosis = Coach's Read: 2-5 sentences explaining the tactical story, the pattern that mattered, what the selected fighter did well, what repeated issue created danger, and how the opponent can read or exploit it.
+- quickCues = exactly 3 short corner commands when evidence allows. Each cue must be direct, actor-specific, actionable, and evidence-supported.
+- suggestedCorrections = exactly 3 detailed adjustments when evidence allows:
+  1. Adjustment 1 - Technical adjustment: the highest-leverage mechanics fix.
+  2. Adjustment 2 - Tactical adjustment: the decision, timing, range, or matchup fix.
+  3. Adjustment 3 - Training/habit adjustment: a drill or repeatable assignment that builds the habit.
+- overlayAnnotations = replay labels. Keep them short enough for video and tied to real actorId/time/evidence.
+- styleNotes = broader tactical tendencies, not vague labels.
+- audioScript = coach voiceover: short, human, direct, names the main read, the 3 adjustments, and one drill cue.
+
+SPORT-SPECIFIC LENS:
+- If striking evidence dominates, prioritize stance, guard, hand return, head position, centerline, distance, timing, rhythm, feints, foot position, jab quality, entries, exits, counter windows, and defensive responsibility after offense.
+- If wrestling evidence dominates, prioritize stance height, hand fighting, inside tie, head position, lead foot exposure, level-change timing, setup, angle, penetration, hips, finish, sprawl, re-attack, mat return, and chain wrestling.
+- If grappling evidence dominates, prioritize frames, posture, base, hip line, inside position, underhooks, shoulder control, elbow-knee connection, guard retention, passing pressure, pinning, escapes, submission control, and connection before movement.
+- If MMA evidence dominates, prioritize range transitions, striking into takedowns, takedown threat into striking, cage/wall pressure, clinch breaks, underhook battles, ground-and-pound posture, submission vs damage tradeoffs, and winning one range without losing the next.
+
+${coachBrainBlock}
 
 Retrieved fight knowledge (use to ground tactical concepts):
 ${retrievedBlock}
@@ -99,9 +190,9 @@ ${retrievedBlock}
 Current FightEvidenceLedger (truncated):
 ${ledgerJson}
 
-CONCISENESS RULE: Be dense and punchy like a ringside analyst, NOT a lecture. Every word must earn its spot. No filler, no generic advice. quickCue ≤15 words. mainDiagnosis ≤30 words. expanded ≤2 sentences. If you can say it in fewer words, do.
+CONCISENESS RULE: Be dense and punchy like an elite corner coach, NOT a lecture. Every word must earn its spot. No filler, no generic advice. quickCue <=15 words. expanded <=2 sentences. If you can say it in fewer words, do.
 
-PRODUCE 3-5 quickCues that sound like a knowledgeable cornerman would say between rounds. Each cue should:
+PRODUCE exactly 3 quickCues when evidence allows. Each cue should:
 1. Describe the TACTICAL SITUATION (what's happening and why it matters)
 2. Identify the OPPORTUNITY or RISK (what can be exploited or must be fixed)
 3. Give an ACTIONABLE INSTRUCTION (what to do differently, specifically)
@@ -123,10 +214,10 @@ OUTPUT JSON SCHEMA (exact keys):
       "audioScript": "string (optional)"
     }
   ],
-  "mainDiagnosis": "string (1-2 sentence fight summary: who is winning the tactical battle and why)",
-  "styleNotes": ["string (observations about fighting style: pressure vs counter, aggressive vs defensive, etc.)"],
+  "mainDiagnosis": "string (Coach's Read: 2-5 sentence tactical story, not generic advice)",
+  "styleNotes": ["string (broader tactical tendencies, not vague labels like aggressive/defensive/needs work)"],
   "suggestedCorrections": [
-    {"actorId":"A|B","title":"string","why":"string (tactical reason)","doInstead":"string (specific technique or adjustment)","evidenceIds":["string"]}
+    {"actorId":"A|B","title":"string (Adjustment 1/2/3 - technical, tactical, or training/habit)","why":"string (problem, tactical reason, and consequence)","doInstead":"string (specific technique, decision, or drill assignment)","evidenceIds":["string"]}
   ],
   "overlayAnnotations": [
     {
@@ -143,7 +234,15 @@ OUTPUT JSON SCHEMA (exact keys):
   "audioScript": "string (optional)"
 }
 
-IMPORTANT: Generate at least 2-4 overlayAnnotations with tactical messages like "Counter opportunity — cross is open" or "Pressing but overextending" — not just repeating fault names. Use timestamps from the ledger.
+IMPORTANT: Generate at least 2-4 overlayAnnotations with tactical messages like "Counter opportunity - cross is open" or "Pressing but overextending" - not just repeating fault names. Use timestamps from the ledger.
+
+QUALITY EXAMPLES:
+- Weak: "Keep your hands up and use better footwork."
+- Strong: "A is entering with pressure, but the exit is unsafe. The right hand comes back low and A resets tall in front of B, giving B the same counter window after each attack."
+- Weak: "Set up your takedowns better."
+- Strong: "The shot is not too slow. It is too naked. Win the hands, move the lead foot, and have the second attack ready."
+- Weak: "Pass harder and control better."
+- Strong: "Clearing the legs is only step one. Stabilize the hips and shoulders before hunting the submission."
 `
 }
 
@@ -319,9 +418,12 @@ export async function generateGroundedCoaching(args: {
   ledger: FightEvidenceLedger
   retrievedSnippets: Array<{ score: number; text: string; metadata?: Record<string, unknown> }>
   config?: GeminiClientConfig
+  focusTarget?: CoachingFocusTarget
   /** Gemini Files API URI — lets Pro SEE the actual fight footage alongside the ledger */
   videoFileUri?: string
   videoMimeType?: string
+  /** Coach-brain context: selectedSport, clipType, userQuestion, poseEngine, poseQuality. */
+  coachBrain?: CoachBrainContext
 }): Promise<{ model: string; payload: CoachingPayload; rawText: string }> {
   // DRY_RUN short-circuit — returns a deterministic mock payload so smoke
   // tests and local iteration don't burn Gemini tokens. Toggle via env:
@@ -334,13 +436,16 @@ export async function generateGroundedCoaching(args: {
       ] as any,
       mainDiagnosis: '[DRY_RUN] Mocked coaching payload — GEMINI_DRY_RUN=1.',
     } as unknown as CoachingPayload
-    return { model: 'dry-run-mock', payload: mockPayload, rawText: JSON.stringify(mockPayload) }
+    const focusedPayload = applyCoachingFocus(mockPayload, args.focusTarget)
+    return { model: 'dry-run-mock', payload: focusedPayload, rawText: JSON.stringify(focusedPayload) }
   }
 
   const apiKey = await resolveKey(args.config?.apiKey)
   const prompt = buildGroundedCoachingPrompt({
     ledger: args.ledger,
     retrievedSnippets: args.retrievedSnippets,
+    focusTarget: args.focusTarget,
+    coachBrain: args.coachBrain,
   })
 
   // Phase 2: dedupe + LRU result cache. Two callers with literally identical
@@ -350,7 +455,7 @@ export async function generateGroundedCoaching(args: {
   const cachingDisabled = process.env.MUSASHI_COACHING_CACHE === '0'
   const cacheKey = cachingDisabled
     ? null
-    : await sha256Hex(`${prompt}\u0000${args.videoFileUri ?? ''}\u0000${args.videoMimeType ?? ''}`)
+    : await sha256Hex(`${prompt}\u0000${normalizeCoachingFocus(args.focusTarget)}\u0000${args.videoFileUri ?? ''}\u0000${args.videoMimeType ?? ''}`)
 
   const runGemini = async (): Promise<{ model: string; payload: CoachingPayload; rawText: string }> => {
     // Model cascade: try the configured Pro model first; on quota/rate errors
@@ -365,13 +470,14 @@ export async function generateGroundedCoaching(args: {
     let lastQuotaError: GeminiQuotaError | null = null
     for (const model of cascade) {
       try {
-        return await attemptCoachingWithModel({
+        const result = await attemptCoachingWithModel({
           model,
           apiKey,
           prompt,
           videoFileUri: args.videoFileUri,
           videoMimeType: args.videoMimeType,
         })
+        return { ...result, payload: applyCoachingFocus(result.payload, args.focusTarget) }
       } catch (err) {
         if (err instanceof GeminiQuotaError) {
           console.warn(`[Gemini] ${model} quota error: ${err.message}. Trying next model in cascade.`)
@@ -385,7 +491,8 @@ export async function generateGroundedCoaching(args: {
     if (allowDemoFallback && lastQuotaError) {
       console.warn(`[Gemini] All models in cascade exhausted; serving demo fallback payload.`)
       const payload = buildDemoFallbackPayload(`HTTP ${lastQuotaError.status}`)
-      return { model: 'demo-fallback', payload, rawText: JSON.stringify(payload) }
+      const focusedPayload = applyCoachingFocus(payload, args.focusTarget)
+      return { model: 'demo-fallback', payload: focusedPayload, rawText: JSON.stringify(focusedPayload) }
     }
 
     throw lastQuotaError ?? new Error('Gemini coaching generation failed')

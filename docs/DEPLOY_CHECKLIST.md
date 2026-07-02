@@ -31,6 +31,11 @@ pnpm exec wrangler login          # browser OAuth — required once
 pnpm exec wrangler whoami         # must show your account
 ```
 
+If `whoami` fails with `Cannot use the access token from location ... [code: 9109]`,
+the token is IP/location restricted. Re-authenticate with `pnpm exec wrangler login`
+from this machine, or edit/create the API token in the Cloudflare dashboard so this
+current network is allowed.
+
 **CI / non-interactive:** create an API token at https://dash.cloudflare.com/profile/api-tokens with Workers Scripts Edit, D1 Edit, R2 Edit, Secrets Store Read. Then:
 
 ```powershell
@@ -92,6 +97,11 @@ pnpm exec wrangler secret put STORAGE_SERVICE_URL
 pnpm exec wrangler secret put STORAGE_ACCESS_KEY
 pnpm exec wrangler secret put STORAGE_SECRET_KEY
 pnpm exec wrangler secret put STORAGE_BUCKET_NAME
+
+# Modal pose proxy
+pnpm exec wrangler secret put MUSASHI_POSE_CLOUD_GPU_URL
+pnpm exec wrangler secret put MUSASHI_POSE_CLOUD_CPU_URL
+pnpm exec wrangler secret put MUSASHI_POSE_CLOUD_TOKEN
 ```
 
 **Generate random secrets (PowerShell):**
@@ -139,6 +149,10 @@ pnpm db:migrate:remote
 ```
 
 Database: `musashi-db` (`eda3460e-70ab-4eef-b273-0efc52007c82`)
+
+Required launch migrations currently include `migrations/0025_gyms_and_credits.sql`,
+`migrations/0026_clip_question_limits.sql`, and
+`migrations/0027_assets_analysis_clip_purpose.sql`.
 
 ---
 
@@ -219,6 +233,9 @@ SECRET_SUPABASE / Supabase       STRIPE_WEBHOOK_SECRET
                                  STORAGE_ACCESS_KEY
                                  STORAGE_SECRET_KEY
                                  STORAGE_BUCKET_NAME
+                                 MUSASHI_POSE_CLOUD_GPU_URL
+                                 MUSASHI_POSE_CLOUD_CPU_URL
+                                 MUSASHI_POSE_CLOUD_TOKEN
 
 wrangler.toml [vars] (plain text, already set):
   MUSASHI_MARKETPLACE_PAYMENTS=stripe

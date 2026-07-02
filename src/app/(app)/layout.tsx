@@ -1,10 +1,9 @@
 'use client'
 
-import Navigation from '@/components/layout/Navigation'
-import { ProfileCompletionBanner } from '@/components/layout/ProfileCompletionBanner'
 import { AuthProvider } from '@/contexts/AuthContext'
 import { SectionProvider } from '@/contexts/SectionContext'
 import { PageErrorBoundary } from '@/components/PageErrorBoundary'
+import { MobileAppFrame } from '@/components/mobile/MobileAppFrame'
 
 export default function AppLayout({
   children,
@@ -14,15 +13,11 @@ export default function AppLayout({
   return (
     <AuthProvider>
       <SectionProvider>
-        <div className="min-h-screen flex flex-col bg-background">
-          <Navigation />
-          <ProfileCompletionBanner />
-          <main className="flex-1 bg-background">
-            <PageErrorBoundary>
-              {children}
-            </PageErrorBoundary>
-          </main>
-        </div>
+        <MobileAppFrame>
+          <PageErrorBoundary>
+            {children}
+          </PageErrorBoundary>
+        </MobileAppFrame>
       </SectionProvider>
     </AuthProvider>
   )

@@ -1,26 +1,11 @@
 'use client'
 
 import React, { useState, useEffect, useCallback, useRef } from 'react'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import { Button } from '@/components/ui/button'
-import { Badge } from '@/components/ui/badge'
-import {
-  Award,
-  Brain,
-  MessageSquare,
-  Sparkles,
-  Target,
-  TrendingUp,
-  Upload,
-  Users,
-  Video,
-} from 'lucide-react'
-import { MusashiIcon, MusashiWordmark } from '@/components/icons/MusashiIcon'
-import { parseApiResponse } from '@/lib/safeJson'
+import { useRouter } from 'next/navigation'
 import dynamic from 'next/dynamic'
-import { Loader2 } from 'lucide-react'
-import { cn } from '@/lib/utils'
+import { Loader2, Video } from 'lucide-react'
 import { useSection } from '@/contexts/SectionContext'
+import { useVoiceSoon } from '@/components/mobile/MobileShell'
 
 // FightCoachExperience pulls in MediaPipe + WASM. Loading it on the server
 // (or even on the client during the initial RSC payload) crashes the dev
@@ -30,8 +15,8 @@ import { useSection } from '@/contexts/SectionContext'
 const FightCoachExperience = dynamic(() => import('@/components/fight/FightCoachExperience'), {
   ssr: false,
   loading: () => (
-    <div className="flex h-[420px] items-center justify-center rounded-2xl border border-border bg-card">
-      <Loader2 className="h-6 w-6 animate-spin text-primary" />
+    <div className="flex h-[420px] items-center justify-center rounded-2xl border bg-ms-surface" style={{ borderColor: 'var(--ms-line10)' }}>
+      <Loader2 className="h-6 w-6 animate-spin text-ms-orange" />
     </div>
   ),
 })
@@ -46,58 +31,11 @@ import ProfileSection from '@/components/sections/ProfileSection'
 
 export default function HomePage() {
   const { activeSection } = useSection()
+  const router = useRouter()
+  const { showVoiceSoon } = useVoiceSoon()
   const [bootstrapVideoFile, setBootstrapVideoFile] = useState<File | null>(null)
   const [autoPlayFixture, setAutoPlayFixture] = useState(false)
   const fixtureLoadedRef = useRef(false)
-  const [stats, setStats] = useState({
-    aiAnalyses: 0,
-    videosReviewed: 0,
-    community: 0,
-    techniques: 0,
-    aiAnalysesTrend: '+0%',
-    videosReviewedTrend: '+0%',
-    communityTrend: '+0%',
-    techniquesTrend: '+0%',
-  })
-  const [statsLoading, setStatsLoading] = useState(true)
-  const [statsError, setStatsError] = useState(false)
-
-  useEffect(() => {
-    let cancelled = false
-    const fetchStats = async () => {
-      try {
-        const response = await fetch('/api/stats')
-        if (cancelled) return
-        if (response.ok) {
-          const data = (await parseApiResponse(response)) as {
-            aiAnalyses: number
-            videosReviewed: number
-            community: number
-            techniques: number
-            aiAnalysesTrend: string
-            videosReviewedTrend: string
-            communityTrend: string
-            techniquesTrend: string
-          }
-          if (!cancelled) {
-            setStats(data)
-            setStatsError(false)
-          }
-        } else {
-          setStatsError(true)
-        }
-      } catch (e) {
-        console.error('Failed to fetch stats:', e)
-        if (!cancelled) setStatsError(true)
-      } finally {
-        if (!cancelled) setStatsLoading(false)
-      }
-    }
-    void fetchStats()
-    return () => {
-      cancelled = true
-    }
-  }, [])
 
   useEffect(() => {
     if (process.env.NODE_ENV === 'production' && !new URLSearchParams(window.location.search).get('qaLoop')) return
@@ -195,6 +133,17 @@ export default function HomePage() {
     e.target.value = ''
     if (!f) return
     setBootstrapVideoFile(f)
+    // The Fight Lab below is the real preview → processing → results surface.
+    scrollToFightLab()
+  }
+
+  // The design's "ask anything, no clip needed" entry — the live AI coach chat
+  // lives in the Fight Lab, so submitting brings the user to it.
+  const [entryDraft, setEntryDraft] = useState('')
+  const onAskCoach = (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!entryDraft.trim()) return
+    scrollToFightLab()
   }
 
   if (activeSection === 'fighters') return <ProfilesSection />
@@ -206,13 +155,7 @@ export default function HomePage() {
   if (activeSection === 'profile') return <ProfileSection />
 
   return (
-    <div className="container mx-auto max-w-6xl space-y-8 p-4 lg:p-6">
-      {OFFLINE && (
-        <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-700 dark:text-amber-300">
-          <strong>Offline mode active.</strong> Coaching analysis is mocked and not running on Gemini.
-          Unset <code className="text-xs">NEXT_PUBLIC_OFFLINE_MODE</code> to use real AI.
-        </div>
-      )}
+    <div style={{ animation: 'ms-up 0.4s ease both' }}>
       <input
         id="musashi-hero-video-input"
         type="file"
@@ -221,165 +164,146 @@ export default function HomePage() {
         aria-label="Upload a fight video"
         onChange={onHeroFileChange}
       />
+      <input
+        id="musashi-hero-record-input"
+        type="file"
+        accept="video/*"
+        capture="environment"
+        className="sr-only"
+        aria-label="Record a fight video"
+        onChange={onHeroFileChange}
+      />
 
-      <div className="musashi-card-lift relative overflow-hidden rounded-3xl border border-border/60 bg-card shadow-xl">
-        {/* Soft warm-earth gradient + subtle grid */}
-        <div className="absolute inset-0 bg-gradient-to-br from-primary/10 via-transparent to-primary/5" />
-        <div className="absolute inset-0 bg-[url('/grid.svg')] opacity-[0.06]" />
+      {/* ---- ANALYZE · UPLOAD (design/musashi-reboot) ---- */}
+      <div className="px-5 pb-7 pt-[26px]">
+        {OFFLINE && (
+          <div className="mb-4 rounded-xl border px-4 py-3 text-[12.5px] text-ms-orange-soft" style={{ borderColor: 'rgba(198,70,27,0.4)', background: 'rgba(198,70,27,0.07)' }}>
+            <strong>Offline mode active.</strong> Coaching analysis is mocked and not running on Gemini.
+          </div>
+        )}
 
-        <div className="relative px-6 py-12 sm:px-10 sm:py-16 lg:px-14 lg:py-20">
-          <div className="flex flex-col items-center text-center gap-8 lg:gap-10">
-            <Badge
-              variant="secondary"
-              className="border-0 bg-primary/15 px-3 py-1 text-[11px] uppercase tracking-[0.18em] text-primary"
-            >
-              <Sparkles className="mr-1.5 h-3 w-3" />
-              AI Fight Intelligence
-            </Badge>
+        <div className="mb-3.5 font-jbmono text-[11px] tracking-[0.22em] text-ms-orange">AI FIGHT INTELLIGENCE</div>
+        <h1 className="mb-3 font-marcellus text-[34px] font-normal leading-[1.08] tracking-[-0.01em] text-ms-bright">
+          Step into<br />your corner.
+        </h1>
+        <p className="mb-[26px] max-w-[300px] text-[14.5px] leading-[1.55] text-ms-muted">
+          Upload a clip and get an elite-level tactical breakdown of your fight — in seconds.
+        </p>
 
-            <MusashiWordmark
-              height={96}
-              className="w-full max-w-3xl lg:!h-[140px]"
-            />
+        <label
+          htmlFor="musashi-hero-video-input"
+          className="flex w-full cursor-pointer flex-col items-center gap-3 rounded-[20px] px-5 py-[34px]"
+          style={{ border: '1.5px dashed rgba(198,70,27,0.5)', background: 'rgba(198,70,27,0.07)' }}
+        >
+          <div className="flex h-[54px] w-[54px] items-center justify-center rounded-2xl" style={{ background: '#C6461B', boxShadow: '0 8px 24px rgba(198,70,27,0.35)' }}>
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <polyline points="17 8 12 3 7 8" />
+              <line x1="12" y1="3" x2="12" y2="15" />
+            </svg>
+          </div>
+          <div className="text-center">
+            <div className="text-[15px] font-semibold text-ms-bone">Tap to upload your clip</div>
+            <div className="mt-[5px] font-jbmono text-[11px] text-ms-faint">MP4 · MOV · WEBM — up to 60s</div>
+          </div>
+        </label>
 
-            <p className="max-w-xl text-balance text-base sm:text-lg leading-relaxed text-muted-foreground">
-              Your AI fight coach, analyst, and training partner.
-              Upload footage for local skeleton tracking, tactical coaching,
-              and clean breakdown tools — in one place.
-            </p>
+        {bootstrapVideoFile && (
+          <div
+            role="status"
+            className="mt-3 flex items-center gap-2 rounded-xl border px-4 py-3 text-[12.5px] text-ms-orange-soft"
+            style={{ borderColor: 'rgba(198,70,27,0.4)', background: 'rgba(198,70,27,0.07)' }}
+          >
+            <Video className="h-4 w-4 shrink-0" aria-hidden />
+            <span className="truncate font-medium">{bootstrapVideoFile.name}</span>
+            <span className="opacity-70">— loading in Fight Lab below</span>
+          </div>
+        )}
 
-            {bootstrapVideoFile && (
-              <div
-                role="status"
-                className="flex flex-col sm:flex-row items-center gap-2 rounded-xl border border-primary/35 bg-primary/10 px-4 py-3 text-sm text-primary"
-              >
-                <Video className="h-4 w-4 shrink-0" aria-hidden />
-                <span className="truncate font-medium">{bootstrapVideoFile.name}</span>
-                <span className="text-primary/70">— loading in Fight Lab below</span>
-              </div>
-            )}
+        <div className="mt-3.5 flex gap-3">
+          <label
+            htmlFor="musashi-hero-record-input"
+            className="flex flex-1 cursor-pointer items-center justify-center gap-2 rounded-[14px] border bg-ms-surface2 px-3 py-[13px] text-[13.5px] font-medium text-ms-text"
+            style={{ borderColor: 'var(--ms-line12)' }}
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              <circle cx="12" cy="12" r="7" />
+              <circle cx="12" cy="12" r="2.5" fill="currentColor" />
+            </svg>
+            Record now
+          </label>
+          <button
+            type="button"
+            onClick={() => router.push('/marketplace')}
+            className="flex flex-1 items-center justify-center gap-2 rounded-[14px] border bg-ms-surface2 px-3 py-[13px] text-[13.5px] font-medium text-ms-text"
+            style={{ borderColor: 'var(--ms-line12)' }}
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="8" r="4" />
+              <path d="M4 21c0-4 3.5-6 8-6s8 2 8 6" />
+            </svg>
+            Hire a coach
+          </button>
+        </div>
 
-            {/* Subtle samurai blade accent */}
-            <div className="flex items-center gap-3 text-muted-foreground/50">
-              <span className="h-px w-12 bg-gradient-to-r from-transparent to-primary/40" />
-              <span className="h-1.5 w-1.5 rotate-45 bg-primary/40" />
-              <span className="h-px w-12 bg-gradient-to-l from-transparent to-primary/40" />
+        {/* Musashi AI Coach — ask anything entry */}
+        <div className="mt-3.5 overflow-hidden rounded-[18px] border" style={{ borderColor: 'var(--ms-line10)', background: 'var(--ms-chat)' }}>
+          <div className="flex items-center gap-2.5 border-b px-3.5 py-3" style={{ borderColor: 'var(--ms-line07)' }}>
+            <div className="flex h-[30px] w-[30px] flex-shrink-0 items-center justify-center rounded-full border bg-ms-surface3" style={{ borderColor: 'rgba(201,162,76,0.3)' }}>
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src="/brand/crest-bone.png" alt="" className="hidden h-[15px] opacity-85 dark:block" />
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src="/brand/crest-ink.png" alt="" className="block h-[15px] opacity-75 dark:hidden" />
             </div>
-
-            <div className="flex flex-col sm:flex-row items-center gap-3 sm:gap-4">
-              <Button
-                size="lg"
-                className="bg-primary hover:bg-primary/90 px-8 h-12 text-base shadow-md"
-                asChild
-              >
-                <label htmlFor="musashi-hero-video-input" className="inline-flex cursor-pointer items-center">
-                  <Upload className="mr-2 h-4 w-4" />
-                  Upload a Clip
-                </label>
-              </Button>
-              <Button
-                size="lg"
-                variant="ghost"
-                type="button"
-                onClick={scrollToFightLab}
-                className="px-6 h-12 text-base text-foreground hover:bg-foreground/5"
-              >
-                Open Fight Lab
-                <MessageSquare className="ml-2 h-4 w-4 opacity-60" />
-              </Button>
+            <div className="flex-1">
+              <div className="flex items-center gap-1.5 text-[13px] font-semibold text-ms-bone">
+                Musashi AI Coach
+                <span className="rounded px-[5px] py-px font-jbmono text-[8px] tracking-[0.06em] text-ms-gold" style={{ background: 'rgba(201,162,76,0.18)' }}>AI</span>
+              </div>
+              <div className="mt-px text-[11px] text-ms-faint">Ask anything — no clip needed</div>
             </div>
           </div>
+          <form onSubmit={onAskCoach} className="flex items-center gap-2 px-3 py-[11px]">
+            <input
+              value={entryDraft}
+              onChange={(e) => setEntryDraft(e.target.value)}
+              placeholder="How do I stop dropping my hands?"
+              className="min-w-0 flex-1 rounded-xl border bg-ms-surface2 px-[13px] py-[11px] text-[13.5px] text-ms-text outline-none placeholder:text-ms-faint"
+              style={{ borderColor: 'var(--ms-line10)' }}
+            />
+            <button
+              type="button"
+              onClick={showVoiceSoon}
+              title="Voice — coming soon"
+              className="flex h-[38px] w-[38px] flex-shrink-0 items-center justify-center rounded-[11px] border bg-ms-surface2 text-ms-faint"
+              style={{ borderColor: 'var(--ms-line10)' }}
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+                <path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v4" />
+              </svg>
+            </button>
+            <button
+              type="submit"
+              className="flex h-[38px] w-[38px] flex-shrink-0 items-center justify-center rounded-[11px] text-white"
+              style={{ background: '#C6461B' }}
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="22" y1="2" x2="11" y2="13" />
+                <polygon points="22 2 15 22 11 13 2 9 22 2" />
+              </svg>
+            </button>
+          </form>
         </div>
       </div>
 
-      {(() => {
-        const allZero =
-          !statsLoading &&
-          !statsError &&
-          stats.aiAnalyses === 0 &&
-          stats.videosReviewed === 0 &&
-          stats.community === 0 &&
-          stats.techniques === 0
-
-        const cards = [
-          { icon: Brain, label: 'AI Analyses', raw: stats.aiAnalyses, trend: stats.aiAnalysesTrend },
-          { icon: Video, label: 'Videos Reviewed', raw: stats.videosReviewed, trend: stats.videosReviewedTrend },
-          { icon: Users, label: 'Community', raw: stats.community, trend: stats.communityTrend },
-          { icon: Award, label: 'Techniques', raw: stats.techniques, trend: stats.techniquesTrend },
-        ]
-
-        const formatValue = (label: string, raw: number) => {
-          if (statsLoading) return '…'
-          if (statsError) return '—'
-          if (label === 'Community' && raw >= 1000) return `${(raw / 1000).toFixed(1)}K`
-          return raw.toLocaleString()
-        }
-
-        return (
-          <section aria-label="Platform activity">
-            <h2 className="font-display mb-4 text-sm tracking-[0.14em] text-muted-foreground">
-              Platform Activity
-            </h2>
-            <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-            {cards.map((stat, i) => {
-              // When the app is genuinely empty (no usage data yet), we suppress
-              // the "+0%" trend chip — a graveyard of green/gray "+0%" badges
-              // signals a broken or abandoned product. We also swap "0" for a
-              // muted dash, so the card reads as "ready, waiting for data"
-              // instead of "zero users / zero activity".
-              const showTrend = !allZero && !statsLoading
-              const displayValue = allZero ? '—' : formatValue(stat.label, stat.raw)
-              // Tints chosen to stay legible on both the dark (default) and
-              // light surfaces — the previous 700-weight text was near-invisible
-              // on the dark warm-earth background.
-              const trendColorClass = statsError
-                ? 'border-0 bg-amber-500/15 text-amber-600 dark:text-amber-300'
-                : stat.trend.startsWith('+') && stat.trend !== '+0%'
-                  ? 'border-0 bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
-                  : 'border-0 bg-muted text-muted-foreground'
-
-              return (
-                <Card key={i} className="musashi-card-lift border-border/60 bg-card shadow-sm">
-                  <CardContent className="p-5">
-                    <div className="flex items-center justify-between">
-                      <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10">
-                        <stat.icon className="h-4 w-4 text-primary" />
-                      </div>
-                      {showTrend ? (
-                        <Badge variant="secondary" className={cn('text-xs', trendColorClass)}>
-                          {statsError ? 'Unavailable' : stat.trend}
-                        </Badge>
-                      ) : null}
-                    </div>
-                    <div className="mt-3">
-                      <div className={cn('font-display text-2xl tabular-nums tracking-wide', allZero && 'text-muted-foreground/60')}>
-                        {displayValue}
-                      </div>
-                      <div className="mt-0.5 text-xs font-medium text-muted-foreground">{stat.label}</div>
-                    </div>
-                  </CardContent>
-                </Card>
-              )
-            })}
-            </div>
-          </section>
-        )
-      })()}
-
-      <section id="fight-lab-anchor" className="scroll-mt-24 outline-none" tabIndex={-1} aria-label="Fight Lab">
-        <div className="mb-5 flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
-          <div>
-            <h2 className="text-xl font-semibold tracking-tight text-foreground sm:text-2xl">
-              Fight Lab
-            </h2>
-            <p className="mt-1 text-sm text-muted-foreground">
-              Upload a clip or try the demo — choose a clip, then wait for Ready and press Play.
-            </p>
-          </div>
-          <Badge variant="secondary" className="w-fit border-0 bg-primary/12 text-primary">
-            <Target className="mr-1.5 h-3 w-3" />
-            Local CV first
-          </Badge>
+      {/* ---- FIGHT LAB — the real preview / processing / results surface ---- */}
+      <section id="fight-lab-anchor" className="scroll-mt-24 px-5 pb-8 outline-none" tabIndex={-1} aria-label="Fight Lab">
+        <div className="mb-4">
+          <h2 className="font-marcellus text-2xl font-normal text-ms-bright">Fight Lab</h2>
+          <p className="mt-1 text-[12.5px] text-ms-muted">
+            Upload a clip or try the demo — choose a clip, then wait for Ready and press Play.
+          </p>
         </div>
         <FightCoachExperience
           hideShellHeader

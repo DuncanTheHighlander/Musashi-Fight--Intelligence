@@ -19,6 +19,15 @@ export const PRO_WEEKLY_VIDEOS = 10
 /** Shogun / admin bypass ceiling (seconds). */
 export const SHOGUN_MAX_VIDEO_SEC = 600
 
+/**
+ * Follow-up AI questions allowed per analyzed clip.
+ * The initial Full Clip Analysis is NOT counted here — only chat/strategy
+ * questions that reference an already-uploaded clip. Bounds per-clip COGS:
+ * each clip-grounded question re-sends video context to Gemini.
+ */
+export const FREE_QUESTIONS_PER_CLIP = 3
+export const PRO_QUESTIONS_PER_CLIP = 15
+
 type Limits = {
   perMinute: number
   dailyAnalyze: number
@@ -342,6 +351,65 @@ export const enforceVideoAnalysis = async (
       'INSERT OR IGNORE INTO musashi_video_clips_consumed (user_id, clip_key, consumed_at) VALUES (?, ?, ?)'
     )
     .bind(userId, clipKey, now)
+    .run()
+}
+
+/** Per-clip follow-up question ceiling for a user's tier. */
+export const questionsPerClipForTier = (isPro: boolean): number =>
+  isPro ? PRO_QUESTIONS_PER_CLIP : FREE_QUESTIONS_PER_CLIP
+
+/**
+ * Extract the clip key a chat/strategy question is grounded on, or null if the
+ * question isn't tied to an uploaded clip (plain text chat is unmetered here).
+ */
+export const extractChatClipKey = (action: string, body: Record<string, unknown>): string | null => {
+  if (action !== 'chat' && action !== 'strategy') return null
+  const ctx = body?.context as Record<string, unknown> | undefined
+  if (!ctx?.videoFileUri) return null
+  const clipKey = String(ctx.videoFileUri).trim().slice(0, 256)
+  return clipKey || null
+}
+
+/**
+ * Enforce the per-clip follow-up question cap. Increments a (user, clip) counter
+ * and throws `CLIP_QUESTION_LIMIT` once the tier ceiling is reached. Shogun is
+ * unlimited; local/dev (auth disabled) is a no-op.
+ */
+export const enforceClipQuestionLimit = async (
+  userId: string,
+  role: MusashiRole,
+  clipKey: string
+): Promise<void> => {
+  if (process.env.MUSASHI_DISABLE_AUTH === '1') return
+  if (role === 'shogun') return
+
+  const key = String(clipKey || '').trim().slice(0, 256)
+  if (!key) return
+
+  const isPro = await isProSubscriber(userId, role)
+  const limit = questionsPerClipForTier(isPro)
+
+  const db = getDb()
+  const row = await db
+    .prepare('SELECT question_count FROM musashi_clip_questions WHERE user_id = ? AND clip_key = ?')
+    .bind(userId, key)
+    .first()
+
+  const used = row?.question_count != null ? Number(row.question_count) : 0
+  if (used >= limit) {
+    throw new Error('CLIP_QUESTION_LIMIT')
+  }
+
+  const now = new Date().toISOString()
+  await db
+    .prepare(
+      `INSERT INTO musashi_clip_questions (user_id, clip_key, question_count, updated_at)
+       VALUES (?, ?, 1, ?)
+       ON CONFLICT(user_id, clip_key) DO UPDATE SET
+         question_count = question_count + 1,
+         updated_at = excluded.updated_at`
+    )
+    .bind(userId, key, now)
     .run()
 }
 

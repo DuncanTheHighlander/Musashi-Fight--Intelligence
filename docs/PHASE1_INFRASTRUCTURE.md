@@ -65,11 +65,17 @@ pnpm exec wrangler whoami         # verify account
 pnpm db:migrate:remote            # applies migrations/ to musashi-db (remote)
 ```
 
+If `whoami` fails with `Cannot use the access token from location ... [code: 9109]`,
+the active token is restricted away from this network. Run `pnpm exec wrangler login`
+again from this machine, or update/create the token in the Cloudflare dashboard with
+an allowed client IP/location. If D1 returns `not authorized [code: 7403]`, the token
+also needs D1 edit permissions for this account.
+
 D1 binding (already in `wrangler.toml`):
 
 - Database name: `musashi-db`
 - Database ID: `eda3460e-70ab-4eef-b273-0efc52007c82`
-- Migrations: 22 files (`0001` … `0022`)
+- Migrations: 27 files (`0001` ... `0027`)
 
 ---
 
@@ -117,6 +123,11 @@ pnpm exec wrangler secret put STORAGE_SERVICE_URL              # https://<accoun
 pnpm exec wrangler secret put STORAGE_ACCESS_KEY
 pnpm exec wrangler secret put STORAGE_SECRET_KEY
 pnpm exec wrangler secret put STORAGE_BUCKET_NAME              # musashi-uploads
+
+# Modal pose proxy
+pnpm exec wrangler secret put MUSASHI_POSE_CLOUD_GPU_URL
+pnpm exec wrangler secret put MUSASHI_POSE_CLOUD_CPU_URL
+pnpm exec wrangler secret put MUSASHI_POSE_CLOUD_TOKEN         # same value as Modal POSE_API_TOKEN
 ```
 
 Optional:

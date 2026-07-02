@@ -27,6 +27,11 @@ export function MediaPipeLogFilter() {
       if (typeof first !== 'string') return null
       if (first.startsWith('INFO: ')) return 'info'
       if (first.startsWith('W ') || first.startsWith('WARNING: ')) return 'warn'
+      // onnxruntime-web (RTMPose backend) logs session warnings through
+      // console.error with ANSI color codes, e.g.
+      // "[0;93m2026-07-01 ... [W:onnxruntime:, session_state.cc:...]".
+      // Benign — demote to warn so the dev overlay stays clean.
+      if (first.includes('[W:onnxruntime')) return 'warn'
       return null
     }
 

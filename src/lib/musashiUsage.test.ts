@@ -4,8 +4,12 @@ import {
   FREE_MAX_VIDEO_SEC,
   PRO_MAX_VIDEO_SEC,
   PRO_WEEKLY_VIDEOS,
+  FREE_QUESTIONS_PER_CLIP,
+  PRO_QUESTIONS_PER_CLIP,
   fightActionConsumesVideoQuota,
   fightActionToQuotaBucket,
+  questionsPerClipForTier,
+  extractChatClipKey,
 } from '@/lib/musashiUsage'
 
 describe('musashiUsage video tier defaults', () => {
@@ -44,5 +48,25 @@ describe('fightActionConsumesVideoQuota', () => {
   it('charges streaming and frame analyze actions', () => {
     expect(fightActionConsumesVideoQuota('analyze_video_stream', {})).toBe(true)
     expect(fightActionConsumesVideoQuota('analyze_frames', {})).toBe(true)
+  })
+})
+
+describe('per-clip question cap', () => {
+  it('uses product-specified per-clip question limits', () => {
+    expect(FREE_QUESTIONS_PER_CLIP).toBe(3)
+    expect(PRO_QUESTIONS_PER_CLIP).toBe(15)
+  })
+
+  it('resolves the per-clip ceiling by tier', () => {
+    expect(questionsPerClipForTier(false)).toBe(FREE_QUESTIONS_PER_CLIP)
+    expect(questionsPerClipForTier(true)).toBe(PRO_QUESTIONS_PER_CLIP)
+  })
+
+  it('extracts the clip key only for clip-grounded chat/strategy questions', () => {
+    expect(extractChatClipKey('chat', {})).toBeNull()
+    expect(extractChatClipKey('chat', { context: {} })).toBeNull()
+    expect(extractChatClipKey('analyze_video_stream', { context: { videoFileUri: 'files/abc' } })).toBeNull()
+    expect(extractChatClipKey('chat', { context: { videoFileUri: 'files/abc' } })).toBe('files/abc')
+    expect(extractChatClipKey('strategy', { context: { videoFileUri: 'files/xyz' } })).toBe('files/xyz')
   })
 })

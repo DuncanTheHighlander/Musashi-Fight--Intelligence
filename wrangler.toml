@@ -40,6 +40,9 @@ required = [
   "STORAGE_ACCESS_KEY",
   "STORAGE_SECRET_KEY",
   "STORAGE_BUCKET_NAME",
+  "MUSASHI_POSE_CLOUD_GPU_URL",
+  "MUSASHI_POSE_CLOUD_CPU_URL",
+  "MUSASHI_POSE_CLOUD_TOKEN",
 ]
 
 # Cloudflare Secrets Store — store_id identifies the account store (not a credential).

@@ -9,9 +9,35 @@ export default {
   ],
   theme: {
   	extend: {
+  		fontFamily: {
+  			marcellus: ['var(--font-marcellus)', 'serif'],
+  			hanken: ['var(--font-hanken)', 'system-ui', 'sans-serif'],
+  			jbmono: ['var(--font-jetbrains)', 'ui-monospace', 'monospace']
+  		},
   		colors: {
   			background: 'hsl(var(--background))',
   			foreground: 'hsl(var(--foreground))',
+  			ms: {
+  				orange: 'var(--ms-orange)',
+  				'orange-soft': 'var(--ms-orange-soft)',
+  				gold: 'var(--ms-gold)',
+  				bg: 'var(--ms-bg)',
+  				surface: 'var(--ms-surface)',
+  				surface2: 'var(--ms-surface2)',
+  				surface3: 'var(--ms-surface3)',
+  				chat: 'var(--ms-chat)',
+  				'surface-unread': 'var(--ms-surface-unread)',
+  				stripe: 'var(--ms-stripe)',
+  				bright: 'var(--ms-bright)',
+  				bone: 'var(--ms-bone)',
+  				text: 'var(--ms-text)',
+  				text2: 'var(--ms-text2)',
+  				text3: 'var(--ms-text3)',
+  				muted: 'var(--ms-muted)',
+  				muted2: 'var(--ms-muted2)',
+  				faint: 'var(--ms-faint)',
+  				fainter: 'var(--ms-fainter)'
+  			},
   			sidebar: {
   				DEFAULT: 'hsl(var(--sidebar-background))',
   				foreground: 'hsl(var(--sidebar-foreground))',

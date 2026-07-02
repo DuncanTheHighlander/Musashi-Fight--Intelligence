@@ -47,6 +47,31 @@ function evidenceIdsSet(ledger: FightEvidenceLedger): Set<string> {
 }
 
 /**
+ * Fake-precision guard: exact physical measurements (force, velocity,
+ * distances in cm, mass) may only appear in coaching text when the pipeline
+ * actually measured something (ledger.kinematics non-empty). Otherwise the
+ * number was invented by the model — soften it to qualitative language.
+ *
+ * Degrees are deliberately NOT matched: "pivot 45 degrees" is an instruction,
+ * not a measurement claim, and appears legitimately in coaching output.
+ */
+const UNSUPPORTED_MEASUREMENT_RE =
+  /\b\d+(?:\.\d+)?\s?(?:kn\b|newtons?\b|n of force|m\/s\b|meters? per second|km\/h\b|mph\b|cm\b|centimeters?\b|kg\b|kilograms?\b)/gi
+
+function softenUnsupportedPrecision(text: string): { text: string; softened: boolean } {
+  let softened = false
+  const out = text.replace(UNSUPPORTED_MEASUREMENT_RE, (match) => {
+    softened = true
+    const unit = match.toLowerCase()
+    if (/kn|newton|force/.test(unit)) return 'significant force'
+    if (/m\/s|per second|km\/h|mph/.test(unit)) return 'high speed'
+    if (/cm|centimeter/.test(unit)) return 'a clear margin'
+    return 'a significant amount'
+  })
+  return { text: out, softened }
+}
+
+/**
  * v1 validator: prevents direct contradictions against the deterministic ledger.
  * We cannot fully prove semantics; we enforce:
  * - evidence ids referenced must exist
@@ -107,6 +132,46 @@ export function validateCoachingPayloadAgainstLedger(input: {
     }
   }
 
-  return { ok: issues.length === 0, issues, sanitized: payload }
+  // Fake-precision softening: when the pipeline measured nothing
+  // (ledger.kinematics empty), exact force/velocity/cm/mass claims in the
+  // coaching text are hallucinated — soften them to qualitative language.
+  let sanitized: CoachingPayload = payload
+  if ((ledger.kinematics?.length ?? 0) === 0) {
+    let anySoftened = false
+    const soften = (text: string | undefined, path: string): string | undefined => {
+      if (!text) return text
+      const res = softenUnsupportedPrecision(text)
+      if (res.softened) {
+        anySoftened = true
+        issues.push({
+          code: 'unsupported_numeric_precision',
+          message: `Softened exact measurement claim not backed by measured kinematics`,
+          path,
+        })
+      }
+      return res.text
+    }
+
+    const quickCues = payload.quickCues.map((cue, i) => ({
+      ...cue,
+      quickCue: soften(cue.quickCue, `quickCues.${i}.quickCue`) ?? cue.quickCue,
+      keyMistake: soften(cue.keyMistake, `quickCues.${i}.keyMistake`),
+      whyItMatters: soften(cue.whyItMatters, `quickCues.${i}.whyItMatters`),
+      whatToDoInstead: soften(cue.whatToDoInstead, `quickCues.${i}.whatToDoInstead`),
+      expanded: soften(cue.expanded, `quickCues.${i}.expanded`),
+    }))
+    const suggestedCorrections = payload.suggestedCorrections.map((corr, i) => ({
+      ...corr,
+      why: soften(corr.why, `suggestedCorrections.${i}.why`) ?? corr.why,
+      doInstead: soften(corr.doInstead, `suggestedCorrections.${i}.doInstead`) ?? corr.doInstead,
+    }))
+    const mainDiagnosis = soften(payload.mainDiagnosis, 'mainDiagnosis') ?? payload.mainDiagnosis
+
+    if (anySoftened) {
+      sanitized = { ...payload, quickCues, suggestedCorrections, mainDiagnosis }
+    }
+  }
+
+  return { ok: issues.length === 0, issues, sanitized }
 }
 

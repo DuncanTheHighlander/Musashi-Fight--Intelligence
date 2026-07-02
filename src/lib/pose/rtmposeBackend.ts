@@ -38,13 +38,23 @@ import type { BoundingBox } from '@/lib/poseRetry'
 // Feature flag
 // ---------------------------------------------------------------------------
 
-/** Opt-in. URL `?poseBackend=rtmpose` or localStorage `musashiPoseBackend`. */
+/**
+ * Default ON since 2026-07-01: RTMPose is the PRIMARY pose engine for the
+ * uploaded-clip dense pass (validated STRICT WIN on the 3-clip envelope, v19).
+ * MediaPipe remains the live/preview engine and the automatic fallback when
+ * the model fails to load (`isRtmposeReady()` stays false → callers fall back).
+ *
+ * Opt out with `?poseBackend=mediapipe` or localStorage
+ * `musashiPoseBackend=mediapipe`.
+ */
 export function rtmposeRequested(): boolean {
   if (typeof window === 'undefined') return false
   try {
     const url = new URLSearchParams(window.location.search).get('poseBackend')
-    if (url) return url === 'rtmpose'
-    return window.localStorage.getItem('musashiPoseBackend') === 'rtmpose'
+    if (url) return url !== 'mediapipe'
+    const stored = window.localStorage.getItem('musashiPoseBackend')
+    if (stored) return stored !== 'mediapipe'
+    return true
   } catch {
     return false
   }
@@ -99,6 +109,14 @@ export async function initRtmpose(): Promise<boolean> {
     } catch {
       /* env not present — defaults will be used */
     }
+    try {
+      // ORT logs benign session warnings ("[W:onnxruntime:...]") through
+      // console.error, which Next 15's dev overlay surfaces as errors.
+      // Errors-only keeps the console clean now that RTMPose is default-on.
+      ort.env.logLevel = 'error'
+    } catch {
+      /* older ort without env.logLevel */
+    }
 
     const providers: string[] = []
     try {
@@ -113,6 +131,8 @@ export async function initRtmpose(): Promise<boolean> {
     session = await ort.InferenceSession.create(POSE_MODEL_URL, {
       executionProviders: providers,
       graphOptimizationLevel: 'all',
+      // 3 = errors only; session-level warnings otherwise bypass env.logLevel.
+      logSeverityLevel: 3,
     })
 
     const inName: string = session.inputNames?.[0] ?? 'input'

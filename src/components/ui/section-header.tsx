@@ -39,8 +39,10 @@ export function SectionHeader({
   action,
   className,
 }: SectionHeaderProps) {
+  // flex-wrap + title min-width: inside the 440px mobile shell the action
+  // buttons wrap below the title instead of crushing it to one word/line.
   return (
-    <header className={cn('relative flex items-start gap-4 mb-8', className)}>
+    <header className={cn('relative flex flex-wrap items-start gap-4 mb-8', className)}>
       <span
         aria-hidden="true"
         className={cn('hidden sm:block w-1 self-stretch rounded-full', stripeAccentClasses[iconAccent])}
@@ -53,18 +55,20 @@ export function SectionHeader({
       >
         <Icon className="h-6 w-6" />
       </div>
-      <div className="flex-1 min-w-0">
+      <div className="flex-1 min-w-[12rem]">
         {eyebrow ? (
           <div className="mb-1 text-[11px] uppercase tracking-[0.18em] text-muted-foreground/80">
             {eyebrow}
           </div>
         ) : null}
-        <h1 className="text-3xl font-bold tracking-tight leading-tight">{title}</h1>
+        <h1 className="text-2xl sm:text-3xl font-bold tracking-tight leading-tight">{title}</h1>
         {subtitle ? (
           <p className="mt-1 text-sm text-muted-foreground">{subtitle}</p>
         ) : null}
       </div>
-      {action ? <div className="flex shrink-0 items-center gap-2">{action}</div> : null}
+      {action ? (
+        <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:shrink-0">{action}</div>
+      ) : null}
     </header>
   )
 }

@@ -81,7 +81,7 @@ function putWithProgress(
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest()
     xhr.open('PUT', url)
-    xhr.withCredentials = true
+    xhr.withCredentials = shouldSendUploadCredentials(url)
     for (const [k, v] of Object.entries(headers || {})) {
       xhr.setRequestHeader(k, v)
     }
@@ -97,4 +97,24 @@ function putWithProgress(
     xhr.onerror = () => reject(new Error('Upload network error'))
     xhr.send(file)
   })
+}
+
+function shouldSendUploadCredentials(url: string): boolean {
+  const rawUrl = String(url || '').trim()
+  if (!rawUrl) return true
+
+  const currentOrigin =
+    typeof window !== 'undefined' && window.location?.origin
+      ? window.location.origin
+      : null
+
+  if (!currentOrigin) {
+    return !/^[a-z][a-z\d+.-]*:\/\//i.test(rawUrl)
+  }
+
+  try {
+    return new URL(rawUrl, currentOrigin).origin === currentOrigin
+  } catch {
+    return true
+  }
 }

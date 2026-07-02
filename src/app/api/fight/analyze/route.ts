@@ -37,11 +37,18 @@ type AnalyzeRequest = {
   poseTimeline?: Array<{ tMs: number; landmarks: number[][][] | number[][]; actorId?: 'A' | 'B' }>
   kinematics?: any
   userIntent?: string
+  focusTarget?: 'A' | 'B' | 'both'
   actors?: Array<'A' | 'B'>
   clip?: { durationMs?: number; fps?: number; sourceId?: string; assetRef?: string }
   llm?: { enabled?: boolean }
   videoFileUri?: string
   videoMimeType?: string
+  /** User-selected sport (aliases ok: tkd, bjj, muay_thai, ...). Routes the coach-brain sport file. */
+  sport?: string
+  /** e.g. 'sparring' | 'bag work' | 'competition' — free-form context for the coach. */
+  clipType?: string
+  /** Pose pipeline metadata: which engine fed the ledger and how clean the tracking was. */
+  pose?: { engine?: string; quality?: number | string }
 }
 
 const inMemStore = new InMemoryRetrievalStore()
@@ -267,8 +274,16 @@ export async function POST(request: Request) {
       const gen = await generateGroundedCoaching({
         ledger,
         retrievedSnippets: retrieved.snippets,
+        focusTarget: data.focusTarget,
         videoFileUri: data.videoFileUri,
         videoMimeType: data.videoMimeType,
+        coachBrain: {
+          selectedSport: data.sport,
+          clipType: data.clipType,
+          userQuestion: data.userIntent,
+          poseEngine: data.pose?.engine,
+          poseQuality: data.pose?.quality,
+        },
       })
       model = gen.model
 

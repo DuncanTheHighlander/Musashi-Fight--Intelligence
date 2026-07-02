@@ -1,5 +1,5 @@
 import type { Metadata, Viewport } from 'next'
-import { Geist, Geist_Mono, Orbitron } from 'next/font/google'
+import { Geist, Geist_Mono, Orbitron, Marcellus, Hanken_Grotesk, JetBrains_Mono } from 'next/font/google'
 import Script from 'next/script'
 import { Toaster } from '@/components/ui/toaster'
 import { ThemeProvider } from '@/components/providers/ThemeProvider'
@@ -23,6 +23,25 @@ const orbitron = Orbitron({
   variable: '--font-orbitron',
   subsets: ['latin'],
   weight: ['400', '500', '600', '700', '800', '900']
+})
+
+// Musashi reboot design system fonts (display / body / mono).
+const marcellus = Marcellus({
+  variable: '--font-marcellus',
+  subsets: ['latin'],
+  weight: ['400']
+})
+
+const hankenGrotesk = Hanken_Grotesk({
+  variable: '--font-hanken',
+  subsets: ['latin'],
+  weight: ['400', '500', '600', '700']
+})
+
+const jetbrainsMono = JetBrains_Mono({
+  variable: '--font-jetbrains',
+  subsets: ['latin'],
+  weight: ['400', '500']
 })
 
 export const metadata: Metadata = {
@@ -72,7 +91,7 @@ export default function RootLayout({
         </Script>
       ) : null}
       <body
-        className={`${geistSans.variable} ${geistMono.variable} ${orbitron.variable} min-h-screen bg-background text-foreground antialiased`}
+        className={`${geistSans.variable} ${geistMono.variable} ${orbitron.variable} ${marcellus.variable} ${hankenGrotesk.variable} ${jetbrainsMono.variable} min-h-screen bg-background text-foreground antialiased`}
         suppressHydrationWarning
       >
         {gtmId ? (

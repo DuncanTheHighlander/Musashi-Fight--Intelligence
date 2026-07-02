@@ -67,7 +67,8 @@ import { buildFightLangFrameEvidence } from '@/lib/compiler/evidenceCompiler'
 import type { FightLangFrameEvidence } from '@/lib/fightlang/ledger'
 import { getPerformanceProfile, FrameBudget } from '@/lib/performanceProfile'
 import { denseTrackKey, loadDenseTrack, pruneGhostRuns, saveDenseTrack } from '@/lib/denseTrackCache'
-import { cloudPoseRequested, fetchCloudDenseTrack, getCloudPoseOptions } from '@/lib/cloudPose'
+import { cloudPoseConfigured, cloudPoseRequested, fetchCloudDenseTrack, getCloudPoseOptions } from '@/lib/cloudPose'
+import { assessDenseTrackQuality, cloudTrackUsable, type PoseEngineInfo } from '@/lib/pose/poseQuality'
 import { syncPoseDetectionSurface } from '@/lib/videoCanvas'
 
 export type FightAnalyzerProps = {
@@ -107,8 +108,11 @@ export type FightAnalyzerProps = {
    * Fires once the per-frame deep track is ready (freshly computed or restored
    * from cache), with the number of cached frames. Lets the shell report the
    * real deep-track coverage instead of the small sparse keyframe count.
+   * `info` carries which pose engine produced the track (rtmpose-cloud is the
+   * primary for uploads; *-local means MediaPipe path, fallback=true when the
+   * cloud primary was attempted and failed) plus the track's quality grade.
    */
-  onDenseTrackReady?: (frameCount: number) => void
+  onDenseTrackReady?: (frameCount: number, info?: PoseEngineInfo) => void
 }
 
 const TASKS_VISION_WASM = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/wasm'
@@ -1745,63 +1749,93 @@ export function FightAnalyzer({
           const stepMs = Math.max(DENSE_TRACK_MIN_STEP_MS, Math.ceil(durMs / DENSE_TRACK_MAX_SAMPLES))
           const denseSteps = Math.max(1, Math.floor(durMs / stepMs))
 
-          // Opt-in cloud dense pass (?poseBackend=cloud): offload detection +
-          // RTMPose to the GPU server (cloud/modal_app.py via the Next proxy),
-          // replay the returned candidates through the on-device identity
-          // tracker, and cache under a 'cloud-rtmpose' namespace. Returns false
-          // — so the local pass below runs — when the flag is off OR the cloud
-          // call fails, so the working on-device path can never regress.
+          // PRIMARY-ENGINE dense pass (default ON): cloud RTMPose beat the
+          // MediaPipe pass on the 3-clip envelope (docs/POSE_ENGINE_PRIORITY.md),
+          // so uploaded clips go to the GPU server first (cloud/modal_app.py via
+          // the Next proxy); the returned candidates replay through the on-device
+          // identity tracker and cache under a 'cloud-rtmpose' namespace.
+          // Returns false — so the local MediaPipe pass below runs as FALLBACK —
+          // when cloud is off/unconfigured, the call fails or times out, or the
+          // returned track fails the quality gate. The proven on-device path can
+          // never regress.
           const tryCloudDensePass = async (): Promise<boolean> => {
             const cloudOptions = getCloudPoseOptions()
             if (!cloudOptions) return false
+            if (!(await cloudPoseConfigured())) {
+              console.log('[DenseTrack] cloud pose not configured — using local pass')
+              return false
+            }
             const cloudKey = denseTrackKey(video, stepMs, `cloud-${cloudOptions.target}-${cloudOptions.mode}`)
             const cloudCached = (await loadDenseTrack(cloudKey)) as DenseTrackSample[] | null
             let track: DenseTrackSample[] | null =
               cloudCached && cloudCached.length > 0 ? cloudCached : null
+            let quality = track && durMs > 0
+              ? assessDenseTrackQuality(track, Math.max(1, Math.floor(durMs / stepMs)))
+              : undefined
             if (!track) {
               const result = await fetchCloudDenseTrack({
                 videoUrl: video.currentSrc || video.src,
                 mode: cloudOptions.mode,
                 target: cloudOptions.target,
+                durationMs: durMs,
               })
               if (result && result.track.length > 0) {
                 track = result.track
+                quality = result.quality
                 void saveDenseTrack(cloudKey, stepMs, track)
               }
             }
             if (!track || track.length === 0 || cancelled) return false
+            // Quality gate: a cloud track that dropped most of the clip is worse
+            // than the local floor — reject it and let the fallback pass run.
+            if (quality && !cloudTrackUsable(quality)) {
+              console.warn(
+                `[DenseTrack] cloud track rejected by quality gate (${quality.recommendation}) — falling back to local`
+              )
+              return false
+            }
             denseTrackRef.current = pruneGhostRuns(track)
             denseTrackReadyRef.current = true
-            onDenseTrackReadyRef.current?.(track.length)
+            onDenseTrackReadyRef.current?.(track.length, {
+              engine: cloudOptions.mode === 'rtmpose' ? 'rtmpose-cloud' : 'mediapipe-cloud',
+              quality,
+            })
             if (process.env.NODE_ENV !== 'production') {
               ;(window as unknown as { __denseTrack?: DenseTrackSample[] }).__denseTrack = track
             }
             publishDenseTrackForQa(track, stepMs)
             console.log(
-              `[DenseTrack] cloud ${cloudOptions.target}/${cloudOptions.mode} - ${track.length} frames`
+              `[DenseTrack] cloud ${cloudOptions.target}/${cloudOptions.mode} - ${track.length} frames (quality: ${quality?.overall ?? 'n/a'})`
             )
             return true
           }
 
           const cloudRequested = cloudPoseRequested()
 
-          // The pass is deterministic per clip and costs minutes — restore
-          // from the IndexedDB cache when this clip was analyzed before.
+          // Engine priority: cloud RTMPose (primary) → local cached track →
+          // full local MediaPipe pass. The local pass is deterministic per clip
+          // and costs minutes, so a cloud failure restores from the IndexedDB
+          // cache when this clip was analyzed locally before.
           const cacheKey = denseTrackKey(video, stepMs, rtmposeRequested() ? 'rtmpose' : 'mediapipe')
-          const cached = cloudRequested
+          const cloudTrackReady = await tryCloudDensePass()
+          const cached = cloudTrackReady
             ? null
             : (await loadDenseTrack(cacheKey)) as DenseTrackSample[] | null
-          if (cached && cached.length >= denseSteps * 0.5 && !cancelled) {
+          if (cloudTrackReady) {
+            // Cloud dense pass populated the track above; skip the local pass.
+          } else if (cached && cached.length >= denseSteps * 0.5 && !cancelled) {
             denseTrackRef.current = pruneGhostRuns(cached)
             denseTrackReadyRef.current = true
-            onDenseTrackReadyRef.current?.(cached.length)
+            onDenseTrackReadyRef.current?.(cached.length, {
+              engine: rtmposeRequested() ? 'rtmpose-local' : 'mediapipe-local',
+              fallback: cloudRequested,
+              quality: assessDenseTrackQuality(cached, denseSteps),
+            })
             console.log(`[DenseTrack] restored from cache — ${cached.length} frames (skipping deep pass)`)
             if (process.env.NODE_ENV !== 'production') {
               ;(window as unknown as { __denseTrack?: DenseTrackSample[] }).__denseTrack = cached
             }
             publishDenseTrackForQa(cached, stepMs)
-          } else if (await tryCloudDensePass()) {
-            // Cloud dense pass populated the track above; skip the local pass.
           } else if (!cancelled) {
           denseTrackRef.current = []
           denseTrackReadyRef.current = false
@@ -1853,9 +1887,15 @@ export function FightAnalyzer({
             void saveDenseTrack(cacheKey, stepMs, denseTrackRef.current)
             denseTrackRef.current = pruneGhostRuns(denseTrackRef.current)
             denseTrackReadyRef.current = true
-            onDenseTrackReadyRef.current?.(denseTrackRef.current.length)
+            onDenseTrackReadyRef.current?.(denseTrackRef.current.length, {
+              engine: rtmposeRequested() ? 'rtmpose-local' : 'mediapipe-local',
+              // cloudRequested here means the primary engine was attempted and
+              // didn't produce a usable track — this local pass is the fallback.
+              fallback: cloudRequested,
+              quality: assessDenseTrackQuality(denseTrackRef.current, denseSteps),
+            })
             console.log(
-              `[DenseTrack] ready — ${denseTrackRef.current.length} frames @ ${stepMs}ms step (offline-grade replay active)`
+              `[DenseTrack] ready — ${denseTrackRef.current.length} frames @ ${stepMs}ms step (offline-grade replay active${cloudRequested ? ', mediapipe fallback' : ''})`
             )
             if (process.env.NODE_ENV !== 'production') {
               ;(window as unknown as { __denseTrack?: DenseTrackSample[] }).__denseTrack = denseTrackRef.current

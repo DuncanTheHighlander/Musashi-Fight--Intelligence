@@ -13,12 +13,30 @@ function stubWindow(search: string, storage: Record<string, string> = {}) {
 describe('cloudPose options', () => {
   afterEach(() => {
     vi.unstubAllGlobals()
+    delete process.env.NEXT_PUBLIC_POSE_PRIMARY_ENGINE
   })
 
-  it('stays off unless cloud is requested', () => {
+  it('defaults ON with rtmpose primary (no flags needed)', () => {
     stubWindow('')
-    expect(cloudPoseRequested()).toBe(false)
+    expect(cloudPoseRequested()).toBe(true)
+    expect(getCloudPoseOptions()).toEqual({ target: 'auto', mode: 'rtmpose' })
+  })
+
+  it('turns off when the user picks an on-device backend', () => {
+    stubWindow('?poseBackend=local')
     expect(getCloudPoseOptions()).toBeNull()
+    stubWindow('?poseBackend=rtmpose')
+    expect(getCloudPoseOptions()).toBeNull()
+    stubWindow('', { musashiPoseBackend: 'mediapipe' })
+    expect(getCloudPoseOptions()).toBeNull()
+  })
+
+  it('default follows NEXT_PUBLIC_POSE_PRIMARY_ENGINE, explicit cloud flag still wins', () => {
+    process.env.NEXT_PUBLIC_POSE_PRIMARY_ENGINE = 'mediapipe'
+    stubWindow('')
+    expect(getCloudPoseOptions()).toBeNull()
+    stubWindow('?poseBackend=cloud')
+    expect(getCloudPoseOptions()).toEqual({ target: 'auto', mode: 'rtmpose' })
   })
 
   it('parses query-string target and mode', () => {

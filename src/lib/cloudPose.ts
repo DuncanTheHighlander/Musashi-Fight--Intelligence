@@ -5,16 +5,23 @@
  * Flow: video bytes -> POST /api/fight/cloud-pose (Next proxy -> Modal GPU/CPU,
  * see cloud/modal_app.py) -> candidate frames -> identityReplayCore -> A/B track.
  *
- * Opt-in only (?poseBackend=cloud). Off => the in-browser dense pass runs exactly
- * as today. Any failure returns null so the caller can fall back to local pose.
+ * ENGINE PRIORITY (docs/POSE_ENGINE_PRIORITY.md): cloud RTMPose is the DEFAULT
+ * primary engine for clip analysis — validated better than the MediaPipe pass
+ * on the 3-clip envelope (2026-07-01). Opt out with ?poseBackend=local (or any
+ * non-cloud backend value), or build with NEXT_PUBLIC_POSE_PRIMARY_ENGINE=mediapipe.
+ * Any cloud failure returns null so the caller falls back to local MediaPipe —
+ * the proven on-device path can never regress.
  */
 import {
   replayCandidatesToDenseTrack,
   type DenseTrackSample,
   type ReplayInFrame,
 } from '@/lib/identityReplayCore'
+import { assessDenseTrackQuality, type PoseQualitySummary } from '@/lib/pose/poseQuality'
 
 const CLOUD_POSE_ENDPOINT = '/api/fight/cloud-pose'
+/** Client-side ceiling for one cloud dense pass (proxy upstream timeout is 290s). */
+const CLOUD_POSE_TIMEOUT_MS = 300_000
 
 export type CloudPoseOptions = {
   mode: 'rtmpose' | 'mediapipe'
@@ -26,18 +33,27 @@ function parseChoice<T extends string>(value: string | null, allowed: readonly T
 }
 
 /**
- * Opt-in. URL `?poseBackend=cloud` or localStorage `musashiPoseBackend`.
+ * Engine selection. Cloud RTMPose is ON BY DEFAULT (primary engine).
  *
- * Optional switches:
- *   ?poseCloudTarget=auto|gpu|cpu
- *   ?poseCloudMode=rtmpose|mediapipe
+ * Overrides:
+ *   ?poseBackend=cloud       -> explicit cloud (same as default)
+ *   ?poseBackend=<anything else, e.g. local|rtmpose|mediapipe>
+ *                            -> cloud OFF (user picked an on-device backend)
+ *   NEXT_PUBLIC_POSE_PRIMARY_ENGINE=mediapipe -> default OFF unless ?poseBackend=cloud
+ *   ?poseCloudTarget=auto|gpu|cpu, ?poseCloudMode=rtmpose|mediapipe
+ * localStorage mirrors: musashiPoseBackend / musashiPoseCloudTarget / musashiPoseCloudMode.
  */
 export function getCloudPoseOptions(): CloudPoseOptions | null {
   if (typeof window === 'undefined') return null
   try {
     const params = new URLSearchParams(window.location.search)
     const backend = params.get('poseBackend') || window.localStorage.getItem('musashiPoseBackend')
-    if (backend !== 'cloud') return null
+    if (backend && backend !== 'cloud') return null
+    if (!backend) {
+      // No explicit backend: cloud runs only while RTMPose is the configured primary.
+      const primary = (process.env.NEXT_PUBLIC_POSE_PRIMARY_ENGINE || 'rtmpose').toLowerCase()
+      if (primary !== 'rtmpose') return null
+    }
     return {
       mode: parseChoice(
         params.get('poseCloudMode') || params.get('poseMode') || window.localStorage.getItem('musashiPoseCloudMode'),
@@ -53,6 +69,36 @@ export function getCloudPoseOptions(): CloudPoseOptions | null {
   } catch {
     return null
   }
+}
+
+// Once-per-session preflight cache: `null` = not checked yet.
+let cloudConfiguredCache: boolean | null = null
+
+/**
+ * Cheap GET preflight — is the proxy actually wired to a Modal backend?
+ * Prevents uploading megabytes of video to a proxy that will 500 on dev
+ * boxes without MUSASHI_POSE_CLOUD_* set. Result is cached for the session.
+ */
+export async function cloudPoseConfigured(): Promise<boolean> {
+  if (cloudConfiguredCache !== null) return cloudConfiguredCache
+  try {
+    const resp = await fetch(CLOUD_POSE_ENDPOINT, { method: 'GET' })
+    const json = (await resp.json()) as {
+      success?: boolean
+      configured?: { gpu?: boolean; cpu?: boolean; token?: boolean }
+    }
+    cloudConfiguredCache = Boolean(
+      resp.ok && json.success && json.configured?.token && (json.configured.gpu || json.configured.cpu)
+    )
+  } catch {
+    cloudConfiguredCache = false
+  }
+  return cloudConfiguredCache
+}
+
+/** Test hook — reset the preflight cache. */
+export function resetCloudPoseConfiguredCache(): void {
+  cloudConfiguredCache = null
 }
 
 export function cloudPoseRequested(): boolean {
@@ -71,6 +117,22 @@ export type CloudDenseResult = {
   backend: string
   target: string
   meta: CloudUpstream['meta']
+  /** Present when `durationMs` was provided — grade of the returned track. */
+  quality?: PoseQualitySummary
+}
+
+/**
+ * Estimate how many samples a complete track would hold, from its own median
+ * cadence. Uniform subsampling (e.g. 15fps) stays coverage=1; a track that
+ * silently dropped a chunk of the clip grades down.
+ */
+function expectedSamplesFor(track: DenseTrackSample[], durationMs: number): number {
+  if (track.length < 2 || durationMs <= 0) return Math.max(1, track.length)
+  const gaps: number[] = []
+  for (let i = 1; i < track.length; i++) gaps.push(track[i].tMs - track[i - 1].tMs)
+  gaps.sort((a, b) => a - b)
+  const median = Math.max(1, gaps[Math.floor(gaps.length / 2)])
+  return Math.max(1, Math.floor(durationMs / median))
 }
 
 /**
@@ -84,9 +146,12 @@ export async function fetchCloudDenseTrack(opts: {
   fps?: number
   filename?: string
   signal?: AbortSignal
+  /** Clip duration; when provided the result includes a quality grade. */
+  durationMs?: number
 }): Promise<CloudDenseResult | null> {
+  const signal = opts.signal ?? AbortSignal.timeout(CLOUD_POSE_TIMEOUT_MS)
   try {
-    const videoResp = await fetch(opts.videoUrl, { signal: opts.signal })
+    const videoResp = await fetch(opts.videoUrl, { signal })
     if (!videoResp.ok) {
       console.warn('[CloudPose] could not read video bytes:', videoResp.status)
       return null
@@ -102,7 +167,7 @@ export async function fetchCloudDenseTrack(opts: {
     const resp = await fetch(CLOUD_POSE_ENDPOINT, {
       method: 'POST',
       body: form,
-      signal: opts.signal,
+      signal,
     })
     const json = (await resp.json()) as {
       success?: boolean
@@ -121,14 +186,22 @@ export async function fetchCloudDenseTrack(opts: {
     }
 
     const track = replayCandidatesToDenseTrack(frames)
+    const quality =
+      typeof opts.durationMs === 'number' && opts.durationMs > 0
+        ? assessDenseTrackQuality(track, expectedSamplesFor(track, opts.durationMs))
+        : undefined
     return {
       track,
       backend: json.upstream?.backend ?? 'rtmpose',
       target: json.target ?? 'auto',
       meta: json.upstream?.meta,
+      quality,
     }
   } catch (err) {
-    if (err instanceof DOMException && err.name === 'AbortError') return null
+    if (err instanceof DOMException && (err.name === 'AbortError' || err.name === 'TimeoutError')) {
+      console.warn('[CloudPose] dense pass aborted/timed out, falling back to local')
+      return null
+    }
     console.warn('[CloudPose] dense pass failed, falling back to local:', err)
     return null
   }

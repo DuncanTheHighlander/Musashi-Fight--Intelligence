@@ -215,6 +215,17 @@ export const aiErrorResponse = (err: unknown): NextResponse => {
     )
   }
 
+  if (message === 'CLIP_QUESTION_LIMIT') {
+    return errorResponse(
+      {
+        error: 'Question limit reached for this clip.',
+        code: 'CLIP_QUESTION_LIMIT',
+        hint: 'Free: 3 questions per clip. Pro: 15 per clip. Upgrade or analyze a new clip for more.',
+      },
+      402
+    )
+  }
+
   if (message === 'VIDEO_CONTEXT_REQUIRED') {
     return errorResponse(
       {

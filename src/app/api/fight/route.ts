@@ -5,10 +5,13 @@ import {
   extractFightVideoQuotaContext,
   fightActionConsumesVideoQuota,
   fightActionToQuotaBucket,
+  extractChatClipKey,
+  enforceClipQuestionLimit,
 } from '@/lib/musashiUsage'
 import { requireUser, type MusashiUser } from '@/lib/musashiAuth'
 import { composeSystemPrompt, DEFAULT_PROMPTS } from '@/lib/aiClient'
 import { getDisciplinePrompt } from '@/lib/disciplinePrompts'
+import { buildCoachBrainBlock } from '@/lib/coachBrain/coachBrain'
 import {
   MUSASHI_DEEP_ANALYSIS_SYSTEM,
   COMET_STYLE_ANALYSIS_SYSTEM,
@@ -1220,6 +1223,16 @@ const handleChat = async (body: any, user: any) => {
     : ''
   const disciplineSection = disciplineBlock ? `${disciplineBlock}\n` : ''
 
+  // Coach brain: global coach rules + the selected sport's brain markdown.
+  // Appended alongside the existing discipline block — never replaces it.
+  const coachBrainSection = '\n' + buildCoachBrainBlock({
+    selectedSport: context?.discipline,
+    clipType: context?.clipType,
+    fighterFocus: context?.focusTarget,
+    poseEngine: context?.poseEvidence?.engine ?? context?.poseEngine,
+    poseQuality: context?.poseEvidence?.quality ?? context?.poseQuality,
+  }) + '\n'
+
   const focusAwareSystemBase =
     'You are Musashi, an elite fight coach. Your lineage traces through Cus D\'Amato, Freddie Roach, and Firas Zahabi.\n' +
     'You speak with authority — brief, direct, high-signal. No fluff, no disclaimers, no generic motivation.\n' +
@@ -1263,7 +1276,7 @@ const handleChat = async (body: any, user: any) => {
     '- No motivational filler: no "great work", "keep it up" — only corrections and tactics.\n' +
     '- Reference what you SEE, not abstractions.\n'
 
-  const focusAwareSystem = focusAwareSystemBase + disciplineSection + CONDENSED_FRAMEWORKS
+  const focusAwareSystem = focusAwareSystemBase + disciplineSection + coachBrainSection + CONDENSED_FRAMEWORKS
 
   const ctx = context ? JSON.stringify(context) : ''
   const kinematicsBlock = latestKinematics
@@ -2221,6 +2234,14 @@ const handleStrategy = async (body: any, user: any) => {
       : ''
     const disciplineSection = disciplineBlock ? `${disciplineBlock}\n` : ''
 
+    // Coach brain: global rules + sport brain for the selected discipline.
+    const coachBrainSection = '\n' + buildCoachBrainBlock({
+      selectedSport: context?.discipline,
+      fighterFocus: context?.focusTarget,
+      poseEngine: context?.poseEvidence?.engine ?? context?.poseEngine,
+      poseQuality: context?.poseEvidence?.quality ?? context?.poseQuality,
+    }) + '\n'
+
     // Determine focus
     let focusDescription = 'both fighters'
     if (context?.focusTarget === 'A') focusDescription = 'Fighter A (your corner)'
@@ -2240,6 +2261,7 @@ const handleStrategy = async (body: any, user: any) => {
       '\n' +
       `FOCUS: ${focusDescription}\n` +
       disciplineSection +
+      coachBrainSection +
       CONDENSED_FRAMEWORKS
 
     // Build user prompt with available context
@@ -2689,7 +2711,7 @@ const handleVideoUpload = async (formData: FormData, user: any) => {
  * Returns a streaming Response (bypasses NextResponse.json wrapper).
  */
 const handleAnalyzeVideoStream = (body: any): Response => {
-  const { videoFileUri, videoMimeType, clipDuration, focusTarget, poseEvidence } = body
+  const { videoFileUri, videoMimeType, clipDuration, focusTarget, poseEvidence, discipline, clipType, poseEngine } = body
   const geminiKey = readSecretEnv('GEMINI_API_KEY')
 
   const encoder = new TextEncoder()
@@ -2907,6 +2929,13 @@ const handleAnalyzeVideoStream = (body: any): Response => {
         const systemPrompt = [
           MUSASHI_DEEP_ANALYSIS_SYSTEM.trim(),
           `COACHING MODE: ${coachingMode.toUpperCase()}\n${coachingDirective}`,
+          // Coach brain: global rules + selected sport brain (alias-aware).
+          buildCoachBrainBlock({
+            selectedSport: typeof discipline === 'string' ? discipline : undefined,
+            clipType: typeof clipType === 'string' ? clipType : undefined,
+            fighterFocus: typeof focusTarget === 'string' ? focusTarget : undefined,
+            poseEngine: typeof poseEngine === 'string' ? poseEngine : undefined,
+          }),
           `ABSOLUTE CONSTRAINTS (violating ANY of these is a critical failure):
 - The factual ledger is your ONLY source of truth for what happened.
 - Do not add a Quick Scan section.
@@ -3159,6 +3188,16 @@ export async function POST(req: Request) {
       }
       try {
         await enforceVideoAnalysis(user.id, user.role, videoCtx)
+      } catch (err) {
+        return aiErrorResponse(err)
+      }
+    }
+
+    // Per-clip follow-up question cap (chat/strategy grounded on an uploaded clip).
+    const clipQuestionKey = extractChatClipKey(action, body)
+    if (clipQuestionKey) {
+      try {
+        await enforceClipQuestionLimit(user.id, user.role, clipQuestionKey)
       } catch (err) {
         return aiErrorResponse(err)
       }

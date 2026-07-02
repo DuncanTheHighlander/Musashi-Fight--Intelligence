@@ -4,6 +4,7 @@ import React, { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState,
 import { useAuth } from '@/contexts/AuthContext'
 import Link from 'next/link'
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import {
@@ -62,6 +63,8 @@ import {
 } from 'lucide-react'
 import { FightAnalyzer } from '@/components/video/FightAnalyzer'
 import { pickByClick } from '@/lib/pose/fighterSelection'
+import { isRtmposeReady, rtmposeRequested } from '@/lib/pose/rtmposeBackend'
+import type { PoseEngineInfo } from '@/lib/pose/poseQuality'
 import type { FightEvidenceLedger } from '@/lib/fightlang/ledger'
 import { createEmptyLedger, ingestFrameEvidence } from '@/lib/compiler/evidenceCompiler'
 import { FightOverlay } from '@/components/overlay/FightOverlay'
@@ -83,6 +86,13 @@ import {
   type MediaPreloadOutcome,
 } from '@/lib/bootVerification'
 import { dedupeInflight, fingerprintSlice } from '@/lib/ai/clientInflight'
+import {
+  CLIP_TYPE_OPTIONS,
+  SPORT_OPTIONS,
+  buildFightClipAiMetadata,
+  clipTypeLabelFor,
+  sportLabelFor,
+} from '@/lib/fightClipMetadata'
 
 /** Faster cadence for short clips; relaxed for long fights. */
 function getFightLangSchedule(durSec: number) {
@@ -542,6 +552,11 @@ export default function FightCoachExperience({
   // Surfaced in the boot summary so the small sparse keyframe count isn't
   // mistaken for the full analysis coverage.
   const [deepTrackFrames, setDeepTrackFrames] = useState<number | null>(null)
+  // Which pose engine produced the deep track (rtmpose-cloud = primary for
+  // uploads, mediapipe-local = preview/fallback) + its quality grade. Sent with
+  // every analyze call so the coach softens claims on fallback/weak pose data.
+  const [poseEngineInfo, setPoseEngineInfo] = useState<PoseEngineInfo | null>(null)
+  const poseEngineInfoRef = useRef<PoseEngineInfo | null>(null)
   const earlyCompileOnceRef = useRef(false)
   const fastCompileHashRef = useRef<string | null>(null)
   const [embedSnippetCount, setEmbedSnippetCount] = useState<number | null>(null)
@@ -600,6 +615,46 @@ export default function FightCoachExperience({
   const [analysisAtTime, setAnalysisAtTime] = useState<number | null>(null)
   const [selectedFighterId, setSelectedFighterId] = useState<string | null>(null)
   const [focusTarget, setFocusTarget] = useState<FocusTarget>('both')
+  // Sport selection step — routes the coach-brain sport file on the server.
+  // '' = auto-detect (global coach rules only). Persisted so returning
+  // athletes don't re-pick every clip; the picker still opens per upload.
+  const [selectedSport, setSelectedSport] = useState<string>('')
+  const selectedSportRef = useRef(selectedSport)
+  selectedSportRef.current = selectedSport
+  const [selectedClipType, setSelectedClipType] = useState<string>('')
+  const selectedClipTypeRef = useRef(selectedClipType)
+  selectedClipTypeRef.current = selectedClipType
+  const [sportPickerOpen, setSportPickerOpen] = useState(false)
+  const currentFightClipAiMetadata = useCallback(
+    () =>
+      buildFightClipAiMetadata({
+        sport: selectedSportRef.current,
+        clipType: selectedClipTypeRef.current,
+      }),
+    [],
+  )
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem('musashiSelectedSport')
+      if (stored) setSelectedSport(stored)
+      const storedClipType = window.localStorage.getItem('musashiSelectedClipType')
+      if (storedClipType) setSelectedClipType(storedClipType)
+    } catch { /* private mode */ }
+  }, [])
+  const pickSport = useCallback((sport: string) => {
+    setSelectedSport(sport)
+    try {
+      if (sport) window.localStorage.setItem('musashiSelectedSport', sport)
+      else window.localStorage.removeItem('musashiSelectedSport')
+    } catch { /* private mode */ }
+  }, [])
+  const pickClipType = useCallback((clipType: string) => {
+    setSelectedClipType(clipType)
+    try {
+      if (clipType) window.localStorage.setItem('musashiSelectedClipType', clipType)
+      else window.localStorage.removeItem('musashiSelectedClipType')
+    } catch { /* private mode */ }
+  }, [])
   // Click-to-select fighters (opt-in). OFF by default → normal playback is
   // untouched, so this cannot regress existing behavior.
   const [selectMode, setSelectMode] = useState(false)
@@ -1085,6 +1140,8 @@ export default function FightCoachExperience({
     setInitialAnalysisStatus(null)
     setLocalSessionId(sessionId)
     localSessionIdRef.current = sessionId
+    poseEngineInfoRef.current = null
+    setPoseEngineInfo(null)
     fightLangPoseFramesRef.current = []
     lastFightLangVideoBucketRef.current = null
     clipEndPassCountRef.current = 0
@@ -1106,6 +1163,13 @@ export default function FightCoachExperience({
     setLastCompileError(null)
     clipAnalysisPipelineStartedRef.current = false
     setBootVerificationSummary(null)
+
+    // Sport step: every fresh upload confirms the sport so the coach brain
+    // loads the right sport file. Non-blocking — the local pipeline keeps
+    // booting underneath; restored/demo clips keep the previous selection.
+    if (source === 'upload') {
+      setSportPickerOpen(true)
+    }
 
     // First-frame skeleton: FightAnalyzer preScanOnLoad after boot enables it.
     // Local prep runs in runBootPipeline; play stays locked until then.
@@ -1433,6 +1497,9 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
         last?.tMs ?? '',
         windowMs,
         replayPass,
+        focusTarget,
+        selectedSportRef.current,
+        selectedClipTypeRef.current,
         geminiFileUriRef.current ?? '',
       ])}`
 
@@ -1443,7 +1510,23 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
           body: JSON.stringify({
             poseFrames: slice,
             userIntent: `Give tactical coaching: openings, counters, habits, and who is controlling space. Ground every claim in the ledger.${dense}${replay}`,
+            focusTarget,
             llm: { enabled: true },
+            // Sport + clip context route the coach-brain sport file and context notes server-side.
+            ...currentFightClipAiMetadata(),
+            // Which engine ACTUALLY produced the dense track feeding the ledger
+            // (reported by FightAnalyzer.onDenseTrackReady): rtmpose-cloud is
+            // the primary for uploads, mediapipe-local the preview/fallback.
+            // The coach brain converts this into caution wording. Before the
+            // deep track is ready, fall back to the live-path heuristic.
+            pose: poseEngineInfoRef.current
+              ? {
+                  engine: poseEngineInfoRef.current.engine,
+                  ...(poseEngineInfoRef.current.quality
+                    ? { quality: poseEngineInfoRef.current.quality.overall }
+                    : {}),
+                }
+              : { engine: rtmposeRequested() && isRtmposeReady() ? 'rtmpose' : 'mediapipe' },
             clip: { durationMs: mode === 'full' && durMs > 0 ? durMs : windowMs, ...(clipAssetRefRef.current ? { assetRef: clipAssetRefRef.current } : {}) },
             ...(geminiFileUriRef.current ? { videoFileUri: geminiFileUriRef.current, videoMimeType: videoFileRef.current?.type || 'video/mp4' } : {}),
           }),
@@ -1490,7 +1573,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
         if (!isStale()) setFightLangLoading(false)
       }
     },
-    []
+    [currentFightClipAiMetadata, focusTarget]
   )
   const styleScanThreeFrames = async () => {
     if (!videoRef.current) return
@@ -1578,6 +1661,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
           }],
           context: {
             image: base64,
+            ...currentFightClipAiMetadata(),
             kinematics: kinematicsContext,
             analysis: analysis,
             focusTarget: focusTarget
@@ -1630,6 +1714,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
           messages: [...messages, { role: 'user', content: userMessage }],
           context: {
             analysisStyle: 'comet',
+            ...currentFightClipAiMetadata(),
             nativeVideo: Boolean(geminiFileUriRef.current),
             ...(geminiFileUriRef.current ? {
               videoFileUri: geminiFileUriRef.current,
@@ -2052,6 +2137,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
           messages: [{ role: 'user', content: INITIAL_CLIP_ANALYSIS_REQUEST }],
           context: {
             analysisStyle: 'comet',
+            ...currentFightClipAiMetadata(),
             nativeVideo: true,
             videoFileUri: fileUri,
             videoMimeType: sourceFile.type || 'video/mp4',
@@ -2300,7 +2386,10 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
           videoFileUri: fileUri,
           videoMimeType: sourceFile.type || 'video/mp4',
           clipDuration: videoRef.current?.duration || 0,
+          focusTarget,
           poseEvidence,
+          ...currentFightClipAiMetadata(),
+          poseEngine: rtmposeRequested() && isRtmposeReady() ? 'rtmpose' : 'mediapipe',
         }),
         signal: abort.signal,
       })
@@ -2975,6 +3064,8 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
     setPreScanDetections({ samples: 0, A: 0, B: 0, both: 0 })
     setBootWarnings([])
     setLastCompileError(null)
+    poseEngineInfoRef.current = null
+    setPoseEngineInfo(null)
     fightLangPoseFramesRef.current = []
     lastFightLangVideoBucketRef.current = null
     earlyCompileOnceRef.current = false
@@ -3075,9 +3166,13 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
       },
       {
         key: 'pose',
-        label: 'Local CV',
+        label: 'Pose engine',
         value: bootPipelineReady ? `Pre-scan ${preScanLabel}` : bootPipelineMessage || 'Standing by',
-        detail: fightLangPreScanBusy ? 'MediaPipe is seeking sampled frames before play.' : bootVerificationSummary ?? 'Runs locally before any AI call.',
+        detail: fightLangPreScanBusy
+          ? 'MediaPipe is seeking sampled frames before play.'
+          : poseEngineInfo
+            ? `Deep track: ${poseEngineInfo.engine === 'rtmpose-cloud' ? 'RTMPose (cloud, primary)' : poseEngineInfo.fallback ? 'MediaPipe (fallback)' : poseEngineInfo.engine}${poseEngineInfo.quality ? ` — quality ${poseEngineInfo.quality.overall}` : ''}`
+            : bootVerificationSummary ?? 'Runs locally before any AI call.',
         stage: poseStage,
         icon: Cpu,
       },
@@ -3134,6 +3229,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
     playbackState.videoWidth,
     poseDetected.A,
     poseDetected.B,
+    poseEngineInfo,
     preScanCompleted,
     preScanDetections.A,
     preScanDetections.B,
@@ -3176,6 +3272,88 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
 
   return (
     <div className="min-h-screen w-full bg-background">
+      {/* Clip context step — opens on every fresh upload; non-blocking (local pipeline keeps booting). */}
+      <Dialog open={sportPickerOpen} onOpenChange={setSportPickerOpen}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>What type of fight clip is this?</DialogTitle>
+            <DialogDescription>
+              Pick the ruleset and context so Musashi loads the right coaching brain. You can change this anytime.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Ruleset</div>
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+              {SPORT_OPTIONS.map((sport) => (
+                <button
+                  key={sport.value}
+                  type="button"
+                  onClick={() => pickSport(sport.value)}
+                  className={cn(
+                    'rounded-lg border px-3 py-2.5 text-left transition-colors',
+                    selectedSport === sport.value
+                      ? 'border-primary bg-primary/15 text-primary'
+                      : 'border-border/60 bg-card/60 hover:border-primary/50 hover:bg-primary/10',
+                  )}
+                >
+                  <span className="block text-sm font-semibold">{sport.label}</span>
+                  <span className="block text-[10px] text-muted-foreground">{sport.hint}</span>
+                </button>
+              ))}
+            </div>
+            <button
+              type="button"
+              onClick={() => pickSport('')}
+              className={cn(
+                'w-full rounded-lg border px-3 py-2 text-center text-xs font-semibold transition-colors',
+                selectedSport === ''
+                  ? 'border-primary bg-primary/15 text-primary'
+                  : 'border-border/60 text-muted-foreground hover:border-primary/50 hover:bg-primary/10',
+              )}
+            >
+              Auto-detect ruleset from the tape
+            </button>
+          </div>
+
+          <div className="space-y-2">
+            <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Clip context</div>
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+              {CLIP_TYPE_OPTIONS.map((clipType) => (
+                <button
+                  key={clipType.value}
+                  type="button"
+                  onClick={() => pickClipType(clipType.value)}
+                  className={cn(
+                    'rounded-lg border px-3 py-2.5 text-left transition-colors',
+                    selectedClipType === clipType.value
+                      ? 'border-primary bg-primary/15 text-primary'
+                      : 'border-border/60 bg-card/60 hover:border-primary/50 hover:bg-primary/10',
+                  )}
+                >
+                  <span className="block text-sm font-semibold">{clipType.label}</span>
+                  <span className="block text-[10px] text-muted-foreground">{clipType.hint}</span>
+                </button>
+              ))}
+            </div>
+            <button
+              type="button"
+              onClick={() => pickClipType('')}
+              className={cn(
+                'w-full rounded-lg border px-3 py-2 text-center text-xs font-semibold transition-colors',
+                selectedClipType === ''
+                  ? 'border-primary bg-primary/15 text-primary'
+                  : 'border-border/60 text-muted-foreground hover:border-primary/50 hover:bg-primary/10',
+              )}
+            >
+              No extra context
+            </button>
+          </div>
+
+          <Button type="button" onClick={() => setSportPickerOpen(false)} className="w-full">
+            Use these settings
+          </Button>
+        </DialogContent>
+      </Dialog>
       {!hideShellHeader && (
         <div className="border-b border-border/40 bg-card/30 backdrop-blur-xl">
           <div className="mx-auto max-w-7xl px-4 py-3 flex items-center justify-between">
@@ -3187,6 +3365,12 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
               </div>
             </div>
             <div className="flex items-center gap-2">
+              {videoUrl && (
+                <Button size="sm" variant="outline" onClick={() => setSportPickerOpen(true)} title="Change the sport the coach uses for this clip">
+                  Sport: {sportLabelFor(selectedSport)}
+                  {selectedClipType ? ` · ${clipTypeLabelFor(selectedClipType)}` : ''}
+                </Button>
+              )}
               {videoUrl ? (
                 <Button size="sm" variant="outline" onClick={() => { setVideoUrl(null); setVideoFile(null); videoFileRef.current = null; geminiFileUriRef.current = null; setGeminiFileUri(null); setMessages([]); setFightLangCoaching(null); setAiQuotaState(null); setFightLangOverlayAnnotations(null); setCompiledLedger(null); setInitialAnalysisReady(false); setStreamAnalysisPhase('idle'); setStreamAnalysisText(''); setAutoRetrieval(null); setStreamEvidenceLedger(null); applyPlaybackLock(false); setBootPipelineReady(false); setBootPipelineMessage(''); setClipLoadSource('none'); }}>
                   New Video
@@ -3245,6 +3429,15 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                         </p>
                       </div>
                     </div>
+                    <button
+                      type="button"
+                      onClick={() => setSportPickerOpen(true)}
+                      title="Change the sport the coach uses for this clip"
+                      className="shrink-0 rounded-full border border-border/60 bg-card/70 px-2.5 py-1 text-[11px] font-semibold text-muted-foreground transition-colors hover:border-primary/50 hover:text-primary"
+                    >
+                      Sport: {sportLabelFor(selectedSport)}
+                      {selectedClipType ? ` · ${clipTypeLabelFor(selectedClipType)}` : ''}
+                    </button>
                     <Badge
                       variant="secondary"
                       className={cn(
@@ -3577,7 +3770,13 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                       }))
                     }}
                     onPreScanActiveChange={setFightLangPreScanBusy} focus={aiFocusPose}
-                    onDenseTrackReady={(n) => setDeepTrackFrames(n)}
+                    onDenseTrackReady={(n, info) => {
+                      setDeepTrackFrames(n)
+                      if (info) {
+                        poseEngineInfoRef.current = info
+                        setPoseEngineInfo(info)
+                      }
+                    }}
                     onPoseVideoTime={(videoTimeMs) => {
                       latestPoseVideoTimeMsRef.current = videoTimeMs
                     }}
