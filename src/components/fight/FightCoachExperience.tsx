@@ -2206,7 +2206,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
     bootPipelineRunningRef.current = true
     applyPlaybackLock(false)
     setBootPipelineReady(false)
-    setBootPipelineMessage('Reading video…')
+    setBootPipelineMessage('Reviewing your clip…')
     prescanBootResolveRef.current = null
     bootMediaOutcomeRef.current = null
     bootLastPassTotalStepsRef.current = 0
@@ -3444,6 +3444,16 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                       Sport: {sportLabelFor(selectedSport)}
                       {selectedClipType ? ` · ${clipTypeLabelFor(selectedClipType)}` : ''}
                     </button>
+                    <CompactFocusToggle
+                      currentFocus={focusTarget === 'A' ? 'blue' : focusTarget === 'B' ? 'red' : 'both'}
+                      onFocusChange={(focus) => {
+                        if (focus === 'blue') { setFocusTarget('A'); setSelectedFighterId('A'); setAiFocusPose('A') }
+                        else if (focus === 'red') { setFocusTarget('B'); setSelectedFighterId('B'); setAiFocusPose('B') }
+                        else { setFocusTarget('both'); setSelectedFighterId(null); setAiFocusPose('both') }
+                        setSkeletonVisible({ A: true, B: true })
+                      }}
+                      showLabels
+                    />
                     <Badge
                       variant="secondary"
                       className={cn(
@@ -3590,8 +3600,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                     <div className="flex w-full aspect-video flex-col items-center justify-center gap-4 bg-zinc-950 px-6 text-center">
                       <p className="text-sm font-medium text-foreground">No clip loaded yet</p>
                       <p className="max-w-sm text-xs text-muted-foreground">
-                        {hideShellHeader ? 'Use Upload a Clip in the banner above, or try the demo.' : 'Use Choose Video in the header, or try the demo.'}
-                        {' '}Choose a clip each time — nothing auto-loads on reload.
+                        Or try the demo clip — choose a clip each time, nothing auto-loads on reload.
                       </p>
                       <Button
                         type="button"
@@ -4029,18 +4038,6 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                     New clip
                   </Button>
                 )}
-                <CompactFocusToggle
-                  currentFocus={focusTarget === 'A' ? 'blue' : focusTarget === 'B' ? 'red' : 'both'}
-                  onFocusChange={(focus) => {
-                    if (focus === 'blue') { setFocusTarget('A'); setSelectedFighterId('A'); setAiFocusPose('A') }
-                    else if (focus === 'red') { setFocusTarget('B'); setSelectedFighterId('B'); setAiFocusPose('B') }
-                    else { setFocusTarget('both'); setSelectedFighterId(null); setAiFocusPose('both') }
-                    setSkeletonVisible({ A: true, B: true })
-                  }}
-                  showLabels
-                  disabled={!videoUrl}
-                />
-                <div className="h-6 w-px bg-border/40" />
                 <Button size="sm" variant={poseOverlayOn ? 'secondary' : 'ghost'} className="h-8 text-xs" onClick={() => setPoseOverlayOn((p) => !p)}>
                   {poseOverlayOn ? 'Skeleton ON' : 'Skeleton OFF'}
                 </Button>

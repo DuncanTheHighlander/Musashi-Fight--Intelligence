@@ -214,9 +214,9 @@ export default function HomePage() {
             className="mt-3 flex items-center gap-2 rounded-xl border px-4 py-3 text-[12.5px] text-ms-orange-soft"
             style={{ borderColor: 'rgba(198,70,27,0.4)', background: 'rgba(198,70,27,0.07)' }}
           >
-            <Video className="h-4 w-4 shrink-0" aria-hidden />
+            <Video className="h-4 w-4 shrink-0 animate-pulse" aria-hidden />
             <span className="truncate font-medium">{bootstrapVideoFile.name}</span>
-            <span className="opacity-70">— loading in Fight Lab below</span>
+            <span className="opacity-70">— uploading your clip…</span>
           </div>
         )}
 
@@ -297,14 +297,8 @@ export default function HomePage() {
         </div>
       </div>
 
-      {/* ---- FIGHT LAB — the real preview / processing / results surface ---- */}
+      {/* ---- Same section as the uploader above: clip preview / processing / results ---- */}
       <section id="fight-lab-anchor" className="scroll-mt-24 px-5 pb-8 outline-none" tabIndex={-1} aria-label="Fight Lab">
-        <div className="mb-4">
-          <h2 className="font-marcellus text-2xl font-normal text-ms-bright">Fight Lab</h2>
-          <p className="mt-1 text-[12.5px] text-ms-muted">
-            Upload a clip or try the demo — choose a clip, then wait for Ready and press Play.
-          </p>
-        </div>
         <FightCoachExperience
           hideShellHeader
           bootstrapVideoFile={bootstrapVideoFile}
