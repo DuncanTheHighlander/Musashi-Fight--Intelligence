@@ -18,7 +18,7 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
 import { useToast } from '@/hooks/use-toast'
-import { FocusToggle } from '@/components/fight/FocusToggle'
+import { CompactFocusToggle } from '@/components/fight/FocusToggle'
 import {
   deleteSession,
   exportAll,
@@ -558,6 +558,8 @@ export default function FightCoachExperience({
   const [poseEngineInfo, setPoseEngineInfo] = useState<PoseEngineInfo | null>(null)
   const poseEngineInfoRef = useRef<PoseEngineInfo | null>(null)
   const earlyCompileOnceRef = useRef(false)
+  /** Fires the AI-coaching consent dialog once per clip, the moment play is first pressed — instead of requiring the user to dig into Advanced Controls. */
+  const autoCoachPromptShownRef = useRef(false)
   const fastCompileHashRef = useRef<string | null>(null)
   const [embedSnippetCount, setEmbedSnippetCount] = useState<number | null>(null)
   const fightLangFastErrorToastRef = useRef(false)
@@ -602,7 +604,9 @@ export default function FightCoachExperience({
   const lastTrackToastMsRef = useRef<number>(0)
 
   const [poseOverlayOn, setPoseOverlayOn] = useState(true)
-  const [kinematicsHudOn, setKinematicsHudOn] = useState(true)
+  // Off by default — raw bw/bw-per-second numbers are meaningless to a fighter
+  // reading feedback. Opt-in only, via the checkbox in Advanced Controls.
+  const [kinematicsHudOn, setKinematicsHudOn] = useState(false)
   const [kinematicsUi, setKinematicsUi] = useState<KinematicsSnapshot | null>(null)
   const kinematicsRef = useRef<KinematicsSnapshot | null>(null)
   const [latestPose, setLatestPose] = useState<{ A: NormalizedLandmark[] | null; B: NormalizedLandmark[] | null }>({
@@ -1124,7 +1128,7 @@ export default function FightCoachExperience({
     setTrackAtMs(null)
     setCoachingEnabled(false)
     setLlmCallCount(0)
-    setKinematicsHudOn(true)                   // Show kinematics overlay
+    setKinematicsHudOn(false)                  // Raw bw/bw-per-second numbers are dev-only; opt-in via Advanced Controls
 
     // Reset analysis
     setAnalysis(null)
@@ -1147,6 +1151,7 @@ export default function FightCoachExperience({
     clipEndPassCountRef.current = 0
     lastFullClipEndRunRef.current = 0
     earlyCompileOnceRef.current = false
+    autoCoachPromptShownRef.current = false
     setClipDurationSec(0)
     setCoachPreviewCoaching(null)
     setEmbedSnippetCount(null)
@@ -3069,6 +3074,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
     fightLangPoseFramesRef.current = []
     lastFightLangVideoBucketRef.current = null
     earlyCompileOnceRef.current = false
+    autoCoachPromptShownRef.current = false
     applyPlaybackLock(false)
     setBootPipelineReady(false)
     setBootPipelineMessage('Re-running local MediaPipe pre-scan...')
@@ -3514,6 +3520,15 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                         if (!playbackUnlockedRef.current) {
                           try { e.currentTarget.pause() } catch { void 0 }
                           try { if (e.currentTarget.currentTime > 0) e.currentTarget.currentTime = 0 } catch { void 0 }
+                          return
+                        }
+                        // First legit play of this clip: surface the AI-coaching consent
+                        // dialog immediately instead of leaving it buried in Advanced
+                        // Controls, so feedback starts the moment the user presses play.
+                        // Still requires the one-tap consent — this is real Gemini spend.
+                        if (!autoCoachPromptShownRef.current && !coachingEnabled) {
+                          autoCoachPromptShownRef.current = true
+                          setCoachingConfirmOpen(true)
                         }
                       }}
                       onPlaying={(e) => {
@@ -3575,44 +3590,24 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                     <div className="flex w-full aspect-video flex-col items-center justify-center gap-4 bg-zinc-950 px-6 text-center">
                       <p className="text-sm font-medium text-foreground">No clip loaded yet</p>
                       <p className="max-w-sm text-xs text-muted-foreground">
-                        Upload a clip or try the demo. Choose a clip each time — nothing auto-loads on reload.
+                        {hideShellHeader ? 'Use Upload a Clip in the banner above, or try the demo.' : 'Use Choose Video in the header, or try the demo.'}
+                        {' '}Choose a clip each time — nothing auto-loads on reload.
                       </p>
-                      <div className="flex flex-col items-center gap-2 sm:flex-row">
-                        <label className="cursor-pointer">
-                          <input
-                            type="file"
-                            accept="video/*"
-                            className="hidden"
-                            onChange={(e) => {
-                              const f = e.target.files?.[0]
-                              if (f) onPickVideo(f)
-                              e.target.value = ''
-                            }}
-                          />
-                          <span className="inline-flex items-center gap-2 rounded-xl bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground shadow hover:bg-primary/90">
-                            <Upload className="h-4 w-4" />
-                            Upload a clip
-                          </span>
-                        </label>
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          className="h-10 border-white/15 bg-white/5 text-foreground hover:bg-white/10"
-                          disabled={demoClipLoading}
-                          onClick={() => void loadDemoClip()}
-                        >
-                          {demoClipLoading ? (
-                            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                          ) : (
-                            <Play className="mr-2 h-4 w-4" />
-                          )}
-                          Try demo clip
-                        </Button>
-                      </div>
-                      <p className="text-xs text-muted-foreground/80">
-                        {hideShellHeader ? 'Or use Upload a Clip in the banner above' : 'Or use Choose Video in the header'}
-                      </p>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        className="h-10 border-white/15 bg-white/5 text-foreground hover:bg-white/10"
+                        disabled={demoClipLoading}
+                        onClick={() => void loadDemoClip()}
+                      >
+                        {demoClipLoading ? (
+                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        ) : (
+                          <Play className="mr-2 h-4 w-4" />
+                        )}
+                        Try demo clip
+                      </Button>
                     </div>
                   )}
 
@@ -4034,17 +4029,15 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                     New clip
                   </Button>
                 )}
-                <FocusToggle
+                <CompactFocusToggle
                   currentFocus={focusTarget === 'A' ? 'blue' : focusTarget === 'B' ? 'red' : 'both'}
-                  onFocusChange={(focus: 'both' | 'blue' | 'red') => {
+                  onFocusChange={(focus) => {
                     if (focus === 'blue') { setFocusTarget('A'); setSelectedFighterId('A'); setAiFocusPose('A') }
                     else if (focus === 'red') { setFocusTarget('B'); setSelectedFighterId('B'); setAiFocusPose('B') }
                     else { setFocusTarget('both'); setSelectedFighterId(null); setAiFocusPose('both') }
                     setSkeletonVisible({ A: true, B: true })
                   }}
-                  myCorner={myCorner}
-                  onCornerChange={(corner: 'blue' | 'red') => setMyCorner(corner)}
-                  detectedFighters={{ blue: poseDetected.A, red: poseDetected.B }}
+                  showLabels
                   disabled={!videoUrl}
                 />
                 <div className="h-6 w-px bg-border/40" />
@@ -4055,7 +4048,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                   {reflexOn ? 'Reflex ON' : 'Reflex'}
                 </Button>
                 {kinematicsUi?.range && (
-                  <span className="text-[11px] text-muted-foreground ml-auto">Range: {kinematicsUi.range.band} · {kinematicsUi.range.distanceBw.toFixed(2)} bw</span>
+                  <span className="text-[11px] text-muted-foreground ml-auto">Range: {kinematicsUi.range.band}</span>
                 )}
               </div>
 
@@ -4131,6 +4124,13 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                       <label className="flex items-center gap-2"><input type="checkbox" checked={skeletonVisible.A} onChange={(e) => setSkeletonVisible((p) => ({ ...p, A: e.target.checked }))} /><span className="inline-block h-2 w-2 rounded-full bg-blue-500" />Blue corner</label>
                       <label className="flex items-center gap-2"><input type="checkbox" checked={skeletonVisible.B} onChange={(e) => setSkeletonVisible((p) => ({ ...p, B: e.target.checked }))} /><span className="inline-block h-2 w-2 rounded-full bg-red-500" />Red corner</label>
                       <label className="flex items-center gap-2"><input type="checkbox" checked={kinematicsHudOn} onChange={(e) => setKinematicsHudOn(e.target.checked)} />Kinematics HUD</label>
+                      <div className="pt-1">
+                        <div className="mb-1 text-[11px] text-muted-foreground">My corner (for coaching POV)</div>
+                        <div className="flex gap-2">
+                          <Button size="sm" variant={myCorner === 'blue' ? 'default' : 'outline'} className="h-7 flex-1 text-[11px]" onClick={() => setMyCorner('blue')}>Blue</Button>
+                          <Button size="sm" variant={myCorner === 'red' ? 'default' : 'outline'} className="h-7 flex-1 text-[11px]" onClick={() => setMyCorner('red')}>Red</Button>
+                        </div>
+                      </div>
                     </div>
                     <div className="space-y-2">
                       <div className="font-medium text-foreground">Tracking & Analysis</div>

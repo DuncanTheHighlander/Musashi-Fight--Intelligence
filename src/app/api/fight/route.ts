@@ -1241,12 +1241,12 @@ const handleChat = async (body: any, user: any) => {
 
     'GROUNDING RULES (MANDATORY — NEVER VIOLATE THESE):\n' +
     '- ONLY describe actions, techniques, and events you can ACTUALLY SEE in the video/image.\n' +
-    '- ONLY cite kinematics numbers from the MEASURED KINEMATICS section below. If no kinematics data is provided, describe qualitatively ("fast", "slow", "heavy") — NEVER invent bw/s or power index numbers.\n' +
+    '- The MEASURED KINEMATICS section below (if present) is INTERNAL GROUNDING DATA ONLY — it tells you what is true, but its raw units ("bw", "bw/s", "power index") are meaningless to the fighter reading your answer. NEVER print a raw number with those unit labels. Translate every measured value into plain fight language instead: distance -> "close range" / "mid range" / "he\'s outside your reach"; closing speed -> "closing in fast" / "backing straight out" / "holding ground"; hand or hip speed -> "quick hands", "sluggish combinations", "explosive hips", etc. If no kinematics data is provided, describe qualitatively the same way — NEVER invent numbers of any kind.\n' +
     '- ONLY use timestamps (MM:SS) if you are analyzing a video with temporal access. For single images, say "in this frame".\n' +
     '- If fighters are mostly using footwork, feints, and range management with few exchanges, SAY THAT. Do not invent exchanges that did not happen.\n' +
     '- If you cannot determine something from the footage, say so briefly. Do not guess or fabricate.\n' +
     '- Fewer accurate observations beat many hallucinated ones.\n' +
-    '- NEVER reference specific bw/s numbers, power indices, or timestamps unless they appear in the data provided to you.\n' +
+    '- NEVER print "bw", "bw/s", "power index", or any other raw metric/unit label in your answer — those exist only to keep you accurate, not to be quoted.\n' +
     '\n' +
 
     `COACHING MODE: ${coachingMode.toUpperCase()}\n` +
@@ -1256,10 +1256,10 @@ const handleChat = async (body: any, user: any) => {
     (kinematicsDetails ? `\n${kinematicsDetails}\n` : '') +
 
     (coachingMode === 'corner_coach' ?
-      'ACT AS CORNER COACH: Focus on Fighter A\'s form and technique. If measured kinematics data is provided above, reference those exact numbers. Look for biomechanical leaks, timing issues, and technical corrections that are VISIBLE in the footage.' :
+      'ACT AS CORNER COACH: Focus on Fighter A\'s form and technique. If measured kinematics data is provided above, let it ground your read but describe it in plain fight language (never the raw numbers). Look for biomechanical leaks, timing issues, and technical corrections that are VISIBLE in the footage.' :
       coachingMode === 'scout' ?
-      'ACT AS SCOUT: Focus on Fighter B\'s patterns and weaknesses. If measured kinematics data is provided above, use those exact numbers to identify exploitable tendencies. Look for habits, tells, and openings VISIBLE in the footage.' :
-      'ACT AS STRATEGIST: Analyze both fighters\' interplay. If measured kinematics data is provided above, compare their exact numbers. Otherwise describe what you OBSERVE qualitatively.'
+      'ACT AS SCOUT: Focus on Fighter B\'s patterns and weaknesses. If measured kinematics data is provided above, let it ground your read but describe it in plain fight language (never the raw numbers) to identify exploitable tendencies. Look for habits, tells, and openings VISIBLE in the footage.' :
+      'ACT AS STRATEGIST: Analyze both fighters\' interplay. If measured kinematics data is provided above, let it ground your read but describe it in plain fight language (never the raw numbers). Otherwise describe what you OBSERVE qualitatively.'
     ) + '\n' +
 
     '\nRESPONSE STRUCTURE — adapt based on what you ACTUALLY observe:\n' +
