@@ -36,6 +36,14 @@ database_name = "musashi-db"
 database_id = "c567e219-abc3-4ebb-868a-6c3b4cc4e5ae"
 migrations_dir = "migrations"
 
+[[r2_buckets]]
+binding = "MUSASHI_BUCKET"
+bucket_name = "musashi"
+
+[[r2_buckets]]
+binding = "MUSASHI_UPLOADS_BUCKET"
+bucket_name = "musashi-uploads"
+
 [[vectorize]]
 binding = "VECTORIZE"
 index_name = "musashi-knowledge"

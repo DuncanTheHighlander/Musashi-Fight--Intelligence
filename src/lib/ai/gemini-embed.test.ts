@@ -7,6 +7,12 @@ import {
   GEMINI_EMBED_DIMENSION_DEFAULT,
 } from './gemini-embed'
 
+const lastFetchBody = (fetchMock: ReturnType<typeof vi.fn>): Record<string, any> => {
+  const call = fetchMock.mock.calls.at(-1)
+  const init = call?.[1] as RequestInit | undefined
+  return JSON.parse(String(init?.body))
+}
+
 describe('Gemini embedding dimensionality', () => {
   afterEach(() => {
     vi.unstubAllEnvs()
@@ -36,7 +42,7 @@ describe('Gemini embedding dimensionality', () => {
 
     await embedText('jab cross', { taskType: 'RETRIEVAL_DOCUMENT' })
 
-    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))
+    const body = lastFetchBody(fetchMock)
     expect(body.outputDimensionality).toBe(GEMINI_EMBED_DIMENSION_DEFAULT)
   })
 
@@ -49,7 +55,7 @@ describe('Gemini embedding dimensionality', () => {
 
     await embedText(['jab', 'cross'], { taskType: 'RETRIEVAL_DOCUMENT' })
 
-    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))
+    const body = lastFetchBody(fetchMock)
     expect(body.requests).toEqual([
       expect.objectContaining({ outputDimensionality: GEMINI_EMBED_DIMENSION_DEFAULT }),
       expect.objectContaining({ outputDimensionality: GEMINI_EMBED_DIMENSION_DEFAULT }),
@@ -67,7 +73,7 @@ describe('Gemini embedding dimensionality', () => {
       base64: 'AAAA',
     })
 
-    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))
+    const body = lastFetchBody(fetchMock)
     expect(body.outputDimensionality).toBe(GEMINI_EMBED_DIMENSION_DEFAULT)
   })
 })

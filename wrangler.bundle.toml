@@ -1,28 +1,18 @@
-# Direct deploy config for the generated OpenNext Worker.
-# This bypasses the OpenNext deploy wrapper while preserving Cloudflare bindings.
 name = "app"
-main = "worker.js"
+main = ".open-next/worker.js"
 compatibility_date = "2024-09-23"
 compatibility_flags = ["nodejs_compat"]
-no_bundle = true
-find_additional_modules = true
-preserve_file_names = true
+minify = true
+keep_names = false
 
-[[rules]]
-type = "ESModule"
-globs = ["**/*.js", "**/*.mjs"]
-fallthrough = true
-
-[[rules]]
-type = "Text"
-globs = ["**/*.sql", "**/*.html"]
-fallthrough = true
+[alias]
+sqlite = "./src/lib/workerEmptyModule.ts"
 
 [triggers]
 crons = ["*/5 * * * *"]
 
 [assets]
-directory = "assets"
+directory = ".open-next/assets"
 binding = "ASSETS"
 
 [[services]]
@@ -33,7 +23,7 @@ service = "app"
 binding = "DB"
 database_name = "musashi-db"
 database_id = "c567e219-abc3-4ebb-868a-6c3b4cc4e5ae"
-migrations_dir = "../migrations"
+migrations_dir = "migrations"
 
 [[r2_buckets]]
 binding = "MUSASHI_BUCKET"
