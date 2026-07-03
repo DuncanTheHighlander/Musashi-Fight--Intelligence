@@ -20,6 +20,29 @@ afterEach(() => {
 })
 
 describe('cleanOpenNextOutput', () => {
+  test('removes Next and OpenNext generated output before a Cloudflare build', async () => {
+    const { cleanBuildOutput } = await import('../../../scripts/clean-open-next.mjs')
+    const root = createTempRoot()
+    const nextOutput = join(root, '.next')
+    const openNextOutput = join(root, '.open-next')
+    mkdirSync(nextOutput)
+    mkdirSync(openNextOutput)
+    writeFileSync(join(nextOutput, 'build-manifest.json'), '{}')
+    writeFileSync(join(openNextOutput, 'worker.js'), 'old build')
+
+    const result = await cleanBuildOutput({
+      outputDirs: [openNextOutput, nextOutput],
+      delayMs: 0,
+    })
+
+    expect(result).toEqual([
+      { outputDir: openNextOutput, removed: true, attempts: 1 },
+      { outputDir: nextOutput, removed: true, attempts: 1 },
+    ])
+    expect(existsSync(openNextOutput)).toBe(false)
+    expect(existsSync(nextOutput)).toBe(false)
+  })
+
   test('removes an existing OpenNext output directory', async () => {
     const { cleanOpenNextOutput } = await import('../../../scripts/clean-open-next.mjs')
     const root = createTempRoot()
