@@ -1,8 +1,10 @@
-#:schema node_modules/wrangler/config-schema.json
+# Direct deploy config for the generated OpenNext Worker.
+# This bypasses the OpenNext deploy wrapper while preserving Cloudflare bindings.
 name = "app"
-main = "src/cloudflare-worker.ts"
+main = ".open-next/worker.js"
 compatibility_date = "2024-09-23"
 compatibility_flags = ["nodejs_compat"]
+no_bundle = true
 find_additional_modules = true
 preserve_file_names = true
 
@@ -23,9 +25,6 @@ crons = ["*/5 * * * *"]
 directory = ".open-next/assets"
 binding = "ASSETS"
 
-[alias]
-sqlite = "./src/lib/workerEmptyModule.ts"
-
 [[services]]
 binding = "WORKER_SELF_REFERENCE"
 service = "app"
@@ -43,8 +42,6 @@ index_name = "musashi-knowledge"
 [ai]
 binding = "AI"
 
-# Cloudflare Secrets Store — store_id identifies the account store (not a credential).
-# Workers read values via binding names + async env.BINDING.get().
 [[secrets_store_secrets]]
 binding = "SECRET_AI"
 store_id = "3a6ee7307f0b482ab4b3f3dd6794168c"
@@ -75,12 +72,8 @@ binding = "SECRET_SUPABASE"
 store_id = "3a6ee7307f0b482ab4b3f3dd6794168c"
 secret_name = "Supabase"
 
-# Production vars (per-Worker secrets via `wrangler secret put` — see docs/MARKETPLACE_LAUNCH.md)
-# Set STRIPE_* and STORAGE_* secrets before deploy; mock modes are for local dev only.
 [vars]
 MUSASHI_MARKETPLACE_PAYMENTS = "stripe"
 MUSASHI_STORAGE_MODE = "r2"
 GEMINI_EMBED_DIMENSION = "1536"
 NODE_ENV = "production"
-# Set your live URL after first deploy (Workers subdomain or custom domain):
-# MUSASHI_APP_URL = "https://app.yourdomain.com"

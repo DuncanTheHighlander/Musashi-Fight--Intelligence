@@ -4,6 +4,8 @@ import { GEMINI_EMBED_MODEL_DEFAULT } from '@/lib/gemini/models'
 
 export type GeminiEmbedModel = 'gemini-embedding-2-preview' | (string & {})
 
+export const GEMINI_EMBED_DIMENSION_DEFAULT = 1536
+
 export type EmbedOptions = {
   apiKey?: string
   model?: GeminiEmbedModel
@@ -27,6 +29,15 @@ type EmbedResponse = {
 
 const defaultModel = (): GeminiEmbedModel =>
   (process.env.GEMINI_EMBED_MODEL as GeminiEmbedModel | undefined) || GEMINI_EMBED_MODEL_DEFAULT
+
+export const defaultOutputDimensionality = (): number => {
+  const raw = process.env.GEMINI_EMBED_DIMENSION
+  if (!raw) return GEMINI_EMBED_DIMENSION_DEFAULT
+
+  const parsed = Number(raw)
+  if (!Number.isInteger(parsed) || parsed <= 0) return GEMINI_EMBED_DIMENSION_DEFAULT
+  return parsed
+}
 
 const getKey = (explicit?: string): string => {
   const key = explicit || process.env.GEMINI_API_KEY
@@ -68,7 +79,7 @@ export async function embedText(
 
   const taskType = options?.taskType || 'RETRIEVAL_QUERY'
   const outputDimensionality =
-    typeof options?.outputDimensionality === 'number' ? options.outputDimensionality : undefined
+    typeof options?.outputDimensionality === 'number' ? options.outputDimensionality : defaultOutputDimensionality()
 
   if (inputs.length === 1) {
     const singleUrl = buildUrl(model, apiKey, false)
@@ -121,7 +132,7 @@ export async function embedVideo(
 
   const taskType = options?.taskType || 'RETRIEVAL_DOCUMENT'
   const outputDimensionality =
-    typeof options?.outputDimensionality === 'number' ? options.outputDimensionality : undefined
+    typeof options?.outputDimensionality === 'number' ? options.outputDimensionality : defaultOutputDimensionality()
 
   const resp = await fetch(url, {
     method: 'POST',
@@ -149,7 +160,7 @@ export async function embedVideoWithCaption(
 
   const taskType = options?.taskType || 'RETRIEVAL_DOCUMENT'
   const outputDimensionality =
-    typeof options?.outputDimensionality === 'number' ? options.outputDimensionality : undefined
+    typeof options?.outputDimensionality === 'number' ? options.outputDimensionality : defaultOutputDimensionality()
 
   const resp = await fetch(url, {
     method: 'POST',

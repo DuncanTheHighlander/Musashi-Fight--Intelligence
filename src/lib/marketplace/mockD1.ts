@@ -11,6 +11,8 @@
  */
 import type { D1Database } from '@/lib/db'
 
+const NODE_BUILTIN = (name: string) => `node:${name}`
+
 type SqliteRunResult = { changes: number | bigint }
 
 type SqliteStatement = {
@@ -42,8 +44,8 @@ const toSqliteValue = (v: unknown): unknown => {
 }
 
 function applyMigrations(db: SqliteDatabase): void {
-  const fs = getBuiltinModule<typeof import('node:fs')>('node:fs')
-  const path = getBuiltinModule<typeof import('node:path')>('node:path')
+  const fs = getBuiltinModule<typeof import('node:fs')>(NODE_BUILTIN('fs'))
+  const path = getBuiltinModule<typeof import('node:path')>(NODE_BUILTIN('path'))
   if (!fs || !path) throw new Error('mock D1: node fs/path builtins unavailable')
 
   const dir = path.join(process.cwd(), 'migrations')
@@ -141,7 +143,7 @@ function seedDevData(db: SqliteDatabase): void {
 export function createMockD1(): D1Database {
   const sqliteModule = getBuiltinModule<{
     DatabaseSync: new (path: string, options?: { enableForeignKeyConstraints?: boolean }) => SqliteDatabase
-  }>('node:sqlite')
+  }>(NODE_BUILTIN('sqlite'))
 
   if (!sqliteModule?.DatabaseSync) {
     throw new Error(
