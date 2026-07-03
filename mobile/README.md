@@ -1,15 +1,15 @@
-# Musashi Android shell (Capacitor)
+# Musashi mobile shells (Capacitor — Android + iOS)
 
-Native Android wrapper that loads the **deployed Musashi web app** in a WebView. No web assets are bundled into the APK — the app points at your production (or staging) URL.
+Native wrappers that load the **deployed Musashi web app** in a WebView. No web assets are bundled into the binaries — the apps point at your production (or staging) URL.
 
 ## Prerequisites
 
 - Node.js 18+
-- [Android Studio](https://developer.android.com/studio) (includes Android SDK)
-- JDK 17+ (bundled with recent Android Studio)
 - Musashi web app deployed to Cloudflare Workers (see repo root `pnpm deploy`)
+- **Android:** [Android Studio](https://developer.android.com/studio) + JDK 17+ (bundled)
+- **iOS:** Mac with Xcode 15+ (project is scaffolded and synced here; building requires macOS)
 
-Full Play Store checklist: [`docs/ANDROID.md`](../docs/ANDROID.md).
+Store checklists: [`docs/ANDROID.md`](../docs/ANDROID.md) · [`docs/IOS.md`](../docs/IOS.md)
 
 ## One-time setup
 
@@ -17,6 +17,7 @@ Full Play Store checklist: [`docs/ANDROID.md`](../docs/ANDROID.md).
 cd mobile
 npm install
 npx cap add android   # only if android/ is missing
+npx cap add ios       # only if ios/ is missing
 ```
 
 ## Before every native build
@@ -51,19 +52,16 @@ Or from this folder:
 npm run sync
 ```
 
-### 3. Open Android Studio
+### 3. Open the native IDE
 
 From repo root:
 
 ```bash
-pnpm mobile:android
+pnpm mobile:android   # Android Studio
+pnpm mobile:ios       # Xcode (Mac only)
 ```
 
-Or:
-
-```bash
-npm run android:open
-```
+Or from this folder: `npm run android:open` / `npm run ios:open`.
 
 ## Build release AAB (Play Store)
 
@@ -74,6 +72,10 @@ In Android Studio:
 3. Create or select a keystore (store securely — required for all future updates)
 4. Select **release** variant
 5. Upload the `.aab` from `android/app/release/` to [Google Play Console](https://play.google.com/console)
+
+## Build release IPA (App Store)
+
+Requires a Mac — the `ios/` project here is ready to open in Xcode (icons, splash, and camera permission strings are already in place). Full walkthrough incl. App Store review risks: [`docs/IOS.md`](../docs/IOS.md).
 
 ## Local dev against your machine (optional)
 
@@ -97,8 +99,9 @@ Also add `android:usesCleartextTraffic="true"` is handled automatically by Capac
 
 | Script | Action |
 |--------|--------|
-| `pnpm mobile:sync` | Sync web placeholder + plugins into `android/` |
+| `pnpm mobile:sync` | Sync web placeholder + plugins into `android/` + `ios/` |
 | `pnpm mobile:android` | Open project in Android Studio |
+| `pnpm mobile:ios` | Open project in Xcode (Mac only) |
 
 ## API keys
 

@@ -119,6 +119,7 @@ The Capacitor shell and PWA share the same web codebase; Play Store is optional 
 
 ## Related docs
 
+- [`IOS.md`](IOS.md) — iOS/App Store equivalent
 - [`mobile/README.md`](../mobile/README.md) — step-by-step build commands
 - [`SHIPPING.md`](../SHIPPING.md) — overall launch timeline
 - [`docs/MARKETPLACE_LAUNCH.md`](MARKETPLACE_LAUNCH.md) — production env vars

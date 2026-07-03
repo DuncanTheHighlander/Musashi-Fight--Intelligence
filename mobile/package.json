@@ -7,11 +7,14 @@
     "sync": "cap sync",
     "copy": "cap copy",
     "android:open": "cap open android",
-    "android:add": "cap add android"
+    "android:add": "cap add android",
+    "ios:open": "cap open ios",
+    "ios:add": "cap add ios"
   },
   "dependencies": {
     "@capacitor/android": "^8.4.1",
     "@capacitor/core": "^8.4.1",
+    "@capacitor/ios": "^8.4.1",
     "@capacitor/splash-screen": "^8.0.1",
     "@capacitor/status-bar": "^8.0.1"
   },
