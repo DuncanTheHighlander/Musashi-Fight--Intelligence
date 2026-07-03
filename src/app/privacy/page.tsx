@@ -76,9 +76,10 @@ export default function PrivacyPage() {
             <Section title="6. Data Retention and Deletion">
               <p>
                 We retain your data while your account is active. You can delete individual videos
-                and documents from within the app, or request deletion of your entire account and
-                associated data by contacting support. Deletion requests are honored within a
-                reasonable period, subject to legal retention requirements.
+                and documents from within the app, and you can permanently delete your entire
+                account and associated data at any time from your Profile page (Danger Zone →
+                Delete account). Records of completed marketplace transactions may be retained in
+                anonymized form where required for legal or financial compliance.
               </p>
             </Section>
 

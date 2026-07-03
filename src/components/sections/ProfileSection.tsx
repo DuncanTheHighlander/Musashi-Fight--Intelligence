@@ -1,15 +1,98 @@
 'use client'
 
-import React, { useEffect } from 'react'
+import React, { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import { useAuth } from '@/hooks/useAuth'
-import { User, Mail, Shield, Calendar, Activity } from 'lucide-react'
+import { User, Mail, Shield, Calendar, Activity, Loader2, TriangleAlert } from 'lucide-react'
 import { useSection } from '@/contexts/SectionContext'
 import { SectionShell } from '@/components/ui/section-header'
+
+/** In-app account deletion — required by Apple 5.1.1(v) and Google Play for
+ *  apps with account creation. Two-step: reveal, then password + confirm. */
+function DangerZoneCard({ isAdmin }: { isAdmin: boolean }) {
+  const [open, setOpen] = useState(false)
+  const [password, setPassword] = useState('')
+  const [deleting, setDeleting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const onDelete = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setError(null)
+    setDeleting(true)
+    try {
+      const res = await fetch('/api/auth/account', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password }),
+      })
+      const data = (await res.json().catch(() => ({}))) as { error?: string }
+      if (!res.ok) throw new Error(data?.error || 'Unable to delete account')
+      // Session is revoked server-side; full reload clears all client state.
+      window.location.href = '/'
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to delete account')
+      setDeleting(false)
+    }
+  }
+
+  return (
+    <Card className="mt-5 border-destructive/30">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-lg text-destructive">
+          <TriangleAlert className="h-5 w-5" />
+          Danger Zone
+        </CardTitle>
+        <CardDescription>
+          Permanently delete your account, videos, analyses, and personal data. This cannot be undone.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        {isAdmin ? (
+          <p className="text-sm text-muted-foreground">Admin accounts cannot be deleted from the app.</p>
+        ) : !open ? (
+          <Button variant="outline" className="h-10 border-destructive/40 text-destructive hover:bg-destructive/10 hover:text-destructive" onClick={() => setOpen(true)}>
+            Delete account…
+          </Button>
+        ) : (
+          <form className="max-w-sm space-y-3" onSubmit={onDelete}>
+            <div className="space-y-2">
+              <Label htmlFor="delete-password">Confirm your password to delete your account</Label>
+              <Input
+                id="delete-password"
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                autoComplete="current-password"
+                className="h-10"
+                required
+              />
+            </div>
+            {error && (
+              <div role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+                {error}
+              </div>
+            )}
+            <div className="flex gap-2">
+              <Button type="submit" variant="destructive" className="h-10" disabled={deleting || !password}>
+                {deleting && <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" />}
+                {deleting ? 'Deleting…' : 'Permanently delete'}
+              </Button>
+              <Button type="button" variant="ghost" className="h-10" disabled={deleting} onClick={() => { setOpen(false); setPassword(''); setError(null) }}>
+                Cancel
+              </Button>
+            </div>
+          </form>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
 
 export default function ProfileSection() {
   const router = useRouter()
@@ -152,6 +235,8 @@ export default function ProfileSection() {
           </div>
         </CardContent>
       </Card>
+
+      <DangerZoneCard isAdmin={user.role === 'shogun'} />
     </SectionShell>
   )
 }

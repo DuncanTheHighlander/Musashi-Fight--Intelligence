@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { ArrowLeft, Check, Crown, Loader2 } from 'lucide-react'
 import { SectionHeader, SectionShell } from '@/components/ui/section-header'
+import { isIosNativeApp } from '@/lib/nativePlatform'
 
 // Display-only labels. The actual billed amount is controlled by the Stripe
 // price (MUSASHI_STRIPE_PRICE_ID_PRO) — keep this in sync with Stripe.
@@ -42,6 +43,12 @@ export default function PricingPage() {
   const [active, setActive] = useState<boolean | null>(null)
   const [planKey, setPlanKey] = useState<(typeof PLAN_OPTIONS)[number]['key']>('pro_monthly')
   const selectedPlan = PLAN_OPTIONS.find((p) => p.key === planKey) ?? PLAN_OPTIONS[0]
+  // Apple 3.1.1: no external (Stripe) purchase flow for digital subscriptions
+  // inside the iOS app. Detected after mount to avoid a hydration mismatch.
+  const [iosShell, setIosShell] = useState(false)
+  useEffect(() => {
+    setIosShell(isIosNativeApp())
+  }, [])
 
   const loadStatus = async () => {
     try {
@@ -212,7 +219,11 @@ export default function PricingPage() {
             </ul>
           </CardContent>
           <CardFooter>
-            {active ? (
+            {iosShell ? (
+              <p className="w-full rounded-md border border-border/60 bg-muted/40 p-3 text-center text-sm text-muted-foreground">
+                Pro subscriptions aren&apos;t available for purchase in this app.
+              </p>
+            ) : active ? (
               <Button className="h-10 w-full shadow-md" disabled={loading} onClick={onManageBilling}>
                 {loading && <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" />}
                 {loading ? 'Opening…' : 'Manage billing'}
@@ -233,9 +244,11 @@ export default function PricingPage() {
         </div>
       )}
 
-      <p className="mt-6 text-center text-xs text-muted-foreground">
-        Billing is handled securely through Stripe. You can cancel anytime from the billing portal.
-      </p>
+      {!iosShell && (
+        <p className="mt-6 text-center text-xs text-muted-foreground">
+          Billing is handled securely through Stripe. You can cancel anytime from the billing portal.
+        </p>
+      )}
     </SectionShell>
   )
 }

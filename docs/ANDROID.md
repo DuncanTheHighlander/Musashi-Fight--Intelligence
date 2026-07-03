@@ -85,6 +85,7 @@ See [`mobile/README.md`](../mobile/README.md) for emulator / LAN dev URLs.
 - [ ] Short + full description
 - [ ] Content rating questionnaire (sports / fitness)
 - [ ] Data safety form (camera, video upload, account data — align with privacy policy)
+- [x] In-app account deletion (Play policy requirement — done in code: Profile → Danger Zone; also declare the deletion URL/path in the data safety form)
 
 ### Recommended
 

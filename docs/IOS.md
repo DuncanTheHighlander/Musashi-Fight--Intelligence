@@ -8,6 +8,8 @@ Musashi ships to the App Store as a **Capacitor WebView shell** that loads the p
 - `Info.plist` camera / microphone / photo-library usage descriptions (required for live pose tracking and video upload)
 - App icons + splash screens generated into `Assets.xcassets` from `mobile/resources/`
 - Splash screen + status bar plugins synced
+- **In-app account deletion** (Apple 5.1.1(v)): Profile → Danger Zone, `DELETE /api/auth/account` with password confirmation, escrow guard, Stripe cancel
+- **IAP compliance (3.1.1)**: subscription purchase/portal UI is hidden inside the iOS shell (`src/lib/nativePlatform.ts` detects the Capacitor bridge); marketplace coach payments unaffected
 
 ## What requires a Mac
 
@@ -49,11 +51,8 @@ Apple rejects apps that are "just a website in a wrapper" far more aggressively 
 
 - **AI subscription tiers are digital content** — on iOS they must be sold through Apple IAP (Apple takes ~15–30%). You cannot show Stripe checkout for them inside the iOS app.
 - **Marketplace coach services are person-to-person real-world services** — these may use Stripe (Guideline 3.1.5(e) territory, like fiverr/Uber).
-- `wrangler.toml` already provisions RevenueCat secrets (`SECRET_REVCAT1/2`) for this. The web app does **not** yet integrate RevenueCat — before iOS launch you must either:
-  1. Integrate RevenueCat IAP for subscription purchases when running inside the iOS shell, or
-  2. Hide all subscription purchase UI when the iOS app is detected (Netflix-style), letting users subscribe on the web separately — allowed as long as the app never links out to external purchase.
-
-Detect the shell via Capacitor: `window.Capacitor?.getPlatform() === 'ios'`.
+- **Implemented (option 2, Netflix-style):** the pricing page hides the Stripe purchase and billing-portal buttons inside the iOS shell and shows a neutral "not available for purchase in this app" notice, with no link out to external checkout. Users subscribe on the web; Pro entitlements apply everywhere since auth is shared.
+- `wrangler.toml` also provisions RevenueCat secrets (`SECRET_REVCAT1/2`) if you later want native IAP purchases (higher conversion, Apple's cut) instead of the hidden-purchase approach.
 
 ### 3. Camera in WKWebView
 
@@ -64,7 +63,8 @@ Detect the shell via Capacitor: `window.Capacitor?.getPlatform() === 'ios'`.
 - [ ] Web app live at production URL; `server.url` set in `mobile/capacitor.config.json`
 - [ ] Apple Developer account + App Store Connect app created (bundle ID `ai.musashi.app`)
 - [ ] Signed archive uploaded via Xcode
-- [ ] IAP decision made (RevenueCat integration or hidden purchase UI) — **blocking for review**
+- [x] IAP compliance — purchase UI hidden in the iOS shell (done in code)
+- [x] In-app account deletion (done in code — Profile → Danger Zone)
 - [ ] Privacy policy URL (`/privacy`) + terms (`/terms`)
 - [ ] App Privacy questionnaire (camera, video uploads, account data)
 - [ ] Screenshots: 6.7" and 6.5" iPhone required; iPad if you keep iPad support
