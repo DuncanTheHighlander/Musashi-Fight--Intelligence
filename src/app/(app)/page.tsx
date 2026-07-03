@@ -301,6 +301,7 @@ export default function HomePage() {
       <section id="fight-lab-anchor" className="scroll-mt-24 px-5 pb-8 outline-none" tabIndex={-1} aria-label="Fight Lab">
         <FightCoachExperience
           hideShellHeader
+          collapseWhenIdle
           bootstrapVideoFile={bootstrapVideoFile}
           autoPlayOnReady={autoPlayFixture}
           onBootstrapConsumed={clearBootstrapVideo}

@@ -432,6 +432,9 @@ export type FightCoachExperienceProps = {
   hideShellHeader?: boolean
   /** Load a clip picked from outside this tree (e.g. hero Upload on the home page). */
   bootstrapVideoFile?: File | null
+  /** Collapse to a slim demo-clip row while no clip is loaded — the page's own
+   *  uploader (home hero) is then the single upload terminal. */
+  collapseWhenIdle?: boolean
   /** Dev fixture helper: auto-unlock/play once the boot pre-scan is ready. */
   autoPlayOnReady?: boolean
   onBootstrapConsumed?: () => void
@@ -458,6 +461,7 @@ type ClipPickOptions = {
 export default function FightCoachExperience({
   hideShellHeader = false,
   bootstrapVideoFile = null,
+  collapseWhenIdle = false,
   autoPlayOnReady = false,
   onBootstrapConsumed,
 }: FightCoachExperienceProps = {}) {
@@ -3404,6 +3408,35 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
         </div>
       )}
 
+      {collapseWhenIdle && !videoUrl ? (
+        /* Idle: the page's hero uploader is the single upload terminal; the
+           full Fight Lab appears the moment a clip loads. Demo stays reachable. */
+        <div className="mx-auto max-w-7xl px-4 pb-6">
+          <div
+            className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border px-4 py-3.5"
+            style={{ borderColor: 'var(--ms-line10)', background: 'var(--ms-surface)' }}
+          >
+            <div className="min-w-0">
+              <p className="text-sm font-semibold text-foreground">No clip loaded yet</p>
+              <p className="text-xs text-muted-foreground">Use the uploader above — or watch a demo breakdown first.</p>
+            </div>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={demoClipLoading}
+              onClick={() => void loadDemoClip()}
+            >
+              {demoClipLoading ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : (
+                <Play className="mr-2 h-4 w-4" />
+              )}
+              Try demo clip
+            </Button>
+          </div>
+        </div>
+      ) : (
       <div className="mx-auto max-w-7xl px-4 py-6">
         <div className="grid grid-cols-1 lg:grid-cols-[1fr,420px] gap-6">
             {/* LEFT: Video Player */}
@@ -4532,6 +4565,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
             </div>
           </div>
       </div>
+      )}
     </div>
   )
 }
