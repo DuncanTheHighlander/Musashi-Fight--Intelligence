@@ -11,7 +11,7 @@ import {
   Focus
 } from 'lucide-react'
 
-export type FocusTarget = 'both' | 'blue' | 'red'
+export type FocusTarget = 'both' | 'blue' | 'red' | 'unsure'
 export type Corner = 'blue' | 'red'
 
 interface FocusToggleProps {
@@ -65,6 +65,13 @@ export function FocusToggle({
       description: 'Focus on red corner (right)',
       disabled: !detectedFighters.red
     },
+    {
+      value: 'unsure',
+      label: 'Not Sure',
+      icon: Focus,
+      color: 'bg-amber-600',
+      description: 'Identity unclear — coach cautiously'
+    },
   ]
 
   const currentFocusInfo = focusOptions.find(o => o.value === currentFocus) || focusOptions[0]
@@ -116,7 +123,7 @@ export function FocusToggle({
         {/* Focus Toggle Buttons */}
         <div className="space-y-2">
           <div className="text-xs text-gray-400 uppercase tracking-wide">Highlight</div>
-          <div className="grid grid-cols-3 gap-2">
+          <div className="grid grid-cols-4 gap-2">
             {focusOptions.map((option) => (
               <Button
                 key={option.value}
@@ -131,7 +138,7 @@ export function FocusToggle({
                 } ${option.disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
               >
                 <option.icon className="w-4 h-4 mr-1" />
-                {option.value === 'both' ? 'Both' : option.value === 'blue' ? 'Blue' : 'Red'}
+                {option.value === 'both' ? 'Both' : option.value === 'blue' ? 'Blue' : option.value === 'red' ? 'Red' : 'Not sure'}
               </Button>
             ))}
           </div>
@@ -191,6 +198,7 @@ export function CompactFocusToggle({
     { value: 'both', label: 'Both', color: 'text-gray-400', activeColor: 'bg-gray-600 text-white' },
     { value: 'blue', label: 'Blue', color: 'text-blue-400', activeColor: 'bg-blue-600 text-white' },
     { value: 'red', label: 'Red', color: 'text-red-400', activeColor: 'bg-red-600 text-white' },
+    { value: 'unsure', label: 'Not sure', color: 'text-amber-400', activeColor: 'bg-amber-600 text-white' },
   ]
 
   return (
@@ -230,11 +238,13 @@ export function FocusIndicator({ currentFocus, isActive = true }: FocusIndicator
     both: 'bg-gray-400',
     blue: 'bg-blue-500',
     red: 'bg-red-500',
+    unsure: 'bg-amber-500',
   }
   const labelMap: Record<FocusTarget, string> = {
     both: 'Both',
     blue: 'Blue',
     red: 'Red',
+    unsure: 'Not sure',
   }
 
   return (

@@ -1,12 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { POST } from './route'
 import { createMockD1, pinMockD1, unpinMockD1 } from '@/lib/marketplace/mockD1'
+import { buildSessionCookieHeader, createSession, createUser } from '@/lib/musashiAuth'
 import type { D1Database } from '@/lib/db'
 
-function jsonPost(body: unknown): Request {
+function jsonPost(body: unknown, cookie?: string): Request {
   return new Request('http://localhost/api/uploads', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...(cookie ? { Cookie: cookie } : {}) },
     body: JSON.stringify(body),
   })
 }
@@ -34,14 +35,28 @@ describe('POST /api/uploads', () => {
     vi.stubEnv('STORAGE_SECRET_KEY', '')
     vi.stubEnv('STORAGE_BUCKET_NAME', '')
     vi.stubEnv('NODE_ENV', 'production')
+    vi.stubEnv('MUSASHI_SESSION_SECRET', 'test-session-secret')
+
+    // The MUSASHI_DISABLE_AUTH bypass is (correctly) rejected when
+    // NODE_ENV=production, so this test authenticates with a real session.
+    const user = await createUser({
+      email: 'uploader@example.test',
+      password: 'Password1abc',
+      role: 'user',
+    })
+    const { cookieValue } = await createSession(new Request('http://localhost/login'), user.id)
+    const cookie = buildSessionCookieHeader(cookieValue)
 
     const res = await POST(
-      jsonPost({
-        purpose: 'job_video',
-        originalName: 'clip.mp4',
-        contentType: 'video/mp4',
-        sizeBytes: 1024,
-      }),
+      jsonPost(
+        {
+          purpose: 'job_video',
+          originalName: 'clip.mp4',
+          contentType: 'video/mp4',
+          sizeBytes: 1024,
+        },
+        cookie,
+      ),
     )
     const body = (await res.json()) as { error?: string }
 

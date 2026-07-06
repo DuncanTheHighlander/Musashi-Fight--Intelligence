@@ -75,3 +75,6 @@ MUSASHI_MARKETPLACE_PAYMENTS = "stripe"
 MUSASHI_STORAGE_MODE = "r2"
 GEMINI_EMBED_DIMENSION = "1536"
 NODE_ENV = "production"
+# Email provider (Resend). EMAIL_API_KEY is a Worker secret — `wrangler secret put EMAIL_API_KEY`.
+EMAIL_SERVICE_URL = "https://api.resend.com"
+EMAIL_FROM_ADDRESS = "noreply@musashi.ai"

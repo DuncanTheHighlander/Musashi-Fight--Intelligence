@@ -83,6 +83,46 @@ export function validateEnv(): { valid: boolean; errors: string[]; warnings: str
     errors.push('MUSASHI_DISABLE_AUTH=1 must NOT be set in production. Remove it.')
   }
 
+  if (isProd) {
+    // Deployed Worker gets these from wrangler.toml [vars]; a local `next build`
+    // also runs with NODE_ENV=production, so keep these warnings (not errors).
+    const payments = String(process.env.MUSASHI_MARKETPLACE_PAYMENTS || 'mock').toLowerCase()
+    if (payments !== 'stripe') {
+      warnings.push(
+        `MUSASHI_MARKETPLACE_PAYMENTS is "${payments}" — production must use "stripe" (wrangler.toml [vars]).`,
+      )
+    }
+    const storage = String(process.env.MUSASHI_STORAGE_MODE || 'mock').toLowerCase()
+    if (storage !== 'r2') {
+      warnings.push(
+        `MUSASHI_STORAGE_MODE is "${storage}" — production must use "r2" (wrangler.toml [vars]).`,
+      )
+    } else {
+      const storageKeys = ['STORAGE_SERVICE_URL', 'STORAGE_ACCESS_KEY', 'STORAGE_SECRET_KEY', 'STORAGE_BUCKET_NAME']
+      const missing = storageKeys.filter((k) => !readSecretEnv(k))
+      if (missing.length > 0) {
+        warnings.push(
+          `R2 storage mode is on but ${missing.join(', ')} missing/placeholder — uploads will fail with STORAGE_NOT_CONFIGURED. Set via \`wrangler secret put\`.`,
+        )
+      }
+    }
+    if (!readSecretEnv('EMAIL_API_KEY')) {
+      warnings.push(
+        'EMAIL_API_KEY is missing or a placeholder — password reset / email verification will fail. Set it via `wrangler secret put EMAIL_API_KEY`.',
+      )
+    }
+    if (!readSecretEnv('MUSASHI_CRON_SECRET')) {
+      warnings.push(
+        'MUSASHI_CRON_SECRET is not set — /api/cron/* HTTP routes stay locked (403). Set it via `wrangler secret put MUSASHI_CRON_SECRET`.',
+      )
+    }
+    if (payments === 'stripe' && !readSecretEnv('STRIPE_WEBHOOK_SECRET')) {
+      warnings.push(
+        'STRIPE_WEBHOOK_SECRET is not set — Stripe webhooks will return 501. Set it via `wrangler secret put STRIPE_WEBHOOK_SECRET`.',
+      )
+    }
+  }
+
   return { valid: errors.length === 0, errors, warnings }
 }
 

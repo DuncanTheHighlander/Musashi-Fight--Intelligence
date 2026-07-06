@@ -350,7 +350,7 @@ type TrackBoxResponse = {
   notes?: string
 }
 
-type FocusTarget = 'A' | 'B' | 'both'
+type FocusTarget = 'A' | 'B' | 'both' | 'unsure'
 
 type AnalysisSource = 'single_frame' | 'style_scan'
 
@@ -432,9 +432,12 @@ export type FightCoachExperienceProps = {
   hideShellHeader?: boolean
   /** Load a clip picked from outside this tree (e.g. hero Upload on the home page). */
   bootstrapVideoFile?: File | null
-  /** Collapse to a slim demo-clip row while no clip is loaded — the page's own
-   *  uploader (home hero) is then the single upload terminal. */
+  /** Render nothing while no clip is loaded — the page's own uploader (home
+   *  hero) is then the single upload terminal. */
   collapseWhenIdle?: boolean
+  /** Increment to load the built-in demo clip (used by the home hero's
+   *  "try the demo" link when the idle Fight Lab surface is collapsed). */
+  demoRequestToken?: number
   /** Dev fixture helper: auto-unlock/play once the boot pre-scan is ready. */
   autoPlayOnReady?: boolean
   onBootstrapConsumed?: () => void
@@ -462,6 +465,7 @@ export default function FightCoachExperience({
   hideShellHeader = false,
   bootstrapVideoFile = null,
   collapseWhenIdle = false,
+  demoRequestToken = 0,
   autoPlayOnReady = false,
   onBootstrapConsumed,
 }: FightCoachExperienceProps = {}) {
@@ -488,6 +492,8 @@ export default function FightCoachExperience({
   const lastLedgerIngestMsRef = useRef(0)
   const [fightLangLoading, setFightLangLoading] = useState(false)
   const [fightLangCoaching, setFightLangCoaching] = useState<any | null>(null)
+  // Saved analysis id + model from the server — enables the thumbs rating row.
+  const [fightLangRatingContext, setFightLangRatingContext] = useState<{ ledgerId: string; aiModel?: string | null; discipline?: string | null } | null>(null)
   const [fightLangLlmIssues, setFightLangLlmIssues] = useState<Array<{ code: string; message: string }> | null>(null)
   const [fightLangOverlayAnnotations, setFightLangOverlayAnnotations] = useState<FightLangOverlayAnnotation[] | null>(null)
   // Phase 1 + 2: AI guard response state. When the server returns 401/402/429/503
@@ -1571,6 +1577,11 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
           setPipelineStats(json.pipelineStats)
         }
         setFightLangCoaching(json?.coaching ?? null)
+        setFightLangRatingContext(
+          json?.coaching && typeof json?.savedLedgerId === 'string'
+            ? { ledgerId: json.savedLedgerId, aiModel: json?.model ?? null, discipline: selectedSportRef.current || null }
+            : null
+        )
         setFightLangLlmIssues(Array.isArray(json?.llmIssues) ? json.llmIssues : null)
         if (json?.ledger) {
           setCompiledLedger(json.ledger as Record<string, unknown>)
@@ -3280,8 +3291,13 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
     videoUrl,
   ])
 
+  // Idle-collapsed: no visible surface at all — the page's own uploader (home
+  // hero) is the single upload terminal until a clip loads. min-h-screen would
+  // otherwise leave a giant empty block under the hero.
+  const idleCollapsed = collapseWhenIdle && !videoUrl
+
   return (
-    <div className="min-h-screen w-full bg-background">
+    <div className={idleCollapsed ? 'w-full' : 'min-h-screen w-full bg-background'}>
       {/* Clip context step — opens on every fresh upload; non-blocking (local pipeline keeps booting). */}
       <Dialog open={sportPickerOpen} onOpenChange={setSportPickerOpen}>
         <DialogContent className="max-w-lg">
@@ -3408,35 +3424,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
         </div>
       )}
 
-      {collapseWhenIdle && !videoUrl ? (
-        /* Idle: the page's hero uploader is the single upload terminal; the
-           full Fight Lab appears the moment a clip loads. Demo stays reachable. */
-        <div className="mx-auto max-w-7xl px-4 pb-6">
-          <div
-            className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border px-4 py-3.5"
-            style={{ borderColor: 'var(--ms-line10)', background: 'var(--ms-surface)' }}
-          >
-            <div className="min-w-0">
-              <p className="text-sm font-semibold text-foreground">No clip loaded yet</p>
-              <p className="text-xs text-muted-foreground">Use the uploader above — or watch a demo breakdown first.</p>
-            </div>
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              disabled={demoClipLoading}
-              onClick={() => void loadDemoClip()}
-            >
-              {demoClipLoading ? (
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-              ) : (
-                <Play className="mr-2 h-4 w-4" />
-              )}
-              Try demo clip
-            </Button>
-          </div>
-        </div>
-      ) : (
+      {idleCollapsed ? null : (
       <div className="mx-auto max-w-7xl px-4 py-6">
         <div className="grid grid-cols-1 lg:grid-cols-[1fr,420px] gap-6">
             {/* LEFT: Video Player */}
@@ -3478,10 +3466,11 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                       {selectedClipType ? ` · ${clipTypeLabelFor(selectedClipType)}` : ''}
                     </button>
                     <CompactFocusToggle
-                      currentFocus={focusTarget === 'A' ? 'blue' : focusTarget === 'B' ? 'red' : 'both'}
+                      currentFocus={focusTarget === 'A' ? 'blue' : focusTarget === 'B' ? 'red' : focusTarget === 'unsure' ? 'unsure' : 'both'}
                       onFocusChange={(focus) => {
                         if (focus === 'blue') { setFocusTarget('A'); setSelectedFighterId('A'); setAiFocusPose('A') }
                         else if (focus === 'red') { setFocusTarget('B'); setSelectedFighterId('B'); setAiFocusPose('B') }
+                        else if (focus === 'unsure') { setFocusTarget('unsure'); setSelectedFighterId(null); setAiFocusPose('both') }
                         else { setFocusTarget('both'); setSelectedFighterId(null); setAiFocusPose('both') }
                         setSkeletonVisible({ A: true, B: true })
                       }}
@@ -4095,6 +4084,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                   llmIssues={fightLangLlmIssues ?? undefined}
                   overlayCount={fightLangOverlayAnnotations?.length ?? 0}
                   quotaState={aiQuotaState}
+                  ratingContext={fightLangRatingContext}
                 />
               </div>
 

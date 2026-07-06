@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server'
 import { getCurrentUser } from '@/lib/musashiAuth'
 
 export async function GET(req: Request) {
-  if (process.env.MUSASHI_DISABLE_AUTH === '1') {
+  if (process.env.MUSASHI_DISABLE_AUTH === '1' && process.env.NODE_ENV !== 'production') {
     return NextResponse.json(
       {
         user: {

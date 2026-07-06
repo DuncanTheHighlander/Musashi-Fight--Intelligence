@@ -16,7 +16,7 @@ class GeminiQuotaError extends Error {
 }
 
 export type GeminiModelName = string & {}
-export type CoachingFocusTarget = 'A' | 'B' | 'both'
+export type CoachingFocusTarget = 'A' | 'B' | 'both' | 'unsure'
 
 export type GeminiClientConfig = Readonly<{
   apiKey?: string
@@ -41,7 +41,7 @@ const defaultReasonModel = (): GeminiModelName =>
   ((process.env.GEMINI_REASON_MODEL || process.env.GEMINI_MODEL || GEMINI_MODEL_DEFAULT) as GeminiModelName)
 
 const normalizeCoachingFocus = (focus?: CoachingFocusTarget): CoachingFocusTarget =>
-  focus === 'A' || focus === 'B' ? focus : 'both'
+  focus === 'A' || focus === 'B' || focus === 'unsure' ? focus : 'both'
 
 function buildCoachingFocusBlock(focus?: CoachingFocusTarget): string {
   const normalized = normalizeCoachingFocus(focus)
@@ -63,16 +63,28 @@ function buildCoachingFocusBlock(focus?: CoachingFocusTarget): string {
       '- You may mention Fighter A only as context for the opening, threat, or tactical consequence.',
     ].join('\n')
   }
+  if (normalized === 'unsure') {
+    return [
+      'FOCUS TARGET: not sure which fighter (identity uncertain)',
+      '- The user could not confidently identify which fighter is theirs. Handle identity cautiously.',
+      '- If one athlete is clearly more visible and coachable in the footage, coach that athlete — but state which one you mean by visible traits ("the fighter in dark shorts / Fighter A per tracking") instead of assuming identity.',
+      '- If identity stays unclear (similar gear, tracker swaps, heavy occlusion), coach the exchange as a whole: the pattern, the cause-and-effect, and corrections framed so either athlete can apply them.',
+      '- Still use actorId "A" or "B" in JSON fields (best effort from the ledger tracking), but avoid strong identity-based claims in the coaching text.',
+    ].join('\n')
+  }
   return [
     'FOCUS TARGET: both fighters',
-    '- Return the most important cues across A and B.',
+    '- Explain the exchange, then give concise, useful feedback for EACH fighter.',
+    '- Keep it tight: do not double the response length — pick the highest-value read per fighter.',
     '- Use actorId "A" or "B" on every cue, correction, and overlay annotation.',
   ].join('\n')
 }
 
 export function applyCoachingFocus(payload: CoachingPayload, focus?: CoachingFocusTarget): CoachingPayload {
   const normalized = normalizeCoachingFocus(focus)
-  if (normalized === 'both') return payload
+  // 'both' and 'unsure' keep every cue: with uncertain identity, dropping one
+  // actor's coaching risks deleting the feedback the user actually wanted.
+  if (normalized === 'both' || normalized === 'unsure') return payload
 
   return {
     ...payload,
@@ -165,14 +177,15 @@ Use these as analytical lenses only. Do not copy any creator, do not cite paid i
 - MMA transitions: safe pressure across striking, clinch, takedown, cage/wall, and ground ranges; blend attacks without exposing the next range.
 - Training design: turning corrections into drills, reps, constraints, and clear success conditions.
 
-Use this higher-level structure inside the existing JSON:
-- mainDiagnosis = Coach's Read: 2-5 sentences explaining the tactical story, the pattern that mattered, what the selected fighter did well, what repeated issue created danger, and how the opponent can read or exploit it.
-- quickCues = exactly 3 short corner commands when evidence allows. Each cue must be direct, actor-specific, actionable, and evidence-supported.
+UNIVERSAL FEEDBACK FORMAT — every sport uses this same structure inside the existing JSON (the sport brain changes WHAT you coach, never this structure):
+- mainDiagnosis = Coach's Read + Main Story of the Exchange: 2-5 sentences. First state directly what happened in the clip, then explain WHY the exchange went the way it did — cause-and-effect (this action created that opening, which led to that consequence), not generic commentary. End with a brief confidence/caution note ONLY when relevant (feet cut off, hands hidden, heavy grappling occlusion, unclear camera angle, fighter identity unclear, pose fallback used, low pose confidence, or a clip too short for context).
+- quickCues = 3-5 short corner commands when evidence allows (aim for exactly 3). Each cue must be direct, actor-specific, actionable, evidence-supported, and memorable mid-training.
 - suggestedCorrections = exactly 3 detailed adjustments when evidence allows:
   1. Adjustment 1 - Technical adjustment: the highest-leverage mechanics fix.
   2. Adjustment 2 - Tactical adjustment: the decision, timing, range, or matchup fix.
-  3. Adjustment 3 - Training/habit adjustment: a drill or repeatable assignment that builds the habit.
-- overlayAnnotations = replay labels. Keep them short enough for video and tied to real actorId/time/evidence.
+  3. Adjustment 3 - Training/habit adjustment: ONE practical, named drill connected directly to the main issue, with a rule and a success condition.
+  If the evidence only supports fewer, give fewer — never pad with generic filler.
+- overlayAnnotations = Replay Evidence: short labels tied to real actorId/time/evidence IDs from the ledger. Never invent timestamps.
 - styleNotes = broader tactical tendencies, not vague labels.
 - audioScript = coach voiceover: short, human, direct, names the main read, the 3 adjustments, and one drill cue.
 
@@ -465,7 +478,10 @@ export async function generateGroundedCoaching(args: {
     const proModel = args.config?.reasonModel || defaultReasonModel()
     const flashModel = resolvedModels.flash()
     const cascade = proModel === flashModel ? [proModel] : [proModel, flashModel]
-    const allowDemoFallback = process.env.GEMINI_DEMO_FALLBACK !== '0'
+    // Demo fallback is OPT-IN (GEMINI_DEMO_FALLBACK=1). By default a failed
+    // analysis surfaces as an error instead of fake coaching — users must
+    // never mistake a canned demo payload for a real read of their clip.
+    const allowDemoFallback = process.env.GEMINI_DEMO_FALLBACK === '1'
 
     let lastQuotaError: GeminiQuotaError | null = null
     for (const model of cascade) {

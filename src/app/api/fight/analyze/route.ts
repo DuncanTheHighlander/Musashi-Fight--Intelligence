@@ -37,7 +37,7 @@ type AnalyzeRequest = {
   poseTimeline?: Array<{ tMs: number; landmarks: number[][][] | number[][]; actorId?: 'A' | 'B' }>
   kinematics?: any
   userIntent?: string
-  focusTarget?: 'A' | 'B' | 'both'
+  focusTarget?: 'A' | 'B' | 'both' | 'unsure'
   actors?: Array<'A' | 'B'>
   clip?: { durationMs?: number; fps?: number; sourceId?: string; assetRef?: string }
   llm?: { enabled?: boolean }
@@ -171,27 +171,6 @@ export async function POST(request: Request) {
 
     const strategyAssessment = ledger.actors.map((actorId) => inferStyle(ledger, actorId))
 
-    // Learning loop: persist the symbolic ledger so its detections can be
-    // human-reviewed (confirm / reject / relabel) at /review. Non-fatal —
-    // analysis still succeeds when no DB is bound.
-    let savedLedgerId: string | null = null
-    {
-      const dbForLedger = getDbOrNull()
-      if (dbForLedger) {
-        try {
-          const user = await getCurrentUser(request).catch(() => null)
-          savedLedgerId = await saveAnalysisLedger({
-            db: dbForLedger,
-            ledger,
-            userId: user?.id ?? null,
-            sourceId: data.clip?.assetRef ?? data.clip?.sourceId ?? null,
-          })
-        } catch (e) {
-          console.warn('[FightLang] Ledger save failed (non-fatal):', e instanceof Error ? e.message : e)
-        }
-      }
-    }
-
     let coaching: CoachingPayload | null = null
     let retrieved: {
       queryText: string
@@ -271,25 +250,75 @@ export async function POST(request: Request) {
       }
       console.log(`[FightLang] Retrieval: ${retrieved.snippets.length} snippets matched (topScore=${retrieved.snippets[0]?.score?.toFixed(3) ?? 'none'})`)
 
-      const gen = await generateGroundedCoaching({
-        ledger,
-        retrievedSnippets: retrieved.snippets,
-        focusTarget: data.focusTarget,
-        videoFileUri: data.videoFileUri,
-        videoMimeType: data.videoMimeType,
-        coachBrain: {
-          selectedSport: data.sport,
-          clipType: data.clipType,
-          userQuestion: data.userIntent,
-          poseEngine: data.pose?.engine,
-          poseQuality: data.pose?.quality,
-        },
-      })
-      model = gen.model
+      // Coaching failure must never produce fake feedback: on error we keep
+      // the deterministic ledger/overlays, return coaching=null, and surface
+      // the failure explicitly so the UI can say "AI coaching unavailable"
+      // instead of showing a canned payload.
+      try {
+        const gen = await generateGroundedCoaching({
+          ledger,
+          retrievedSnippets: retrieved.snippets,
+          focusTarget: data.focusTarget,
+          videoFileUri: data.videoFileUri,
+          videoMimeType: data.videoMimeType,
+          coachBrain: {
+            selectedSport: data.sport,
+            clipType: data.clipType,
+            userQuestion: data.userIntent,
+            poseEngine: data.pose?.engine,
+            poseQuality: data.pose?.quality,
+          },
+        })
+        model = gen.model
 
-      const validated = validateCoachingPayloadAgainstLedger({ ledger, payload: gen.payload })
-      coaching = validated.sanitized ?? gen.payload
-      llmIssues = validated.issues
+        const validated = validateCoachingPayloadAgainstLedger({ ledger, payload: gen.payload })
+        coaching = validated.sanitized ?? gen.payload
+        llmIssues = validated.issues
+      } catch (llmErr) {
+        const message = llmErr instanceof Error ? llmErr.message : String(llmErr)
+        console.warn('[FightLang] Grounded coaching failed (returning ledger without coaching):', message)
+        coaching = null
+        model = null
+        llmIssues = [{ level: 'error', code: 'llm_unavailable', message: `AI coaching unavailable: ${message}` }]
+      }
+    }
+
+    // Learning loop: persist the symbolic ledger so its detections can be
+    // human-reviewed (confirm / reject / relabel) at /review. Saved AFTER the
+    // coaching pass so admins also see the sport/clipType/fighterFocus context
+    // and the final feedback the user received. Non-fatal — analysis still
+    // succeeds when no DB is bound.
+    let savedLedgerId: string | null = null
+    {
+      const dbForLedger = getDbOrNull()
+      if (dbForLedger) {
+        try {
+          const user = await getCurrentUser(request).catch(() => null)
+          savedLedgerId = await saveAnalysisLedger({
+            db: dbForLedger,
+            ledger,
+            userId: user?.id ?? null,
+            sourceId: data.clip?.assetRef ?? data.clip?.sourceId ?? null,
+            context: {
+              sport: data.sport ?? null,
+              clipType: data.clipType ?? null,
+              fighterFocus: data.focusTarget ?? null,
+              poseEngine: data.pose?.engine ?? null,
+              poseQuality: data.pose?.quality ?? null,
+            },
+            coaching: coaching
+              ? {
+                  model,
+                  mainDiagnosis: coaching.mainDiagnosis,
+                  quickCues: coaching.quickCues as unknown[],
+                  suggestedCorrections: coaching.suggestedCorrections as unknown[],
+                }
+              : null,
+          })
+        } catch (e) {
+          console.warn('[FightLang] Ledger save failed (non-fatal):', e instanceof Error ? e.message : e)
+        }
+      }
     }
 
     const allOverlays = [...compilerOverlays, ...(coaching?.overlayAnnotations ?? [])]

@@ -45,12 +45,36 @@ type LedgerDetail = {
     events: ReviewItem[]
     faults: ReviewItem[]
     patterns: ReviewItem[]
+    /** Sport / clipType / fighterFocus / pose metadata (analyses saved after the context update). */
+    context?: {
+      sport?: string | null
+      clipType?: string | null
+      fighterFocus?: string | null
+      poseEngine?: string | null
+      poseQuality?: number | string | null
+    }
+    /** Final coaching the user received (analyses saved after the context update). */
+    coaching?: {
+      model?: string | null
+      mainDiagnosis?: string
+      quickCues?: Array<{ actorId?: string; quickCue?: string; text?: string }>
+      suggestedCorrections?: Array<{ actorId?: string; title?: string; why?: string; doInstead?: string }>
+    } | null
   }
   corrections: Array<{
     itemId: string
     verdict: 'confirm' | 'reject' | 'relabel'
     correctedKind: string | null
     note?: string | null
+  }>
+  /** Thumbs up/down ratings users left on this analysis. */
+  userFeedback?: Array<{
+    id: string
+    userId: string | null
+    rating: -1 | 1
+    aiModel: string | null
+    discipline: string | null
+    createdAt: string
   }>
 }
 
@@ -522,6 +546,80 @@ export default function ReviewPage() {
                 <Card className="border-border/50 bg-card/60">
                   <CardContent className="py-3 px-4 text-xs text-muted-foreground">
                     No video saved for this analysis. New analyses run after this update will be saved here for playback.
+                  </CardContent>
+                </Card>
+              )}
+              {(detail.ledger.context || detail.ledger.coaching || (detail.userFeedback?.length ?? 0) > 0) && (
+                <Card className="border-border/50 bg-card/60">
+                  <CardContent className="space-y-3 py-4 px-4">
+                    {detail.ledger.context && (
+                      <div className="flex flex-wrap items-center gap-2 text-xs">
+                        <span className="font-semibold uppercase tracking-wide text-muted-foreground">Analysis context</span>
+                        {detail.ledger.context.sport && <Badge variant="outline">Sport: {detail.ledger.context.sport}</Badge>}
+                        {detail.ledger.context.clipType && <Badge variant="outline">Clip: {detail.ledger.context.clipType}</Badge>}
+                        {detail.ledger.context.fighterFocus && <Badge variant="outline">Focus: {detail.ledger.context.fighterFocus}</Badge>}
+                        {detail.ledger.context.poseEngine && <Badge variant="outline">Pose: {detail.ledger.context.poseEngine}</Badge>}
+                        {detail.ledger.context.poseQuality != null && (
+                          <Badge variant="outline">
+                            Pose quality: {typeof detail.ledger.context.poseQuality === 'number'
+                              ? detail.ledger.context.poseQuality.toFixed(2)
+                              : detail.ledger.context.poseQuality}
+                          </Badge>
+                        )}
+                      </div>
+                    )}
+                    {Array.isArray(detail.userFeedback) && detail.userFeedback.length > 0 && (
+                      <div className="flex flex-wrap items-center gap-2 text-xs">
+                        <span className="font-semibold uppercase tracking-wide text-muted-foreground">User feedback</span>
+                        {detail.userFeedback.map((f) => (
+                          <Badge
+                            key={f.id}
+                            className={
+                              f.rating === 1
+                                ? 'bg-emerald-600/20 text-emerald-400 border-emerald-600/40'
+                                : 'bg-red-600/20 text-red-400 border-red-600/40'
+                            }
+                          >
+                            {f.rating === 1 ? '👍' : '👎'} {new Date(f.createdAt).toLocaleDateString()}
+                          </Badge>
+                        ))}
+                      </div>
+                    )}
+                    {detail.ledger.coaching && (
+                      <div className="space-y-2 text-xs">
+                        <div className="flex items-center gap-2">
+                          <span className="font-semibold uppercase tracking-wide text-muted-foreground">Final feedback shown to user</span>
+                          {detail.ledger.coaching.model && (
+                            <Badge variant="secondary" className="font-mono">{detail.ledger.coaching.model}</Badge>
+                          )}
+                        </div>
+                        {detail.ledger.coaching.mainDiagnosis && (
+                          <p className="text-sm text-foreground/90">{detail.ledger.coaching.mainDiagnosis}</p>
+                        )}
+                        {Array.isArray(detail.ledger.coaching.quickCues) && detail.ledger.coaching.quickCues.length > 0 && (
+                          <ul className="list-disc space-y-0.5 pl-5 text-muted-foreground">
+                            {detail.ledger.coaching.quickCues.map((cue, i) => (
+                              <li key={i}>
+                                {cue.actorId ? `[${cue.actorId}] ` : ''}
+                                {cue.quickCue || cue.text || ''}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                        {Array.isArray(detail.ledger.coaching.suggestedCorrections) &&
+                          detail.ledger.coaching.suggestedCorrections.length > 0 && (
+                            <ul className="list-decimal space-y-0.5 pl-5 text-muted-foreground">
+                              {detail.ledger.coaching.suggestedCorrections.map((c, i) => (
+                                <li key={i}>
+                                  {c.actorId ? `[${c.actorId}] ` : ''}
+                                  <span className="font-medium text-foreground/80">{c.title || 'Adjustment'}</span>
+                                  {c.doInstead ? ` — ${c.doInstead}` : ''}
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+                      </div>
+                    )}
                   </CardContent>
                 </Card>
               )}

@@ -56,4 +56,48 @@ describe('validateEnv', () => {
     expect(result.valid).toBe(false)
     expect(result.errors).toContain('MUSASHI_SHOGUN_PASSWORD appears to use a weak/default value. Change it for production.')
   })
+
+  test('warns when payments/storage are mock in production', () => {
+    setProdEnv({
+      MUSASHI_MARKETPLACE_PAYMENTS: 'mock',
+      MUSASHI_STORAGE_MODE: 'mock',
+    })
+
+    const result = validateEnv()
+
+    expect(result.valid).toBe(true)
+    expect(result.warnings.some((w) => w.includes('MUSASHI_MARKETPLACE_PAYMENTS'))).toBe(true)
+    expect(result.warnings.some((w) => w.includes('MUSASHI_STORAGE_MODE'))).toBe(true)
+  })
+
+  test('warns on placeholder EMAIL_API_KEY and missing cron secret in production', () => {
+    setProdEnv({
+      EMAIL_API_KEY: 're_your_email_api_key',
+      MUSASHI_CRON_SECRET: undefined,
+    })
+
+    const result = validateEnv()
+
+    expect(result.warnings.some((w) => w.includes('EMAIL_API_KEY'))).toBe(true)
+    expect(result.warnings.some((w) => w.includes('MUSASHI_CRON_SECRET'))).toBe(true)
+  })
+
+  test('does not warn when production email, cron, and storage secrets are real', () => {
+    setProdEnv({
+      MUSASHI_MARKETPLACE_PAYMENTS: 'stripe',
+      MUSASHI_STORAGE_MODE: 'r2',
+      STORAGE_SERVICE_URL: 'https://acct.r2.cloudflarestorage.com',
+      STORAGE_ACCESS_KEY: 'a'.repeat(32),
+      STORAGE_SECRET_KEY: 'b'.repeat(64),
+      STORAGE_BUCKET_NAME: 'musashi-uploads',
+      EMAIL_API_KEY: 're_' + 'k'.repeat(24),
+      MUSASHI_CRON_SECRET: 'c'.repeat(64),
+      STRIPE_WEBHOOK_SECRET: 'whsec_' + 'd'.repeat(32),
+    })
+
+    const result = validateEnv()
+
+    expect(result.valid).toBe(true)
+    expect(result.warnings).toEqual([])
+  })
 })

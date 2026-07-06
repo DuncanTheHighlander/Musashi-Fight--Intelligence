@@ -145,6 +145,39 @@ describe('buildCoachBrainBlock', () => {
     expect(block).toContain('User question: Why do my shots keep failing?')
   })
 
+  it('shapes the analysis per clip type (guidance lines)', () => {
+    const sparring = buildCoachBrainBlock({ selectedSport: 'boxing', clipType: 'sparring' })
+    expect(sparring).toContain('CLIP TYPE GUIDANCE:')
+    expect(sparring).toContain('entries, exits, habits under resistance')
+
+    const drilling = buildCoachBrainBlock({ selectedSport: 'bjj', clipType: 'drilling' })
+    expect(drilling).toContain('repetition quality')
+    expect(drilling).toContain('Do not judge it as live decision-making')
+
+    const takedown = buildCoachBrainBlock({ selectedSport: 'wrestling', clipType: 'takedown' })
+    expect(takedown).toContain('setup, level change, penetration, finish')
+
+    const guardPassing = buildCoachBrainBlock({ selectedSport: 'bjj', clipType: 'guard_passing' })
+    expect(guardPassing).toContain('frames, the knee line, hip control')
+
+    const submission = buildCoachBrainBlock({ selectedSport: 'bjj', clipType: 'submission' })
+    expect(submission).toContain('control before the submission')
+
+    const striking = buildCoachBrainBlock({ selectedSport: 'mma', clipType: 'striking_exchange' })
+    expect(striking).toContain('entry, guard responsibility')
+
+    // Alias normalization: spaces/hyphens/slashes → underscores, 'match' → competition guidance.
+    const rolling = buildCoachBrainBlock({ selectedSport: 'bjj', clipType: 'rolling / grappling' })
+    expect(rolling).toContain('top/bottom context, frames, hip movement')
+    const match = buildCoachBrainBlock({ selectedSport: 'judo', clipType: 'match' })
+    expect(match).toContain('scoring and tactical consequences')
+
+    // Unknown clip types add no guidance line but keep the label.
+    const unknown = buildCoachBrainBlock({ selectedSport: 'boxing', clipType: 'mystery_footage' })
+    expect(unknown).toContain('Clip type: mystery_footage')
+    expect(unknown).not.toContain('CLIP TYPE GUIDANCE:')
+  })
+
   it('discourages generic feedback via the global style rules', () => {
     const block = buildCoachBrainBlock({ selectedSport: 'boxing' })
     expect(block).toContain('Do not give generic advice unless it is tied to evidence')

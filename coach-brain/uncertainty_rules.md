@@ -15,6 +15,12 @@ When NOT to overclaim. These rules override everything else: a wrong confident c
 - If only the **MediaPipe fallback** engine was used (not the primary cloud RTMPose pass), mention lower confidence where a claim depends on fine pose detail (joint angles, small guard shifts). Broad reads (who pressed, who retreated) don't need the disclaimer.
 - Rapid spinning techniques, motion blur, and low frame rates degrade keypoints — prefer macro-posture reads over micro-joint claims in those moments.
 
+## Thin Evidence Rule
+
+- If the **FightLang ledger is thin** (few or no events, faults, or patterns — common for heavy grappling, judo, or fencing clips where pose detectors capture less), give a **limited analysis** grounded only in what is actually visible in the video. Say plainly that the clip gave limited machine-readable data.
+- Do not pad a thin analysis to fill the full format: fewer honest observations beat invented detail. Shrink the adjustments and cues to what the evidence supports.
+- If the **clip is too short** to establish context (a single exchange, a partial rep), say so and coach only what the clip actually shows.
+
 ## Sport Mismatch Rule
 
 - If the **selected sport conflicts with what the video clearly shows** (user selected boxing, clip shows takedowns), warn briefly and coach the most likely sport cautiously. Do not silently apply the wrong sport's rules.

@@ -42,11 +42,33 @@ export type LedgerCorrection = {
   createdAt: string
 }
 
+/** Analysis request context persisted alongside the ledger for admin review. */
+export type StoredAnalysisContext = {
+  sport?: string | null
+  clipType?: string | null
+  fighterFocus?: string | null
+  poseEngine?: string | null
+  poseQuality?: number | string | null
+}
+
+/** Trimmed final coaching payload persisted for admin review (not the raw LLM text). */
+export type StoredCoachingSummary = {
+  model?: string | null
+  mainDiagnosis?: string
+  quickCues?: unknown[]
+  suggestedCorrections?: unknown[]
+} | null
+
 /** The slice of the ledger that gets persisted for review. */
 export type StoredLedgerJson = Pick<
   FightEvidenceLedger,
   'actors' | 'clip' | 'events' | 'faults' | 'patterns'
->
+> & {
+  /** Sport / clipType / fighterFocus / pose metadata for this analysis (admin review). */
+  context?: StoredAnalysisContext
+  /** Final coaching shown to the user, when the LLM pass ran (admin review). */
+  coaching?: StoredCoachingSummary
+}
 
 export async function saveAnalysisLedger(args: {
   db: D1Database
@@ -54,6 +76,8 @@ export async function saveAnalysisLedger(args: {
   userId?: string | null
   sourceId?: string | null
   videoFileName?: string | null
+  context?: StoredAnalysisContext
+  coaching?: StoredCoachingSummary
 }): Promise<string> {
   const { db, ledger } = args
   const id = `ledg_${crypto.randomUUID()}`
@@ -63,6 +87,8 @@ export async function saveAnalysisLedger(args: {
     events: ledger.events,
     faults: ledger.faults,
     patterns: ledger.patterns,
+    ...(args.context ? { context: args.context } : {}),
+    ...(args.coaching ? { coaching: args.coaching } : {}),
   }
   await db
     .prepare(

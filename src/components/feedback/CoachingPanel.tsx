@@ -20,6 +20,12 @@ export type CoachingPanelProps = Readonly<{
   overlayCount?: number
   /** When present, replaces the coaching display with a polished status card. */
   quotaState?: CoachingQuotaState | null
+  /** Enables the thumbs up/down rating row. Requires a saved analysis id. */
+  ratingContext?: {
+    ledgerId: string
+    aiModel?: string | null
+    discipline?: string | null
+  } | null
 }>
 
 const ACTOR_COLORS: Record<string, { bg: string; border: string; text: string; icon: string }> = {
@@ -119,7 +125,76 @@ function SeverityDot({ score }: { score: number }) {
   return <span className={`inline-block h-2 w-2 rounded-full ${color} shadow-[0_0_6px_rgba(255,255,255,0.2)]`} />
 }
 
-export function CoachingPanel({ payload, llmIssues, overlayCount, quotaState }: CoachingPanelProps) {
+/** Thumbs up/down on the whole analysis. Ratings land in coaching_feedback for admin review. */
+function RatingRow({ context }: { context: NonNullable<CoachingPanelProps['ratingContext']> }) {
+  const [rated, setRated] = useState<1 | -1 | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [failed, setFailed] = useState(false)
+
+  const submit = async (rating: 1 | -1) => {
+    if (busy) return
+    setBusy(true)
+    setFailed(false)
+    try {
+      const res = await fetch('/api/fight/coaching-feedback', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ledgerId: context.ledgerId,
+          rating,
+          aiModel: context.aiModel ?? null,
+          discipline: context.discipline ?? null,
+        }),
+      })
+      const data = (await res.json().catch(() => null)) as { success?: boolean } | null
+      if (!res.ok || !data?.success) throw new Error('rating failed')
+      setRated(rating)
+    } catch {
+      setFailed(true)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="flex items-center gap-2 rounded-2xl border border-zinc-700/40 bg-zinc-900/50 px-4 py-2.5">
+      <span className="text-xs font-medium text-zinc-400">
+        {rated ? 'Thanks — your rating helps the coach improve.' : 'Was this coaching useful?'}
+      </span>
+      <div className="ml-auto flex items-center gap-1.5">
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => void submit(1)}
+          aria-label="Coaching was useful"
+          className={`rounded-lg border px-2.5 py-1 text-sm transition ${
+            rated === 1
+              ? 'border-emerald-400/60 bg-emerald-500/20 text-emerald-200'
+              : 'border-zinc-600/50 text-zinc-300 hover:border-emerald-400/40 hover:text-emerald-200'
+          } ${busy ? 'opacity-50' : ''}`}
+        >
+          &#128077;
+        </button>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => void submit(-1)}
+          aria-label="Coaching was not useful"
+          className={`rounded-lg border px-2.5 py-1 text-sm transition ${
+            rated === -1
+              ? 'border-red-400/60 bg-red-500/20 text-red-200'
+              : 'border-zinc-600/50 text-zinc-300 hover:border-red-400/40 hover:text-red-200'
+          } ${busy ? 'opacity-50' : ''}`}
+        >
+          &#128078;
+        </button>
+      </div>
+      {failed && <span className="text-[11px] text-amber-400">Couldn&apos;t save — try again</span>}
+    </div>
+  )
+}
+
+export function CoachingPanel({ payload, llmIssues, overlayCount, quotaState, ratingContext }: CoachingPanelProps) {
   const [expandedCue, setExpandedCue] = useState<string | null>(null)
 
   if (quotaState) {
@@ -286,6 +361,12 @@ export function CoachingPanel({ payload, llmIssues, overlayCount, quotaState }: 
             ))}
           </div>
         </div>
+      )}
+
+      {/* Rate this coaching — feeds the coaching_feedback learning loop */}
+      {ratingContext?.ledgerId && (
+        // Re-mount (and reset the rating state) when a new analysis arrives.
+        <RatingRow key={ratingContext.ledgerId} context={ratingContext} />
       )}
 
       {/* Validator Warnings (collapsed by default) */}

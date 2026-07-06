@@ -1184,6 +1184,12 @@ const handleChat = async (body: any, user: any) => {
   } else if (context?.focusTarget === 'both') {
     coachingMode = 'strategist'
     focusDescription = 'both fighters - focus on interplay, range management, and strategic positioning'
+  } else if (context?.focusTarget === 'unsure') {
+    coachingMode = 'strategist'
+    focusDescription =
+      'fighter identity UNCERTAIN - the user could not identify which fighter is theirs. ' +
+      'Cautiously coach the most visible/coachable athlete (name them by visible traits, e.g. "the fighter in dark shorts"), ' +
+      'or coach the exchange as a whole if identity stays unclear. Avoid strong identity-based claims'
   }
 
   // Extract fighter information for consistent referencing
@@ -2246,6 +2252,9 @@ const handleStrategy = async (body: any, user: any) => {
     let focusDescription = 'both fighters'
     if (context?.focusTarget === 'A') focusDescription = 'Fighter A (your corner)'
     else if (context?.focusTarget === 'B') focusDescription = 'Fighter B (opponent)'
+    else if (context?.focusTarget === 'unsure')
+      focusDescription =
+        'fighter identity uncertain — cautiously pick the most visible athlete or strategize for the exchange as a whole; avoid strong identity-based claims'
 
     // Build strategy system prompt with grounding
     const strategySystem =
@@ -3165,7 +3174,7 @@ export async function POST(req: Request) {
     if (!guard.ok) return guard.response
 
     let user: MusashiUser | null = guard.user
-    if (!user && process.env.MUSASHI_DISABLE_AUTH === '1') {
+    if (!user && process.env.MUSASHI_DISABLE_AUTH === '1' && process.env.NODE_ENV !== 'production') {
       user = {
         id: 'dev',
         email: 'dev@local',
@@ -3343,7 +3352,7 @@ export async function POST(req: Request) {
 export async function GET(req: Request) {
   try {
     let user: MusashiUser
-    if (process.env.MUSASHI_DISABLE_AUTH === '1') {
+    if (process.env.MUSASHI_DISABLE_AUTH === '1' && process.env.NODE_ENV !== 'production') {
       user = {
         id: 'dev',
         email: 'dev@local',

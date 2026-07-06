@@ -6,7 +6,7 @@ import { getCurrentUser } from '@/lib/musashiAuth'
 import { getDb } from '@/lib/db'
 
 export async function GET(req: Request) {
-  if (process.env.MUSASHI_DISABLE_AUTH === '1') {
+  if (process.env.MUSASHI_DISABLE_AUTH === '1' && process.env.NODE_ENV !== 'production') {
     return NextResponse.json({ complete: true, reason: 'dev_bypass' })
   }
 

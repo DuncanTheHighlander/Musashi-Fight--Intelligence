@@ -201,8 +201,9 @@ const DEV_BYPASS_USER: MusashiUser = {
 
 export const getCurrentUser = async (req: Request): Promise<MusashiUser | null> => {
   // Dev/demo bypass — every auth-gated route inherits this without a per-route
-  // change. Production deploys must NOT set this flag.
-  if (process.env.MUSASHI_DISABLE_AUTH === '1') return DEV_BYPASS_USER
+  // change. The NODE_ENV guard is a safety net; production deploys must NOT set
+  // this flag, and it is explicitly rejected at the API level if they do.
+  if (process.env.MUSASHI_DISABLE_AUTH === '1' && process.env.NODE_ENV !== 'production') return DEV_BYPASS_USER
 
   const cookieValue = getSessionCookieFromRequest(req)
   if (!cookieValue) return null
