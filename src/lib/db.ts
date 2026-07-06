@@ -5,6 +5,7 @@
  * 1. Real D1 binding on process.env.DB (production, wrangler dev, or MUSASHI_D1_LOCAL init)
  * 2. In-memory mock when MUSASHI_USE_MOCK_DB=1
  * 3. In-memory mock when MUSASHI_DISABLE_AUTH=1 and MUSASHI_USE_MOCK_DB is not "0"
+ *    (non-production only — production never silently serves the seeded mock)
  * 4. null / throw
  */
 import { getMockD1 } from '@/lib/marketplace/mockD1'
@@ -41,7 +42,11 @@ const resolveDb = (): D1Database | null => {
 
   if (env.MUSASHI_USE_MOCK_DB === '1') return attachMock()
 
-  if (env.MUSASHI_DISABLE_AUTH === '1' && env.MUSASHI_USE_MOCK_DB !== '0') {
+  if (
+    env.MUSASHI_DISABLE_AUTH === '1' &&
+    env.MUSASHI_USE_MOCK_DB !== '0' &&
+    process.env.NODE_ENV !== 'production'
+  ) {
     return attachMock()
   }
 

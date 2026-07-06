@@ -280,7 +280,7 @@ export const enforceVideoAnalysis = async (
   role: MusashiRole,
   opts: VideoAnalysisOpts
 ): Promise<void> => {
-  if (process.env.MUSASHI_DISABLE_AUTH === '1') return
+  if (process.env.MUSASHI_DISABLE_AUTH === '1' && process.env.NODE_ENV !== 'production') return
 
   const clipDurationSec = Number(opts.clipDurationSec)
   const clipKey = String(opts.clipKey || '').trim().slice(0, 256)
@@ -380,7 +380,7 @@ export const enforceClipQuestionLimit = async (
   role: MusashiRole,
   clipKey: string
 ): Promise<void> => {
-  if (process.env.MUSASHI_DISABLE_AUTH === '1') return
+  if (process.env.MUSASHI_DISABLE_AUTH === '1' && process.env.NODE_ENV !== 'production') return
   if (role === 'shogun') return
 
   const key = String(clipKey || '').trim().slice(0, 256)
@@ -499,7 +499,7 @@ export const maybeEnforceVideoFromAnalyzeRequest = async (
 }
 
 export const enforceUsage = async (req: Request, action: MusashiAction) => {
-  if (process.env.MUSASHI_DISABLE_AUTH === '1') {
+  if (process.env.MUSASHI_DISABLE_AUTH === '1' && process.env.NODE_ENV !== 'production') {
     return {
       id: 'dev',
       email: 'dev@local',

@@ -35,7 +35,8 @@ const hasDbBinding = (): boolean => {
   return typeof db?.prepare === 'function'
 }
 
-const isAuthDisabled = (): boolean => process.env.MUSASHI_DISABLE_AUTH === '1'
+const isAuthDisabled = (): boolean =>
+  process.env.MUSASHI_DISABLE_AUTH === '1' && process.env.NODE_ENV !== 'production'
 
 // In-memory burst limiter — only used when D1 is unavailable. Per-IP,
 // per-action, 60-second rolling window. Intentionally tiny: this is a
