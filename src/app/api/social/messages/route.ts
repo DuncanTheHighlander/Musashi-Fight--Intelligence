@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { enforceUsage } from '@/lib/musashiUsage'
 import { getDb } from '@/lib/db'
+import { hasActiveJobBetween } from '@/lib/marketplace/messagingGate'
 
 const parseJsonArray = (value: any): string[] => {
   if (typeof value !== 'string') return []
@@ -148,6 +149,25 @@ export async function POST(req: Request) {
 
     if (receiverId === user.id) {
       return NextResponse.json({ error: 'Cannot message yourself' }, { status: 400 })
+    }
+
+    // Anti-disintermediation gate: regular users may only message each other
+    // while they share a live, funded job. Closes again once the job completes
+    // so nobody keeps chatting for free after a transaction. Shogun (support)
+    // is exempt.
+    if (user.role !== 'shogun') {
+      const gateDb = getDb()
+      const conversationOpen = await hasActiveJobBetween(gateDb, user.id, receiverId)
+      if (!conversationOpen) {
+        return NextResponse.json(
+          {
+            error:
+              'Messaging opens when you share an active, funded job. Fund a bounty (or wait for a coach to claim your job) to start the conversation.',
+            code: 'NO_ACTIVE_JOB',
+          },
+          { status: 403 },
+        )
+      }
     }
 
     const attachments = Array.isArray(body?.attachments) ? body.attachments.map((a: any) => String(a)) : []
