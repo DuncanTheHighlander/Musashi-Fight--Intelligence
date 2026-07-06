@@ -54,6 +54,8 @@ export type LibraryDocument = {
   author: string | null
   tags: string[]
   status: 'pending' | 'processing' | 'ready' | 'error'
+  /** Moderation state — only 'approved' documents feed AI coaching retrieval. */
+  reviewState: 'pending' | 'approved' | 'rejected'
   content: string
   chunkCount: number
   vectorCount: number
@@ -128,11 +130,14 @@ export const createDocument = async (params: {
   author?: string
   tags?: string[]
   metadata?: Record<string, any>
+  /** Moderation state. Defaults to 'pending' — callers pass 'approved' only for
+   *  trusted authors (e.g. admin-created docs). */
+  reviewState?: 'pending' | 'approved' | 'rejected'
 }): Promise<LibraryDocument> => {
   const db = getDb()
   const id = crypto.randomUUID()
   const now = new Date().toISOString()
-  
+
   const doc: LibraryDocument = {
     id,
     title: params.title,
@@ -140,6 +145,7 @@ export const createDocument = async (params: {
     author: params.author || null,
     tags: params.tags || [],
     status: 'pending',
+    reviewState: params.reviewState || 'pending',
     content: params.content,
     chunkCount: 0,
     vectorCount: 0,
@@ -147,12 +153,12 @@ export const createDocument = async (params: {
     createdAt: now,
     updatedAt: now,
   }
-  
+
   await db
     .prepare(
-      `INSERT INTO musashi_library_documents 
-       (id, title, source_type, author, tags, status, content, chunk_count, vector_count, metadata, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO musashi_library_documents
+       (id, title, source_type, author, tags, status, review_state, content, chunk_count, vector_count, metadata, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .bind(
       doc.id,
@@ -161,6 +167,7 @@ export const createDocument = async (params: {
       doc.author,
       JSON.stringify(doc.tags),
       doc.status,
+      doc.reviewState,
       doc.content,
       doc.chunkCount,
       doc.vectorCount,
@@ -235,6 +242,45 @@ export const listDocuments = async (params?: {
   const total = Number(countRow?.count || 0)
   
   return { documents, total }
+}
+
+/** Documents awaiting admin moderation (review_state = 'pending'), newest first. */
+export const listPendingReviewDocuments = async (
+  limit = 50,
+): Promise<LibraryDocument[]> => {
+  const db = getDb()
+  const rows = await db
+    .prepare(
+      `SELECT * FROM musashi_library_documents
+       WHERE review_state = 'pending'
+       ORDER BY created_at DESC
+       LIMIT ?`,
+    )
+    .bind(limit)
+    .all()
+  return (rows?.results || []).map(rowToDocument)
+}
+
+/** Approve or reject a submitted document. Only 'approved' docs feed the AI. */
+export const setDocumentReviewState = async (
+  id: string,
+  reviewState: 'approved' | 'rejected',
+): Promise<boolean> => {
+  const db = getDb()
+  const existing = await db
+    .prepare('SELECT id FROM musashi_library_documents WHERE id = ?')
+    .bind(id)
+    .first()
+  if (!existing) return false
+  const now = new Date().toISOString()
+  await db
+    .prepare(
+      'UPDATE musashi_library_documents SET review_state = ?, updated_at = ? WHERE id = ?',
+    )
+    .bind(reviewState, now, id)
+    .run()
+  await logActivity('library', `document_${reviewState}`, id, {})
+  return true
 }
 
 export const deleteDocument = async (id: string): Promise<void> => {
@@ -411,10 +457,11 @@ export const searchKnowledge = async (
   if (!vectorize) {
     const rows = await db
       .prepare(
-        `SELECT c.*, d.title as doc_title 
+        `SELECT c.*, d.title as doc_title
          FROM musashi_library_chunks c
          JOIN musashi_library_documents d ON c.document_id = d.id
          WHERE c.content LIKE ?
+           AND d.review_state = 'approved'
          LIMIT ?`
       )
       .bind(`%${query}%`, options?.topK || 5)
@@ -442,11 +489,20 @@ export const searchKnowledge = async (
   const vectorIds = matches.matches.map((m) => m.id)
   const placeholders = vectorIds.map(() => '?').join(',')
   
+  // Filter to APPROVED documents only — a pending/rejected submission may have
+  // been embedded into Vectorize, so the moderation gate is enforced here at
+  // retrieval, not just at ingestion. Without this join, unvetted user content
+  // would leak into AI coaching.
   const rows = await db
-    .prepare(`SELECT * FROM musashi_library_chunks WHERE vector_id IN (${placeholders})`)
+    .prepare(
+      `SELECT c.* FROM musashi_library_chunks c
+       JOIN musashi_library_documents d ON c.document_id = d.id
+       WHERE c.vector_id IN (${placeholders})
+         AND d.review_state = 'approved'`
+    )
     .bind(...vectorIds)
     .all()
-  
+
   const chunkMap = new Map((rows?.results || []).map((r: any) => [r.vector_id, rowToChunk(r)]))
   
   const chunks: LibraryChunk[] = []
@@ -563,6 +619,7 @@ const rowToDocument = (row: any): LibraryDocument => ({
   author: row.author ? String(row.author) : null,
   tags: JSON.parse(row.tags || '[]'),
   status: row.status as LibraryDocument['status'],
+  reviewState: (row.review_state || 'pending') as LibraryDocument['reviewState'],
   content: String(row.content || ''),
   chunkCount: Number(row.chunk_count || 0),
   vectorCount: Number(row.vector_count || 0),
