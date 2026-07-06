@@ -12,6 +12,7 @@ import { requireUser, type MusashiUser } from '@/lib/musashiAuth'
 import { composeSystemPrompt, DEFAULT_PROMPTS } from '@/lib/aiClient'
 import { getDisciplinePrompt } from '@/lib/disciplinePrompts'
 import { buildCoachBrainBlock } from '@/lib/coachBrain/coachBrain'
+import { sanitizeCoachText } from '@/lib/feedback/coachFeedback'
 import {
   MUSASHI_DEEP_ANALYSIS_SYSTEM,
   COMET_STYLE_ANALYSIS_SYSTEM,
@@ -1598,6 +1599,9 @@ const handleChat = async (body: any, user: any) => {
         let finalMessage =
           data?.candidates?.[0]?.content?.parts?.map((p: any) => p.text).filter(Boolean).join('\n') || 'No response.'
         finalMessage = await rewriteCoachingToMatchLedger(finalMessage, factualLedgerChat, geminiKey, initialModel)
+        // Chat replies are user-facing prose. If the model leaked the internal
+        // coaching-JSON contract, convert it to clean coaching text server-side.
+        finalMessage = sanitizeCoachText(finalMessage)
         return { message: finalMessage }
       }
 
@@ -1783,7 +1787,8 @@ const handleChat = async (body: any, user: any) => {
       }
 
       const text = data?.candidates?.[0]?.content?.parts?.map((p: any) => p.text).filter(Boolean).join('\n') || 'No response.'
-      return { message: text }
+      // Never return the internal coaching-JSON contract as a chat message.
+      return { message: sanitizeCoachText(text) }
     }
 
     if (!openaiKey) {
@@ -3046,6 +3051,9 @@ Rules for retrieved VIDEO SEGMENTS:
           fullText = buildLedgerFallbackReport(factualLedger)
         }
         fullText = await rewriteCoachingToMatchLedger(fullText, factualLedger, geminiKey, usedModel)
+        // The streamed report is user-facing prose — scrub any leaked
+        // coaching-JSON contract before it reaches the client.
+        fullText = sanitizeCoachText(fullText)
 
         const dbUpsert = getDbOrNull()
         if (dbUpsert && fullText.trim() && factualLedger) {

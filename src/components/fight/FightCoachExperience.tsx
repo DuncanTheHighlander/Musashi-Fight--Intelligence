@@ -69,6 +69,7 @@ import type { FightEvidenceLedger } from '@/lib/fightlang/ledger'
 import { createEmptyLedger, ingestFrameEvidence } from '@/lib/compiler/evidenceCompiler'
 import { FightOverlay } from '@/components/overlay/FightOverlay'
 import { CoachingPanel } from '@/components/feedback/CoachingPanel'
+import { sanitizeCoachText, looksLikeCoachingJson } from '@/lib/feedback/coachFeedback'
 import type {
   PoseFrame as FightLangPoseFrame,
   PoseLandmark as FightLangPoseLandmark,
@@ -1690,8 +1691,9 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
       })
       
       const result = await parseApiResponse(response) as { message: string }
-      setMessages((prev) => [...prev, { role: 'assistant', content: result.message }])
-      speakText(result.message)
+      const coachingText = sanitizeCoachText(result.message)
+      setMessages((prev) => [...prev, { role: 'assistant', content: coachingText }])
+      speakText(coachingText)
     } catch (error) {
       toast({
         title: 'Coaching generation failed',
@@ -1772,8 +1774,10 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
         }])
       } else {
         const chat = parsed as { message: string }
-        setMessages((prev) => [...prev, { role: 'assistant', content: chat.message }])
-        speakText(chat.message)
+        // Guard: a leaked internal coaching-JSON payload becomes clean prose.
+        const chatText = sanitizeCoachText(chat.message)
+        setMessages((prev) => [...prev, { role: 'assistant', content: chatText }])
+        speakText(chatText)
       }
     } catch (error) {
       console.error('Chat failed:', error)
@@ -2172,7 +2176,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
       const result = await parseApiResponse(response) as { message?: string; error?: string }
       if (!response.ok) throw new Error(result.error || 'Full clip analysis failed')
 
-      const message = result.message || 'No response'
+      const message = sanitizeCoachText(result.message || 'No response')
       setMessages([{ role: 'assistant', content: message }])
       setInitialAnalysisReady(true)
       setInitialAnalysisStatus(null)
@@ -2482,7 +2486,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
               }
               break
             case 'complete':
-              fullText = data.full_text || fullText
+              fullText = sanitizeCoachText(data.full_text || fullText)
               setStreamAnalysisText(fullText)
               setStreamAnalysisPhase('complete')
               // Feed the streaming result into the chat as the first assistant message
@@ -2502,6 +2506,8 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
       }
 
       if (fullText && streamAnalysisPhase !== 'complete') {
+        fullText = sanitizeCoachText(fullText)
+        setStreamAnalysisText(fullText)
         setStreamAnalysisPhase('complete')
         setMessages(prev => {
           if (prev.some(m => m.role === 'assistant')) return prev
@@ -4085,6 +4091,8 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                   overlayCount={fightLangOverlayAnnotations?.length ?? 0}
                   quotaState={aiQuotaState}
                   ratingContext={fightLangRatingContext}
+                  clipDurationMs={clipDurationSec > 0 ? Math.round(clipDurationSec * 1000) : null}
+                  isAdmin={isShogun}
                 />
               </div>
 
@@ -4320,10 +4328,14 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                           <span className="animate-bounce" style={{ animationDelay: '300ms' }}>●</span>
                           {uploadingVideo ? 'Uploading video…' : 'Analyzing clip…'}
                         </div>
-                        {/* Show streaming text live as it arrives */}
+                        {/* Show streaming text live as it arrives. If the model is
+                            emitting the internal JSON contract, hide the partial
+                            payload — users never see braces or field names. */}
                         {streamAnalysisText && (
                           <div className="text-foreground/90 whitespace-pre-wrap text-xs leading-relaxed max-h-[280px] overflow-y-auto">
-                            {streamAnalysisText}
+                            {looksLikeCoachingJson(streamAnalysisText) && streamAnalysisPhase === 'analyzing'
+                              ? 'Writing your coaching feedback…'
+                              : streamAnalysisText}
                             {streamAnalysisPhase === 'analyzing' && <span className="inline-block w-1.5 h-3.5 bg-primary/60 animate-pulse ml-0.5 align-middle" />}
                           </div>
                         )}

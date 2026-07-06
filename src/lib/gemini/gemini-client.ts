@@ -75,6 +75,7 @@ function buildCoachingFocusBlock(focus?: CoachingFocusTarget): string {
   return [
     'FOCUS TARGET: both fighters',
     '- Explain the exchange, then give concise, useful feedback for EACH fighter.',
+    '- Structure the 3 suggestedCorrections as: (1) Fighter A — their main fix, (2) Fighter B — their main fix, (3) the shared lesson both fighters should take from the exchange.',
     '- Keep it tight: do not double the response length — pick the highest-value read per fighter.',
     '- Use actorId "A" or "B" on every cue, correction, and overlay annotation.',
   ].join('\n')
@@ -185,9 +186,16 @@ UNIVERSAL FEEDBACK FORMAT — every sport uses this same structure inside the ex
   2. Adjustment 2 - Tactical adjustment: the decision, timing, range, or matchup fix.
   3. Adjustment 3 - Training/habit adjustment: ONE practical, named drill connected directly to the main issue, with a rule and a success condition.
   If the evidence only supports fewer, give fewer — never pad with generic filler.
-- overlayAnnotations = Replay Evidence: short labels tied to real actorId/time/evidence IDs from the ledger. Never invent timestamps.
+- overlayAnnotations = Replay Evidence: short labels tied to real actorId/time/evidence IDs from the ledger. Never invent timestamps — never emit 0ms times for events that did not happen at the very start of the clip.
 - styleNotes = broader tactical tendencies, not vague labels.
 - audioScript = coach voiceover: short, human, direct, names the main read, the 3 adjustments, and one drill cue.
+- Correction titles must be short, human coaching titles ("Recover your hand before exiting"), NOT machine labels like "Adjustment 1 - Technical".
+
+DO NOT OVERCLAIM:
+- Banned unless measured kinematics back it: "massive power advantage", "explosive advantage", "raw power", "power output is exponentially higher", exact speed/force/angle/velocity numbers.
+- Banned from one short clip: "late-round fade", round-by-round strategy, a full-fight win condition.
+- Never describe hidden grips, hidden limbs, or hidden foot positions.
+- Prefer cautious wording: "In this clip…", "The visible pattern suggests…", "If this pattern repeats…", "Based on the ledger…", "The clip does not show enough to say…".
 
 SPORT-SPECIFIC LENS:
 - If striking evidence dominates, prioritize stance, guard, hand return, head position, centerline, distance, timing, rhythm, feints, foot position, jab quality, entries, exits, counter windows, and defensive responsibility after offense.
