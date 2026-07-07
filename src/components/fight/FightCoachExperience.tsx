@@ -20,6 +20,7 @@ import {
 import { useToast } from '@/hooks/use-toast'
 import { CompactFocusToggle } from '@/components/fight/FocusToggle'
 import RotatingWisdom from '@/components/fight/RotatingWisdom'
+import ChatMarkdown from '@/components/fight/ChatMarkdown'
 import {
   deleteSession,
   exportAll,
@@ -440,6 +441,11 @@ export type FightCoachExperienceProps = {
   /** Increment to load the built-in demo clip (used by the home hero's
    *  "try the demo" link when the idle Fight Lab surface is collapsed). */
   demoRequestToken?: number
+  /** A question typed elsewhere (e.g. the home hero's "Ask anything" box) to
+   *  carry into this chat instead of discarding it. Paired with a token so
+   *  the same text can be forwarded twice in a row. */
+  pendingChatDraft?: string
+  pendingChatDraftToken?: number
   /** Dev fixture helper: auto-unlock/play once the boot pre-scan is ready. */
   autoPlayOnReady?: boolean
   onBootstrapConsumed?: () => void
@@ -454,6 +460,10 @@ const CLIP_PROCESSING_MIN_MS = 400
 const BOOT_PIPELINE_PASSES = 1
 /** Built-in demo clip — the bundled fight clip at `public/test-videos/`. */
 const DEMO_CLIP_URL = '/test-videos/test-video-for-app.mp4'
+/** Free general-Q&A messages allowed with no clip loaded, before an
+ *  upload is required. Shogun/admin accounts are exempt. Client-side only —
+ *  a matching server-side cap would be needed to make this hard to bypass. */
+const NO_CLIP_CHAT_LIMIT = 3
 
 type ClipLoadSource = 'none' | 'upload' | 'restored' | 'demo'
 
@@ -468,6 +478,8 @@ export default function FightCoachExperience({
   bootstrapVideoFile = null,
   collapseWhenIdle = false,
   demoRequestToken = 0,
+  pendingChatDraft = '',
+  pendingChatDraftToken = 0,
   autoPlayOnReady = false,
   onBootstrapConsumed,
 }: FightCoachExperienceProps = {}) {
@@ -679,6 +691,17 @@ export default function FightCoachExperience({
   const [chatLoading, setChatLoading] = useState(false)
   const [coachingLoading, setCoachingLoading] = useState(false)
   const [chatInput, setChatInput] = useState('')
+  const [noClipMessagesSent, setNoClipMessagesSent] = useState(0)
+  // Carry a question typed in the home hero's "Ask anything" box into this
+  // chat instead of discarding it — keyed on a token so a repeat of the same
+  // text still lands (a plain string dependency would no-op on a resubmit).
+  const lastAppliedDraftTokenRef = useRef(0)
+  useEffect(() => {
+    if (!pendingChatDraft.trim()) return
+    if (pendingChatDraftToken === lastAppliedDraftTokenRef.current) return
+    lastAppliedDraftTokenRef.current = pendingChatDraftToken
+    setChatInput(pendingChatDraft)
+  }, [pendingChatDraft, pendingChatDraftToken])
   const [initialAnalysisLoading, setInitialAnalysisLoading] = useState(false)
   const [initialAnalysisReady, setInitialAnalysisReady] = useState(false)
   const [initialAnalysisStatus, setInitialAnalysisStatus] = useState<string | null>(null)
@@ -957,10 +980,15 @@ export default function FightCoachExperience({
       if (info.passIndex !== info.passCount - 1) return
       // The dense tracking pass reports a larger totalSteps than the sparse
       // pass — track the largest so progress reads N/dense-total, not N/24.
+      // A larger total means a NEW pass just started: use this frame's own
+      // stepIndex as the completed count (not an accumulator carried over
+      // from the previous pass), or the sparse pass's tail frames inflate
+      // the dense-pass percentage and the overlay reads "100%" while the
+      // dense loop still has frames left to process.
       if (info.totalSteps > bootLastPassTotalStepsRef.current) {
         bootLastPassTotalStepsRef.current = info.totalSteps
       }
-      bootLastPassFramesCompletedRef.current += 1
+      bootLastPassFramesCompletedRef.current = info.stepIndex + 1
       setPreScanProgress({
         passIndex: info.passIndex,
         passCount: info.passCount,
@@ -1708,9 +1736,19 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
   const sendChat = async () => {
     if (!chatInput.trim()) return
     // Allow chat as soon as video is uploaded — don't gate behind initialAnalysisReady
-    
+
+    if (!videoUrl && !isShogun && noClipMessagesSent >= NO_CLIP_CHAT_LIMIT) {
+      toast({
+        title: 'Free question limit reached',
+        description: 'Upload a clip for unlimited coaching, or sign in as an admin account.',
+        variant: 'destructive',
+      })
+      return
+    }
+
     const userMessage = chatInput.trim()
     setChatInput('')
+    if (!videoUrl) setNoClipMessagesSent((n) => n + 1)
     setMessages((prev: any[]) => [...prev, { role: 'user', content: userMessage }])
     
     try {
@@ -3302,6 +3340,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
   // hero) is the single upload terminal until a clip loads. min-h-screen would
   // otherwise leave a giant empty block under the hero.
   const idleCollapsed = collapseWhenIdle && !videoUrl
+  const noClipLimitReached = !videoUrl && !isShogun && noClipMessagesSent >= NO_CLIP_CHAT_LIMIT
 
   return (
     <div className={idleCollapsed ? 'w-full' : 'min-h-screen w-full bg-background'}>
@@ -3431,7 +3470,78 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
         </div>
       )}
 
-      {idleCollapsed ? null : (
+      {idleCollapsed ? (
+        // No clip loaded: the full video/pose UI stays hidden (the page's own
+        // uploader is the single upload terminal), but general Q&A chat still
+        // works — "Ask anything, no clip needed" only means something if the
+        // chat panel actually exists before a clip is uploaded.
+        <div className="mx-auto max-w-7xl px-4 pb-6">
+          <div className="rounded-2xl border border-border/50 bg-card/30 backdrop-blur-xl">
+            <div className="border-b border-border/40 px-4 py-3">
+              <div className="text-sm font-semibold">Ask Musashi</div>
+              <div className="text-xs text-muted-foreground">
+                {noClipLimitReached
+                  ? 'Free question limit reached — upload a clip for unlimited coaching.'
+                  : 'General fight questions — no clip needed.'}
+              </div>
+            </div>
+            {messages.length > 0 && (
+              <div className="max-h-[320px] space-y-2 overflow-y-auto p-3">
+                {messages.map((m, idx) => (
+                  <div key={idx} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                    <div
+                      className={cn(
+                        'max-w-[90%] rounded-xl px-3 py-2 text-sm',
+                        m.role === 'user'
+                          ? 'whitespace-pre-wrap bg-primary text-primary-foreground'
+                          : 'bg-muted/60 border border-border/50 text-foreground',
+                      )}
+                    >
+                      {m.role === 'assistant' ? <ChatMarkdown text={m.content} /> : m.content}
+                    </div>
+                  </div>
+                ))}
+                {chatLoading && (
+                  <div className="flex justify-start">
+                    <div className="bg-muted rounded-lg px-3 py-2">
+                      <div className="flex items-center gap-1">
+                        <span className="animate-bounce">●</span>
+                        <span className="animate-bounce" style={{ animationDelay: '100ms' }}>●</span>
+                        <span className="animate-bounce" style={{ animationDelay: '200ms' }}>●</span>
+                        <span className="ml-1 text-xs text-muted-foreground">Coaching…</span>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+            <div className="flex gap-2 border-t border-border/40 p-3">
+              <input
+                value={chatInput}
+                onChange={(e) => setChatInput(e.target.value)}
+                className="flex-1 rounded-lg border border-border/60 bg-background/30 px-3 py-2 text-sm outline-none focus:border-primary/50"
+                placeholder={noClipLimitReached ? 'Upload a clip to keep chatting…' : 'Ask anything — no clip needed…'}
+                disabled={chatLoading || noClipLimitReached}
+                onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); void sendChat() } }}
+              />
+              <Button
+                size="icon"
+                onClick={() => void sendChat()}
+                disabled={!chatInput.trim() || chatLoading || noClipLimitReached}
+                className="shrink-0 h-9 w-9"
+              >
+                <Send className="h-4 w-4" />
+              </Button>
+            </div>
+            {!isShogun && (
+              <p className="px-3 pb-3 text-[11px] text-muted-foreground">
+                {Math.max(0, NO_CLIP_CHAT_LIMIT - noClipMessagesSent)} free question
+                {Math.max(0, NO_CLIP_CHAT_LIMIT - noClipMessagesSent) === 1 ? '' : 's'} left without a clip.
+              </p>
+            )}
+          </div>
+        </div>
+      ) : (
       <div className="mx-auto max-w-7xl px-4 py-6">
         <div className="grid grid-cols-1 lg:grid-cols-[1fr,420px] gap-6">
             {/* LEFT: Video Player */}
@@ -4348,8 +4458,15 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                   {/* Chat messages */}
                   {messages.map((m, idx) => (
                     <div key={idx} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                      <div className={`max-w-[90%] rounded-xl px-3 py-2 text-sm whitespace-pre-wrap ${m.role === 'user' ? 'bg-primary text-primary-foreground' : 'bg-muted/60 border border-border/50 text-foreground'}`}>
-                        {m.content}
+                      <div
+                        className={cn(
+                          'max-w-[90%] rounded-xl px-3 py-2 text-sm',
+                          m.role === 'user'
+                            ? 'whitespace-pre-wrap bg-primary text-primary-foreground'
+                            : 'bg-muted/60 border border-border/50 text-foreground',
+                        )}
+                      >
+                        {m.role === 'assistant' ? <ChatMarkdown text={m.content} /> : m.content}
                       </div>
                     </div>
                   ))}
@@ -4402,15 +4519,15 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                   <div className="flex gap-2">
                     <input value={chatInput} onChange={(e) => setChatInput(e.target.value)}
                       className="flex-1 rounded-lg border border-border/60 bg-background/30 px-3 py-2 text-sm outline-none focus:border-primary/50"
-                      placeholder={!videoUrl ? 'Upload a clip…' : uploadingVideo ? 'Uploading video…' : voiceListening ? 'Listening…' : 'Ask about the fight…'}
-                      disabled={chatLoading || !videoUrl}
+                      placeholder={uploadingVideo ? 'Uploading video…' : voiceListening ? 'Listening…' : !videoUrl ? 'Ask anything — no clip needed…' : 'Ask about the fight…'}
+                      disabled={chatLoading}
                       onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); if (voiceListening) stopVoice(); void sendChat() } }}
                     />
                     <Button
                       size="icon"
                       variant={voiceListening ? 'default' : 'outline'}
                       onClick={() => (voiceListening ? stopVoice() : startVoice())}
-                      disabled={!voiceSupported || chatLoading || !videoUrl}
+                      disabled={!voiceSupported || chatLoading}
                       title={
                         !voiceSupported
                           ? 'Voice input not supported in this browser'
@@ -4423,7 +4540,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                     >
                       <Mic className="h-4 w-4" />
                     </Button>
-                    <Button size="icon" onClick={() => { if (voiceListening) stopVoice(); void sendChat() }} disabled={!chatInput.trim() || chatLoading || !videoUrl} className="shrink-0 h-9 w-9">
+                    <Button size="icon" onClick={() => { if (voiceListening) stopVoice(); void sendChat() }} disabled={!chatInput.trim() || chatLoading} className="shrink-0 h-9 w-9">
                       <Send className="h-4 w-4" />
                     </Button>
                   </div>

@@ -154,9 +154,15 @@ export default function HomePage() {
   // The design's "ask anything, no clip needed" entry — the live AI coach chat
   // lives in the Fight Lab, so submitting brings the user to it.
   const [entryDraft, setEntryDraft] = useState('')
+  const [forwardedChatDraft, setForwardedChatDraft] = useState('')
+  const [forwardedChatDraftToken, setForwardedChatDraftToken] = useState(0)
   const onAskCoach = (e: React.FormEvent) => {
     e.preventDefault()
-    if (!entryDraft.trim()) return
+    const text = entryDraft.trim()
+    if (!text) return
+    setForwardedChatDraft(text)
+    setForwardedChatDraftToken((n) => n + 1)
+    setEntryDraft('')
     scrollToFightLab()
   }
 
@@ -330,6 +336,8 @@ export default function HomePage() {
           hideShellHeader
           collapseWhenIdle
           bootstrapVideoFile={bootstrapVideoFile}
+          pendingChatDraft={forwardedChatDraft}
+          pendingChatDraftToken={forwardedChatDraftToken}
           autoPlayOnReady={autoPlayFixture}
           onBootstrapConsumed={clearBootstrapVideo}
         />
