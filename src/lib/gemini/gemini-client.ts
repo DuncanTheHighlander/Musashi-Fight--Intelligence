@@ -5,6 +5,7 @@ import { GEMINI_MODEL_DEFAULT, GEMINI_EMBED_MODEL_DEFAULT, resolvedModels } from
 import { getServerSecret, requireGeminiApiKey } from '@/lib/cloudflare/secrets'
 import { getCoachingCache, sha256Hex } from '@/lib/ai/coachingCache'
 import { buildCoachBrainBlock, type CoachBrainContext } from '@/lib/coachBrain/coachBrain'
+import { isGrapplingClip } from '@/lib/grapplingAnalysisPrompt'
 
 class GeminiQuotaError extends Error {
   status: number
@@ -142,6 +143,25 @@ SHORT CLIP MODE (under ~16s): Every sentence must earn its place. Lead with the 
     fighterFocus: args.coachBrain?.fighterFocus ?? normalizeCoachingFocus(args.focusTarget),
   })
 
+  // Grappling clips: pose tracking collapses under body-on-body occlusion, so
+  // the compiler's striking-classified events are artifacts, not evidence.
+  // This override loosens the striking straitjacket without touching the
+  // striking pipeline.
+  const isGrappling = isGrapplingClip({
+    discipline: args.coachBrain?.selectedSport,
+    clipType: args.coachBrain?.clipType,
+  })
+  const grapplingOverrideBlock = isGrappling
+    ? `
+GRAPPLING EVIDENCE OVERRIDE (CRITICAL — this clip is BJJ/grappling):
+- Body-on-body grappling causes severe pose-tracking occlusion, so the FightEvidenceLedger is highly prone to errors on this clip.
+- If the ledger contains striking-classified events (jab, cross, hooks, kicks) or striking faults (guard_drop, guard_low), treat them as compiler artifacts and IGNORE them entirely. Do not coach punches on a grappling roll.
+- If a video file is attached, the video is your primary evidence for positions, transitions, frames, and submissions. Use the ledger ONLY for macro trunk geometry (spine flattened, hip alignment) and pacing/scramble intensity.
+- Coach positional hierarchy, wedges and frames: did the athlete establish position before hunting the submission? Did the top player clear frames and pin the hips? Did the bottom player build skeletal structures to manage weight?
+- If the footage is occluded or a scramble is chaotic, say so plainly in the confidence note — never reconstruct hidden grips, hooks, or foot positions.
+- The 3 suggestedCorrections must be grappling corrections (frames, hips, posture, underhooks, guard retention, passing stability, control before submission) — never striking corrections.`
+    : ''
+
   return `You are Musashi Fight Intelligence - an elite combat-sports coach and tactical fight analyst.
 
 YOUR JOB: Analyze the fight evidence and produce serious, technical, useful coaching. The feedback must feel like a high-level coach reviewed the exchange: what happened, why it happened, what danger or opportunity it creates, and exactly what the selected fighter should fix next.
@@ -164,7 +184,7 @@ CRITICAL CONTRACT:
 - Do not sound like generic ChatGPT, a hype commentator, a motivational coach, or a robotic timestamp summarizer.
 - Do not structure the response as Moment 1 / Moment 2 / Moment 3. Timestamps are evidence, not the main structure.
 - When evidence allows, return exactly 3 high-value adjustments: technical, tactical, and training/habit.
-
+${grapplingOverrideBlock}
 SOURCE INFLUENCE LIBRARY:
 Use these as analytical lenses only. Do not copy any creator, do not cite paid instructionals, and do not imitate a living person's voice. Musashi must have its own original voice: direct, precise, serious, evidence-based, and coach-like.
 - tactical pattern recognition: stance matchups, entries, exits, traps, feints, counters, range games, and why a technique works against this opponent.

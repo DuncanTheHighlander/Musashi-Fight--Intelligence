@@ -14,6 +14,17 @@ import { getDisciplinePrompt } from '@/lib/disciplinePrompts'
 import { buildCoachBrainBlock } from '@/lib/coachBrain/coachBrain'
 import { sanitizeCoachText } from '@/lib/feedback/coachFeedback'
 import {
+  isGrapplingClip,
+  buildGrapplingEvidenceLedgerPrompt,
+  buildGrapplingVerificationPrompt,
+  buildGrapplingDeepAnalysisPrompt,
+  buildGrapplingCoachingPrompt,
+  buildGrapplingTacticalAndBans,
+  buildGrapplingLedgerFallbackReport,
+  GRAPPLING_LEDGER_RESPONSE_SCHEMA,
+  MUSASHI_BJJ_DEEP_ANALYSIS_SYSTEM,
+} from '@/lib/grapplingAnalysisPrompt'
+import {
   MUSASHI_DEEP_ANALYSIS_SYSTEM,
   COMET_STYLE_ANALYSIS_SYSTEM,
   FLASH_SCAN_PROMPT,
@@ -224,6 +235,7 @@ const hasMeaningfulLedgerData = (ledger: FactualLedger | null): boolean => {
   ]
 
   if (listFields.some((list) => list.length > 0)) return true
+  if (Array.isArray(ledger.video_analysis_ledger) && ledger.video_analysis_ledger.length > 0) return true
   if (Array.isArray(ledger.fighters) && ledger.fighters.length > 0) return true
   if (Array.isArray(ledger.movement_map) && ledger.movement_map.length > 0) return true
   if (typeof ledger.shot_count_total === 'number' && ledger.shot_count_total > 0) return true
@@ -1388,7 +1400,16 @@ const handleChat = async (body: any, user: any) => {
       // ==========================================
       if (isNativeVideo && isFirstMessage) {
         logger.info('Triggering two-pass deep video analysis pipeline')
-        
+
+        // Grappling clips route through the sport-aware grappling pipeline:
+        // grappling flash scan (strict position enums) + BJJ deep-pass system
+        // prompt that treats pose-derived striking events as compiler artifacts.
+        const useGrappling = isGrapplingClip({
+          discipline: context?.discipline,
+          clipType: context?.clipType,
+        })
+        if (useGrappling) logger.info('Grappling clip detected — using grappling analysis prompts')
+
         // PASS 1: Flash Scan
         const flashModel = useCometStyle
           ? (process.env.GEMINI_COMET_FLASH_MODEL || 'gemini-2.5-flash')
@@ -1404,7 +1425,9 @@ const handleChat = async (body: any, user: any) => {
         flashParts.push({ text: useCometStyle ? COMET_FLASH_SCAN_PROMPT : FLASH_SCAN_PROMPT })
 
         let scanData: ScanData | null = null
-        try {
+        // The striking-oriented flash scan (stances, shot counts) is skipped for
+        // grappling clips — the grappling evidence ledger below replaces it.
+        if (!useGrappling) try {
           const flashResp = await fetch(flashUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -1448,11 +1471,16 @@ const handleChat = async (body: any, user: any) => {
             const lp = [
               ...ledgerVideoParts,
               {
-                text: buildEvidenceLedgerPrompt({
-                  clipDuration: context?.clipDuration,
-                  focusTarget: ledgerFocus,
-                  poseEvidenceText,
-                }),
+                text: useGrappling
+                  ? buildGrapplingEvidenceLedgerPrompt({
+                      clipDuration: context?.clipDuration,
+                      focusTarget: ledgerFocus,
+                    })
+                  : buildEvidenceLedgerPrompt({
+                      clipDuration: context?.clipDuration,
+                      focusTarget: ledgerFocus,
+                      poseEvidenceText,
+                    }),
               },
             ]
             const ledgerResp = await fetchWithTimeout(ledgerFlashUrl, {
@@ -1460,7 +1488,12 @@ const handleChat = async (body: any, user: any) => {
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
                 contents: [{ role: 'user', parts: lp }],
-                generationConfig: { temperature: 0.15, responseMimeType: 'application/json' },
+                generationConfig: {
+                  temperature: 0.15,
+                  responseMimeType: 'application/json',
+                  // Strict enums stop hallucinated positions on grappling clips.
+                  ...(useGrappling ? { responseSchema: GRAPPLING_LEDGER_RESPONSE_SCHEMA } : {}),
+                },
               }),
             }, 30000)
             if (ledgerResp.ok) {
@@ -1471,17 +1504,26 @@ const handleChat = async (body: any, user: any) => {
           } catch {
             /* non-fatal */
           }
-          factualLedgerChat = mergePoseEvidenceIntoLedger(factualLedgerChat, context?.poseEvidence)
+          // Pose data is unreliable on grappling footage (occlusion) — never merge it there.
+          if (!useGrappling) {
+            factualLedgerChat = mergePoseEvidenceIntoLedger(factualLedgerChat, context?.poseEvidence)
+          }
           if (!hasMeaningfulLedgerData(factualLedgerChat)) {
             try {
               const ep = [
                 ...ledgerVideoParts,
                 {
-                  text: buildEmergencyLedgerPrompt({
-                    clipDuration: context?.clipDuration,
-                    focusTarget: ledgerFocus,
-                    poseEvidenceText,
-                  }),
+                  text: useGrappling
+                    ? buildGrapplingEvidenceLedgerPrompt({
+                        clipDuration: context?.clipDuration,
+                        focusTarget: ledgerFocus,
+                        attempt: 'emergency',
+                      })
+                    : buildEmergencyLedgerPrompt({
+                        clipDuration: context?.clipDuration,
+                        focusTarget: ledgerFocus,
+                        poseEvidenceText,
+                      }),
                 },
               ]
               const recoveryResp = await fetchWithTimeout(ledgerFlashUrl, {
@@ -1504,15 +1546,19 @@ const handleChat = async (body: any, user: any) => {
               /* non-fatal */
             }
           }
-          factualLedgerChat = mergePoseEvidenceIntoLedger(factualLedgerChat, context?.poseEvidence)
-          if (!hasMeaningfulLedgerData(factualLedgerChat)) {
-            factualLedgerChat = buildMinimalLedgerFromPoseEvidence(context?.poseEvidence)
+          if (!useGrappling) {
+            factualLedgerChat = mergePoseEvidenceIntoLedger(factualLedgerChat, context?.poseEvidence)
+            if (!hasMeaningfulLedgerData(factualLedgerChat)) {
+              factualLedgerChat = buildMinimalLedgerFromPoseEvidence(context?.poseEvidence)
+            }
           }
         }
 
         // PASS 2: Deep Analysis
         const poseData = safePatternEvidence || undefined
-        const deepPromptText = useCometStyle
+        const deepPromptText = useGrappling
+          ? buildGrapplingDeepAnalysisPrompt(factualLedgerChat)
+          : useCometStyle
           ? buildCometDeepAnalysisPrompt(scanData, kinematicsDetails)
           : buildDeepAnalysisPrompt(scanData, kinematicsDetails, poseData)
 
@@ -1526,7 +1572,12 @@ const handleChat = async (body: any, user: any) => {
 
         const reqContents = [{ role: 'user', parts: deepParts }]
 
-        const fullSystemPromptBase = useCometStyle
+        const fullSystemPromptBase = useGrappling
+          ? [
+              MUSASHI_BJJ_DEEP_ANALYSIS_SYSTEM.trim(),
+              coachBrainSection.trim(),
+            ].filter(Boolean).join('\n\n')
+          : useCometStyle
           ? [
               COMET_STYLE_ANALYSIS_SYSTEM.trim(),
               `GROUNDING RULES:
@@ -1547,9 +1598,11 @@ const handleChat = async (body: any, user: any) => {
               buildFirstPassPriorityBlock(coachingMode, focusDescription, fighterContext),
             ].filter(Boolean).join('\n\n')
 
-        const { tacticalAnchors, hardBans } = buildLedgerTacticalAndBans(factualLedgerChat)
+        const { tacticalAnchors, hardBans } = useGrappling
+          ? buildGrapplingTacticalAndBans(factualLedgerChat)
+          : buildLedgerTacticalAndBans(factualLedgerChat)
         const ledgerSystemAddon = factualLedgerChat
-          ? `\n\nFACTUAL LEDGER (source of truth — align Quick Scan and technique claims with this JSON):\n${JSON.stringify(factualLedgerChat, null, 2)}\n\nTACTICAL ANCHORS:\n${tacticalAnchors.join('\n')}\n\nHARD BANS:\n${hardBans.join('\n')}`
+          ? `\n\n${useGrappling ? 'VIDEOANALYSISLEDGER (ABSOLUTE SOURCE OF TRUTH for positions, transitions, and events)' : 'FACTUAL LEDGER (source of truth — align Quick Scan and technique claims with this JSON)'}:\n${JSON.stringify(factualLedgerChat, null, 2)}\n\nTACTICAL ANCHORS:\n${tacticalAnchors.join('\n')}\n\nHARD BANS:\n${hardBans.join('\n')}`
           : ''
         const fullSystemPrompt = fullSystemPromptBase + ledgerSystemAddon
 
@@ -1598,7 +1651,11 @@ const handleChat = async (body: any, user: any) => {
 
         let finalMessage =
           data?.candidates?.[0]?.content?.parts?.map((p: any) => p.text).filter(Boolean).join('\n') || 'No response.'
-        finalMessage = await rewriteCoachingToMatchLedger(finalMessage, factualLedgerChat, geminiKey, initialModel)
+        // The contradiction detector checks striking geometry (stances, movement
+        // direction) — not applicable to grappling timelines, so skip it there.
+        if (!useGrappling) {
+          finalMessage = await rewriteCoachingToMatchLedger(finalMessage, factualLedgerChat, geminiKey, initialModel)
+        }
         // Chat replies are user-facing prose. If the model leaked the internal
         // coaching-JSON contract, convert it to clean coaching text server-side.
         finalMessage = sanitizeCoachText(finalMessage)
@@ -2755,6 +2812,11 @@ const handleAnalyzeVideoStream = (body: any): Response => {
         if (focusTarget === 'blue' || focusTarget === 'A') coachingMode = 'corner_coach'
         else if (focusTarget === 'red' || focusTarget === 'B') coachingMode = 'scout'
 
+        // Grappling clips use the sport-aware pipeline: grappling flash scan
+        // with strict position enums, BJJ deep-pass system prompt, and no
+        // pose-evidence merging (pose tracking is unreliable under occlusion).
+        const useGrappling = isGrapplingClip({ discipline, clipType })
+
         const poseEvidenceText = summarizePoseEvidenceForPrompt(poseEvidence)
 
         // ── SINGLE PASS: Evidence Ledger (fast, ~10s) ───────────────────────
@@ -2773,10 +2835,18 @@ const handleAnalyzeVideoStream = (body: any): Response => {
                 role: 'user',
                 parts: [
                   { fileData: { fileUri: videoFileUri, mimeType: videoMimeType || 'video/mp4' } },
-                  { text: buildEvidenceLedgerPrompt({ clipDuration, focusTarget, poseEvidenceText }) }
+                  {
+                    text: useGrappling
+                      ? buildGrapplingEvidenceLedgerPrompt({ clipDuration, focusTarget })
+                      : buildEvidenceLedgerPrompt({ clipDuration, focusTarget, poseEvidenceText }),
+                  }
                 ]
               }],
-              generationConfig: { temperature: 0.15, responseMimeType: 'application/json' }
+              generationConfig: {
+                temperature: 0.15,
+                responseMimeType: 'application/json',
+                ...(useGrappling ? { responseSchema: GRAPPLING_LEDGER_RESPONSE_SCHEMA } : {}),
+              }
             })
           }, 30000)
 
@@ -2789,7 +2859,9 @@ const handleAnalyzeVideoStream = (body: any): Response => {
           /* ledger failure is non-fatal */
         }
 
-        factualLedger = mergePoseEvidenceIntoLedger(factualLedger, poseEvidence)
+        if (!useGrappling) {
+          factualLedger = mergePoseEvidenceIntoLedger(factualLedger, poseEvidence)
+        }
 
         if (!hasMeaningfulLedgerData(factualLedger)) {
           try {
@@ -2801,7 +2873,11 @@ const handleAnalyzeVideoStream = (body: any): Response => {
                   role: 'user',
                   parts: [
                     { fileData: { fileUri: videoFileUri, mimeType: videoMimeType || 'video/mp4' } },
-                    { text: buildEmergencyLedgerPrompt({ clipDuration, focusTarget, poseEvidenceText }) }
+                    {
+                      text: useGrappling
+                        ? buildGrapplingEvidenceLedgerPrompt({ clipDuration, focusTarget, attempt: 'emergency' })
+                        : buildEmergencyLedgerPrompt({ clipDuration, focusTarget, poseEvidenceText })
+                    }
                   ]
                 }],
                 generationConfig: { temperature: 0.1, responseMimeType: 'application/json' }
@@ -2821,10 +2897,12 @@ const handleAnalyzeVideoStream = (body: any): Response => {
           }
         }
 
-        factualLedger = mergePoseEvidenceIntoLedger(factualLedger, poseEvidence)
+        if (!useGrappling) {
+          factualLedger = mergePoseEvidenceIntoLedger(factualLedger, poseEvidence)
 
-        if (!hasMeaningfulLedgerData(factualLedger)) {
-          factualLedger = buildMinimalLedgerFromPoseEvidence(poseEvidence)
+          if (!hasMeaningfulLedgerData(factualLedger)) {
+            factualLedger = buildMinimalLedgerFromPoseEvidence(poseEvidence)
+          }
         }
 
         // Verification pass: re-watch tape and correct the candidate ledger before coaching + retrieval.
@@ -2832,10 +2910,12 @@ const handleAnalyzeVideoStream = (body: any): Response => {
           const verifyParts: Array<{ fileData?: { fileUri: string; mimeType: string }; text?: string }> = [
             { fileData: { fileUri: videoFileUri, mimeType: videoMimeType || 'video/mp4' } },
             {
-              text: buildEvidenceVerificationPrompt(factualLedger, {
-                clipDuration,
-                poseEvidenceText,
-              }),
+              text: useGrappling
+                ? buildGrapplingVerificationPrompt(factualLedger, { clipDuration })
+                : buildEvidenceVerificationPrompt(factualLedger, {
+                    clipDuration,
+                    poseEvidenceText,
+                  }),
             },
           ]
           const verifyResp = await fetchWithTimeout(flashUrl, {
@@ -2851,7 +2931,7 @@ const handleAnalyzeVideoStream = (body: any): Response => {
             const vraw: string = verifyData?.candidates?.[0]?.content?.parts?.[0]?.text || ''
             const verified = extractJsonObject<FactualLedger>(vraw)
             if (hasMeaningfulLedgerData(verified)) {
-              factualLedger = mergePoseEvidenceIntoLedger(verified, poseEvidence)
+              factualLedger = useGrappling ? verified : mergePoseEvidenceIntoLedger(verified, poseEvidence)
             }
           }
         } catch {
@@ -2901,10 +2981,14 @@ const handleAnalyzeVideoStream = (body: any): Response => {
           process.env.GEMINI_MODEL ||
           'gemini-3.1-pro-preview'
 
-        const deepPromptText = buildEvidenceBackedCoachingPrompt(factualLedger, {
-          coachingMode: coachingMode as 'strategist' | 'corner_coach' | 'scout',
-          poseEvidenceText,
-        })
+        const deepPromptText = useGrappling
+          ? buildGrapplingCoachingPrompt(factualLedger, {
+              coachingMode: coachingMode as 'strategist' | 'corner_coach' | 'scout',
+            })
+          : buildEvidenceBackedCoachingPrompt(factualLedger, {
+              coachingMode: coachingMode as 'strategist' | 'corner_coach' | 'scout',
+              poseEvidenceText,
+            })
 
         const coachingDirective =
           coachingMode === 'corner_coach'
@@ -2913,7 +2997,9 @@ const handleAnalyzeVideoStream = (body: any): Response => {
             ? 'Focus your analysis primarily on Fighter B (red corner) — identify their patterns, tendencies, and exploitable habits.'
             : 'Analyze both fighters equally and explain the strategic interplay between their styles.'
 
-        const { tacticalAnchors, hardBans } = buildLedgerTacticalAndBans(factualLedger)
+        const { tacticalAnchors, hardBans } = useGrappling
+          ? buildGrapplingTacticalAndBans(factualLedger)
+          : buildLedgerTacticalAndBans(factualLedger)
 
         const textSnippets = (retrieved?.snippets || []).filter((s) => s.namespace !== 'video_segment')
         const videoSnippets = (retrieved?.snippets || []).filter((s) => s.namespace === 'video_segment')
@@ -2940,8 +3026,21 @@ const handleAnalyzeVideoStream = (body: any): Response => {
             ].join('\n\n')
           : ''
 
+        const grapplingConstraints = `ABSOLUTE CONSTRAINTS (violating ANY of these is a critical failure):
+- The VideoAnalysisLedger timeline is your ONLY source of truth for positions, transitions, and events.
+- Any striking events or striking faults that appear in pose-derived data are compiler artifacts on this grappling clip — ignore them entirely.
+- Do not claim a sweep, pass, submission, or tap happened unless the timeline lists it.
+- Treat "scramble_unresolved" and "camera_occluded" entries as visual gaps: acknowledge them, never reconstruct them.`
+
+        const strikingConstraints = `ABSOLUTE CONSTRAINTS (violating ANY of these is a critical failure):
+- The factual ledger is your ONLY source of truth for what happened.
+- Do not add a Quick Scan section.
+- Do not mention any strike, kick, knee, clinch, takedown, or exchange unless the factual ledger explicitly lists it.
+- If the ledger says something was NOT SEEN, you must not claim it happened. Period.
+- If a punch type is unclear, call it "lead-hand punch" or "rear-hand punch" instead of guessing jab/hook/cross.`
+
         const systemPrompt = [
-          MUSASHI_DEEP_ANALYSIS_SYSTEM.trim(),
+          (useGrappling ? MUSASHI_BJJ_DEEP_ANALYSIS_SYSTEM : MUSASHI_DEEP_ANALYSIS_SYSTEM).trim(),
           `COACHING MODE: ${coachingMode.toUpperCase()}\n${coachingDirective}`,
           // Coach brain: global rules + selected sport brain (alias-aware).
           buildCoachBrainBlock({
@@ -2950,12 +3049,7 @@ const handleAnalyzeVideoStream = (body: any): Response => {
             fighterFocus: typeof focusTarget === 'string' ? focusTarget : undefined,
             poseEngine: typeof poseEngine === 'string' ? poseEngine : undefined,
           }),
-          `ABSOLUTE CONSTRAINTS (violating ANY of these is a critical failure):
-- The factual ledger is your ONLY source of truth for what happened.
-- Do not add a Quick Scan section.
-- Do not mention any strike, kick, knee, clinch, takedown, or exchange unless the factual ledger explicitly lists it.
-- If the ledger says something was NOT SEEN, you must not claim it happened. Period.
-- If a punch type is unclear, call it "lead-hand punch" or "rear-hand punch" instead of guessing jab/hook/cross.
+          `${useGrappling ? grapplingConstraints : strikingConstraints}
 ${tacticalAnchors.join('\n')}
 ${hardBans.join('\n')}
 
@@ -2998,7 +3092,9 @@ Rules for retrieved VIDEO SEGMENTS:
         }
 
         if (!deepResp || !deepResp.ok || !deepResp.body) {
-          const fallbackText = buildLedgerFallbackReport(factualLedger)
+          const fallbackText = useGrappling
+            ? buildGrapplingLedgerFallbackReport(factualLedger)
+            : buildLedgerFallbackReport(factualLedger)
           controller.enqueue(sse('chunk', { text: fallbackText }))
           controller.enqueue(sse('complete', { full_text: fallbackText, model: 'ledger-fallback' }))
           controller.close()
@@ -3048,9 +3144,15 @@ Rules for retrieved VIDEO SEGMENTS:
 
         // Finalize
         if (!fullText.trim()) {
-          fullText = buildLedgerFallbackReport(factualLedger)
+          fullText = useGrappling
+            ? buildGrapplingLedgerFallbackReport(factualLedger)
+            : buildLedgerFallbackReport(factualLedger)
         }
-        fullText = await rewriteCoachingToMatchLedger(fullText, factualLedger, geminiKey, usedModel)
+        // The contradiction detector checks striking geometry (stances, movement
+        // direction) — not applicable to grappling timelines, so skip it there.
+        if (!useGrappling) {
+          fullText = await rewriteCoachingToMatchLedger(fullText, factualLedger, geminiKey, usedModel)
+        }
         // The streamed report is user-facing prose — scrub any leaked
         // coaching-JSON contract before it reaches the client.
         fullText = sanitizeCoachText(fullText)

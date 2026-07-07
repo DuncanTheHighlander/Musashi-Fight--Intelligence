@@ -386,6 +386,18 @@ export interface FactualLedger {
   video_quality_notes?: string[]
   unknowns?: string[]
   forbidden_claims?: string[]
+  /**
+   * Grappling timeline produced by the sport-aware Flash scan when the clip is
+   * BJJ/grappling. When present it is the source of truth for positions and
+   * transitions; striking-oriented fields above should be treated as unused.
+   */
+  video_analysis_ledger?: Array<{
+    timestamp?: string
+    dominant_position?: string
+    top_player_identifier?: string
+    action_events?: string[]
+    technical_faults?: string[]
+  }>
   cv_evidence?: string[]
 }
 
