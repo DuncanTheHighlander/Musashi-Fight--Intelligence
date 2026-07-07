@@ -17,7 +17,7 @@
     "dev:d1": "cross-env MUSASHI_D1_LOCAL=1 NODE_OPTIONS=\"--max-old-space-size=3072 --dns-result-order=ipv4first\" next dev -p 3000",
     "dev:alt": "cross-env NODE_OPTIONS=\"--max-old-space-size=1024 --dns-result-order=ipv4first\" next dev -H 127.0.0.1 -p 3001",
     "build": "next build",
-    "build:cf": "node scripts/clean-open-next.mjs && opennextjs-cloudflare build && node scripts/prepare-cloudflare-output.mjs",
+    "build:cf": "node scripts/clean-open-next.mjs --open-next-only && cross-env NEXT_PRIVATE_STANDALONE=true NEXT_PRIVATE_OUTPUT_TRACE_ROOT=. pnpm build && opennextjs-cloudflare build --skipBuild && node scripts/prepare-cloudflare-output.mjs",
     "preview": "opennextjs-cloudflare build && opennextjs-cloudflare preview",
     "deploy": "pnpm run deploy:cf",
     "deploy:cf": "pnpm run build:cf && wrangler deploy --config wrangler.bundle.toml",

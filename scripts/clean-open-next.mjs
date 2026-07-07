@@ -57,7 +57,10 @@ export async function cleanOpenNextOutput(options = {}) {
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  const results = await cleanBuildOutput()
+  const outputDirs = process.argv.includes('--open-next-only')
+    ? [defaultOutputDir]
+    : defaultOutputDirs
+  const results = await cleanBuildOutput({ outputDirs })
 
   for (const result of results) {
     if (result.removed) {
