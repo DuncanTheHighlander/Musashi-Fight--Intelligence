@@ -8,19 +8,21 @@
  */
 
 import { useState, useEffect } from 'react'
+import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
+import { Checkbox } from '@/components/ui/checkbox'
 import { useToast } from '@/hooks/use-toast'
 import { useAuth } from '@/hooks/useAuth'
 import { parseApiResponse } from '@/lib/safeJson'
-import { Dumbbell, Swords, Sparkles, Check, ArrowRight, Loader2 } from 'lucide-react'
+import { Dumbbell, Swords, Sparkles, Check, ArrowRight, Loader2, ShieldCheck } from 'lucide-react'
 
 type Path = 'train' | 'coach' | 'both'
-type Step = 'path' | 'fighter' | 'coach' | 'done'
+type Step = 'consent' | 'path' | 'fighter' | 'coach' | 'done'
 
 const DISCIPLINES: Array<[value: string, label: string]> = [
   ['boxing', 'Boxing'],
@@ -74,9 +76,32 @@ export default function OnboardingPage() {
     }
   }, [user, router])
 
-  const [step, setStep] = useState<Step>('path')
+  const [step, setStep] = useState<Step>('consent')
   const [path, setPath] = useState<Path>('train')
   const [saving, setSaving] = useState(false)
+
+  // Data-use consent — required to be shown (can't skip this screen), but the
+  // decision itself is opt-in: defaults on, the user can uncheck before
+  // continuing. Withdrawable later from Profile. See docs/PRIVACY_CONSENT_SPEC.md.
+  const [aiTrainingConsent, setAiTrainingConsent] = useState(true)
+  const [savingConsent, setSavingConsent] = useState(false)
+
+  async function saveConsent() {
+    setSavingConsent(true)
+    try {
+      await fetch('/api/auth/consent', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ aiTraining: aiTrainingConsent }),
+      })
+    } catch {
+      // Non-fatal — the Profile page lets the user set this later too.
+    } finally {
+      setSavingConsent(false)
+      setStep('path')
+    }
+  }
 
   // Shared / fighter fields
   const [displayName, setDisplayName] = useState(user?.display_name || '')
@@ -174,6 +199,45 @@ export default function OnboardingPage() {
           A couple of quick details and you&apos;re in.
         </p>
       </div>
+
+      {step === 'consent' && (
+        <Card>
+          <CardContent className="space-y-4 p-6">
+            <div className="flex items-start gap-3">
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10">
+                <ShieldCheck className="h-5 w-5 text-primary" />
+              </div>
+              <div className="space-y-1">
+                <div className="font-semibold">How we use your footage</div>
+                <p className="text-sm text-muted-foreground">
+                  We analyze the clips you upload to give you AI coaching. We may also use your
+                  footage and its derived analysis to improve Musashi&apos;s AI coaching models. See
+                  our <Link href="/privacy" target="_blank" className="underline">Privacy Policy</Link>{' '}
+                  for details, including the third-party AI providers we use.
+                </p>
+              </div>
+            </div>
+            <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-border/60 p-3 text-sm">
+              <Checkbox
+                checked={aiTrainingConsent}
+                onCheckedChange={(v) => setAiTrainingConsent(v === true)}
+                className="mt-0.5"
+              />
+              <span>
+                Use my footage and its analysis to help improve Musashi&apos;s AI coaching.
+                <span className="block text-xs text-muted-foreground">
+                  You can change this anytime from your Profile.
+                </span>
+              </span>
+            </label>
+            <div className="flex justify-end pt-2">
+              <Button onClick={saveConsent} disabled={savingConsent}>
+                {savingConsent ? <Loader2 className="h-4 w-4 animate-spin" /> : <>Continue <ArrowRight className="ml-1.5 h-4 w-4" /></>}
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {step === 'path' && (
         <div className="grid gap-4 sm:grid-cols-3">

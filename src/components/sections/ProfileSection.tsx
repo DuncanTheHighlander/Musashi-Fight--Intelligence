@@ -8,10 +8,13 @@ import { Badge } from '@/components/ui/badge'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Checkbox } from '@/components/ui/checkbox'
 import { useAuth } from '@/hooks/useAuth'
-import { User, Mail, Shield, Calendar, Activity, Loader2, TriangleAlert } from 'lucide-react'
+import { useToast } from '@/hooks/use-toast'
+import { User, Mail, Shield, Calendar, Activity, Loader2, TriangleAlert, ShieldCheck } from 'lucide-react'
 import { useSection } from '@/contexts/SectionContext'
 import { SectionShell } from '@/components/ui/section-header'
+import { parseApiResponse } from '@/lib/safeJson'
 
 /** In-app account deletion — required by Apple 5.1.1(v) and Google Play for
  *  apps with account creation. Two-step: reveal, then password + confirm. */
@@ -89,6 +92,84 @@ function DangerZoneCard({ isAdmin }: { isAdmin: boolean }) {
             </div>
           </form>
         )}
+      </CardContent>
+    </Card>
+  )
+}
+
+/** View/withdraw consent to use uploaded footage for AI-improvement. See
+ *  docs/PRIVACY_CONSENT_SPEC.md. Backed by GET/POST /api/auth/consent. */
+function AiConsentCard() {
+  const { toast } = useToast()
+  const [loading, setLoading] = useState(true)
+  const [aiTraining, setAiTraining] = useState(false)
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const res = await fetch('/api/auth/consent', { credentials: 'include' })
+        const data = await parseApiResponse<{ aiTraining: boolean }>(res)
+        if (!cancelled) setAiTraining(Boolean(data.aiTraining))
+      } catch {
+        /* leave default; the toggle below still works */
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [])
+
+  async function update(next: boolean) {
+    setAiTraining(next)
+    setSaving(true)
+    try {
+      const res = await fetch('/api/auth/consent', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ aiTraining: next }),
+      })
+      await parseApiResponse(res)
+      toast({ title: next ? 'Thanks — your footage may help improve the AI' : 'Preference saved' })
+    } catch (err) {
+      setAiTraining(!next)
+      toast({
+        title: 'Could not save preference',
+        description: err instanceof Error ? err.message : 'Unknown error',
+        variant: 'destructive',
+      })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <Card className="mt-5 border-border/50">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-lg">
+          <ShieldCheck className="h-5 w-5" />
+          AI Improvement
+        </CardTitle>
+        <CardDescription>Whether your footage may be used to improve Musashi&apos;s AI coaching</CardDescription>
+      </CardHeader>
+      <CardContent>
+        <label className="flex cursor-pointer items-start gap-3">
+          <Checkbox
+            checked={aiTraining}
+            disabled={loading || saving}
+            onCheckedChange={(v) => update(v === true)}
+            className="mt-0.5"
+          />
+          <span className="text-sm">
+            Use my footage and its analysis to help improve Musashi&apos;s AI coaching.
+            <span className="block text-xs text-muted-foreground">
+              You can turn this off anytime — see our{' '}
+              <a href="/privacy" target="_blank" rel="noreferrer" className="underline">Privacy Policy</a>.
+            </span>
+          </span>
+        </label>
       </CardContent>
     </Card>
   )
@@ -236,6 +317,7 @@ export default function ProfileSection() {
         </CardContent>
       </Card>
 
+      <AiConsentCard />
       <DangerZoneCard isAdmin={user.role === 'shogun'} />
     </SectionShell>
   )
