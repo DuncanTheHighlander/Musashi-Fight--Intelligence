@@ -19,6 +19,7 @@ import {
 } from '@/components/ui/alert-dialog'
 import { useToast } from '@/hooks/use-toast'
 import { CompactFocusToggle } from '@/components/fight/FocusToggle'
+import RotatingWisdom from '@/components/fight/RotatingWisdom'
 import {
   deleteSession,
   exportAll,
@@ -3704,6 +3705,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                           <p className="max-w-sm text-xs text-white/55">
                             MediaPipe pose tracking runs locally while paused. When you see Ready, click Play for skeleton overlays.
                           </p>
+                          <RotatingWisdom sport={selectedSport} />
                         </>
                       ) : (
                         <>
