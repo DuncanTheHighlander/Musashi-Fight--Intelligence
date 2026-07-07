@@ -1,6 +1,7 @@
 'use client'
 
 import React, { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback } from 'react'
+import { createPortal } from 'react-dom'
 import { useAuth } from '@/contexts/AuthContext'
 import Link from 'next/link'
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
@@ -441,11 +442,11 @@ export type FightCoachExperienceProps = {
   /** Increment to load the built-in demo clip (used by the home hero's
    *  "try the demo" link when the idle Fight Lab surface is collapsed). */
   demoRequestToken?: number
-  /** A question typed elsewhere (e.g. the home hero's "Ask anything" box) to
-   *  carry into this chat instead of discarding it. Paired with a token so
-   *  the same text can be forwarded twice in a row. */
-  pendingChatDraft?: string
-  pendingChatDraftToken?: number
+  /** DOM id of an element (rendered by the host page, e.g. the home hero's
+   *  "Musashi AI Coach" card) to portal the idle no-clip chat into — so
+   *  there's one chat surface, not a second live one appearing elsewhere on
+   *  the page once collapseWhenIdle is showing nothing. */
+  idleChatSlotId?: string
   /** Dev fixture helper: auto-unlock/play once the boot pre-scan is ready. */
   autoPlayOnReady?: boolean
   onBootstrapConsumed?: () => void
@@ -478,8 +479,7 @@ export default function FightCoachExperience({
   bootstrapVideoFile = null,
   collapseWhenIdle = false,
   demoRequestToken = 0,
-  pendingChatDraft = '',
-  pendingChatDraftToken = 0,
+  idleChatSlotId,
   autoPlayOnReady = false,
   onBootstrapConsumed,
 }: FightCoachExperienceProps = {}) {
@@ -692,16 +692,13 @@ export default function FightCoachExperience({
   const [coachingLoading, setCoachingLoading] = useState(false)
   const [chatInput, setChatInput] = useState('')
   const [noClipMessagesSent, setNoClipMessagesSent] = useState(0)
-  // Carry a question typed in the home hero's "Ask anything" box into this
-  // chat instead of discarding it — keyed on a token so a repeat of the same
-  // text still lands (a plain string dependency would no-op on a resubmit).
-  const lastAppliedDraftTokenRef = useRef(0)
+  // Target for the idle no-clip chat portal (see idleChatSlotId) — looked up
+  // client-side since the slot is a plain DOM node the host page renders.
+  const [idleChatSlotEl, setIdleChatSlotEl] = useState<HTMLElement | null>(null)
   useEffect(() => {
-    if (!pendingChatDraft.trim()) return
-    if (pendingChatDraftToken === lastAppliedDraftTokenRef.current) return
-    lastAppliedDraftTokenRef.current = pendingChatDraftToken
-    setChatInput(pendingChatDraft)
-  }, [pendingChatDraft, pendingChatDraftToken])
+    if (!idleChatSlotId) return
+    setIdleChatSlotEl(document.getElementById(idleChatSlotId))
+  }, [idleChatSlotId])
   const [initialAnalysisLoading, setInitialAnalysisLoading] = useState(false)
   const [initialAnalysisReady, setInitialAnalysisReady] = useState(false)
   const [initialAnalysisStatus, setInitialAnalysisStatus] = useState<string | null>(null)
@@ -3472,21 +3469,15 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
 
       {idleCollapsed ? (
         // No clip loaded: the full video/pose UI stays hidden (the page's own
-        // uploader is the single upload terminal), but general Q&A chat still
-        // works — "Ask anything, no clip needed" only means something if the
-        // chat panel actually exists before a clip is uploaded.
-        <div className="mx-auto max-w-7xl px-4 pb-6">
-          <div className="rounded-2xl border border-border/50 bg-card/30 backdrop-blur-xl">
-            <div className="border-b border-border/40 px-4 py-3">
-              <div className="text-sm font-semibold">Ask Musashi</div>
-              <div className="text-xs text-muted-foreground">
-                {noClipLimitReached
-                  ? 'Free question limit reached — upload a clip for unlimited coaching.'
-                  : 'General fight questions — no clip needed.'}
-              </div>
-            </div>
+        // uploader is the single upload terminal). General Q&A chat still
+        // works, but it's portaled into the host page's own chat card
+        // (idleChatSlotId) instead of drawing a second box here — one chat
+        // surface, not two.
+        idleChatSlotEl &&
+        createPortal(
+          <>
             {messages.length > 0 && (
-              <div className="max-h-[320px] space-y-2 overflow-y-auto p-3">
+              <div className="max-h-[320px] space-y-2 overflow-y-auto px-3 pt-3">
                 {messages.map((m, idx) => (
                   <div key={idx} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                     <div
@@ -3515,12 +3506,12 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                 )}
               </div>
             )}
-            <div className="flex gap-2 border-t border-border/40 p-3">
+            <div className="flex items-center gap-2 px-3 py-[11px]">
               <input
                 value={chatInput}
                 onChange={(e) => setChatInput(e.target.value)}
-                className="flex-1 rounded-lg border border-border/60 bg-background/30 px-3 py-2 text-sm outline-none focus:border-primary/50"
-                placeholder={noClipLimitReached ? 'Upload a clip to keep chatting…' : 'Ask anything — no clip needed…'}
+                className="min-w-0 flex-1 rounded-xl border border-border/60 bg-background/30 px-[13px] py-[11px] text-[13.5px] outline-none focus:border-primary/50"
+                placeholder={noClipLimitReached ? 'Upload a clip to keep chatting…' : 'Ask anything — no clip needed'}
                 disabled={chatLoading || noClipLimitReached}
                 onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); void sendChat() } }}
               />
@@ -3535,12 +3526,14 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
             </div>
             {!isShogun && (
               <p className="px-3 pb-3 text-[11px] text-muted-foreground">
-                {Math.max(0, NO_CLIP_CHAT_LIMIT - noClipMessagesSent)} free question
-                {Math.max(0, NO_CLIP_CHAT_LIMIT - noClipMessagesSent) === 1 ? '' : 's'} left without a clip.
+                {noClipLimitReached
+                  ? 'Free question limit reached — upload a clip for unlimited coaching.'
+                  : `${Math.max(0, NO_CLIP_CHAT_LIMIT - noClipMessagesSent)} free question${Math.max(0, NO_CLIP_CHAT_LIMIT - noClipMessagesSent) === 1 ? '' : 's'} left without a clip.`}
               </p>
             )}
-          </div>
-        </div>
+          </>,
+          idleChatSlotEl,
+        )
       ) : (
       <div className="mx-auto max-w-7xl px-4 py-6">
         <div className="grid grid-cols-1 lg:grid-cols-[1fr,420px] gap-6">

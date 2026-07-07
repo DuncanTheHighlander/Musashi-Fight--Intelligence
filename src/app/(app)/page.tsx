@@ -5,7 +5,6 @@ import { useRouter } from 'next/navigation'
 import dynamic from 'next/dynamic'
 import { Loader2, Video } from 'lucide-react'
 import { useSection } from '@/contexts/SectionContext'
-import { useVoiceSoon } from '@/components/mobile/MobileShell'
 import { useAuth } from '@/hooks/useAuth'
 import VideoTrimmer from '@/components/fight/VideoTrimmer'
 import { probeVideoDuration } from '@/lib/videoTrim'
@@ -36,7 +35,6 @@ import ProfileSection from '@/components/sections/ProfileSection'
 export default function HomePage() {
   const { activeSection } = useSection()
   const router = useRouter()
-  const { showVoiceSoon } = useVoiceSoon()
   const { user } = useAuth()
   const maxClipSec = user?.role === 'shogun' ? SHOGUN_MAX_VIDEO_SEC : PRO_MAX_VIDEO_SEC
   const [trimRequest, setTrimRequest] = useState<File | null>(null)
@@ -153,18 +151,10 @@ export default function HomePage() {
 
   // The design's "ask anything, no clip needed" entry — the live AI coach chat
   // lives in the Fight Lab, so submitting brings the user to it.
-  const [entryDraft, setEntryDraft] = useState('')
-  const [forwardedChatDraft, setForwardedChatDraft] = useState('')
-  const [forwardedChatDraftToken, setForwardedChatDraftToken] = useState(0)
-  const onAskCoach = (e: React.FormEvent) => {
-    e.preventDefault()
-    const text = entryDraft.trim()
-    if (!text) return
-    setForwardedChatDraft(text)
-    setForwardedChatDraftToken((n) => n + 1)
-    setEntryDraft('')
-    scrollToFightLab()
-  }
+  // The "Musashi AI Coach" card below is just the header/chrome — the actual
+  // chat (message list + input) is FightCoachExperience's, portaled into
+  // #ask-musashi-slot so there's one chat, not a static box that hands off
+  // to a second live one further down the page.
 
   if (activeSection === 'fighters') return <ProfilesSection />
   if (activeSection === 'marketplace') return <MarketplaceSection />
@@ -296,37 +286,9 @@ export default function HomePage() {
               <div className="mt-px text-[11px] text-ms-faint">Ask anything — no clip needed</div>
             </div>
           </div>
-          <form onSubmit={onAskCoach} className="flex items-center gap-2 px-3 py-[11px]">
-            <input
-              value={entryDraft}
-              onChange={(e) => setEntryDraft(e.target.value)}
-              placeholder="How do I stop dropping my hands?"
-              className="min-w-0 flex-1 rounded-xl border bg-ms-surface2 px-[13px] py-[11px] text-[13.5px] text-ms-text outline-none placeholder:text-ms-faint"
-              style={{ borderColor: 'var(--ms-line10)' }}
-            />
-            <button
-              type="button"
-              onClick={showVoiceSoon}
-              title="Voice — coming soon"
-              className="flex h-[38px] w-[38px] flex-shrink-0 items-center justify-center rounded-[11px] border bg-ms-surface2 text-ms-faint"
-              style={{ borderColor: 'var(--ms-line10)' }}
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
-                <path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v4" />
-              </svg>
-            </button>
-            <button
-              type="submit"
-              className="flex h-[38px] w-[38px] flex-shrink-0 items-center justify-center rounded-[11px] text-white"
-              style={{ background: '#C6461B' }}
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <line x1="22" y1="2" x2="11" y2="13" />
-                <polygon points="22 2 15 22 11 13 2 9 22 2" />
-              </svg>
-            </button>
-          </form>
+          {/* FightCoachExperience portals its idle chat (messages + input +
+              send) in here — see pendingChatSlotId. */}
+          <div id="ask-musashi-slot" />
         </div>
       </div>
 
@@ -336,8 +298,7 @@ export default function HomePage() {
           hideShellHeader
           collapseWhenIdle
           bootstrapVideoFile={bootstrapVideoFile}
-          pendingChatDraft={forwardedChatDraft}
-          pendingChatDraftToken={forwardedChatDraftToken}
+          idleChatSlotId="ask-musashi-slot"
           autoPlayOnReady={autoPlayFixture}
           onBootstrapConsumed={clearBootstrapVideo}
         />
