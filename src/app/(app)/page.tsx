@@ -6,6 +6,10 @@ import dynamic from 'next/dynamic'
 import { Loader2, Video } from 'lucide-react'
 import { useSection } from '@/contexts/SectionContext'
 import { useVoiceSoon } from '@/components/mobile/MobileShell'
+import { useAuth } from '@/hooks/useAuth'
+import VideoTrimmer from '@/components/fight/VideoTrimmer'
+import { probeVideoDuration } from '@/lib/videoTrim'
+import { PRO_MAX_VIDEO_SEC, SHOGUN_MAX_VIDEO_SEC } from '@/lib/videoTierLimits'
 
 // FightCoachExperience pulls in MediaPipe + WASM. Loading it on the server
 // (or even on the client during the initial RSC payload) crashes the dev
@@ -33,6 +37,9 @@ export default function HomePage() {
   const { activeSection } = useSection()
   const router = useRouter()
   const { showVoiceSoon } = useVoiceSoon()
+  const { user } = useAuth()
+  const maxClipSec = user?.role === 'shogun' ? SHOGUN_MAX_VIDEO_SEC : PRO_MAX_VIDEO_SEC
+  const [trimRequest, setTrimRequest] = useState<File | null>(null)
   const [bootstrapVideoFile, setBootstrapVideoFile] = useState<File | null>(null)
   const [autoPlayFixture, setAutoPlayFixture] = useState(false)
   const fixtureLoadedRef = useRef(false)
@@ -128,10 +135,17 @@ export default function HomePage() {
   const clearBootstrapVideo = useCallback(() => setBootstrapVideoFile(null), [])
   const OFFLINE = process.env.NEXT_PUBLIC_OFFLINE_MODE === '1'
 
-  const onHeroFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const onHeroFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0]
     e.target.value = ''
     if (!f) return
+    // If the clip is longer than this tier allows, let the user pick which
+    // window to keep instead of rejecting it downstream.
+    const dur = await probeVideoDuration(f)
+    if (dur > maxClipSec) {
+      setTrimRequest(f)
+      return
+    }
     setBootstrapVideoFile(f)
     // The Fight Lab below is the real preview → processing → results surface.
     scrollToFightLab()
@@ -173,6 +187,19 @@ export default function HomePage() {
         aria-label="Record a fight video"
         onChange={onHeroFileChange}
       />
+
+      {trimRequest && (
+        <VideoTrimmer
+          file={trimRequest}
+          maxSec={maxClipSec}
+          onConfirm={(trimmed) => {
+            setTrimRequest(null)
+            setBootstrapVideoFile(trimmed)
+            scrollToFightLab()
+          }}
+          onCancel={() => setTrimRequest(null)}
+        />
+      )}
 
       {/* ---- ANALYZE · UPLOAD (design/musashi-reboot) ---- */}
       <div className="px-5 pb-7 pt-[26px]">
