@@ -3306,7 +3306,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
     <div className={idleCollapsed ? 'w-full' : 'min-h-screen w-full bg-background'}>
       {/* Clip context step — opens on every fresh upload; non-blocking (local pipeline keeps booting). */}
       <Dialog open={sportPickerOpen} onOpenChange={setSportPickerOpen}>
-        <DialogContent className="max-w-lg">
+        <DialogContent className="max-w-lg max-h-[85vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>What type of fight clip is this?</DialogTitle>
             <DialogDescription>
