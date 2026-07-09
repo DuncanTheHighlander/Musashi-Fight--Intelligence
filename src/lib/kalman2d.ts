@@ -155,8 +155,8 @@ export function updateKalman(
     K[i * 2 + 1] = pi0 * inv01 + pi1 * inv11
   }
 
-  let x = k.x + K[0]! * y0 + K[1]! * y1
-  let y = k.y + K[2]! * y0 + K[3]! * y1
+  const x = k.x + K[0]! * y0 + K[1]! * y1
+  const y = k.y + K[2]! * y0 + K[3]! * y1
   let vx = k.vx + K[4]! * y0 + K[5]! * y1
   let vy = k.vy + K[6]! * y0 + K[7]! * y1
 
