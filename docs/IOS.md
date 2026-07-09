@@ -2,6 +2,10 @@
 
 Musashi ships to the App Store as a **Capacitor WebView shell** that loads the production web app — same architecture as Android (see [`ANDROID.md`](ANDROID.md)).
 
+**Gap spec:** [`docs/superpowers/specs/2026-07-09-mobile-store-gaps.md`](./superpowers/specs/2026-07-09-mobile-store-gaps.md)  
+**App Privacy answers:** [`docs/STORE_DATA_SAFETY.md`](./STORE_DATA_SAFETY.md) · **Device QA:** [`docs/MOBILE_STORE_QA.md`](./MOBILE_STORE_QA.md)  
+**Release gate:** `pnpm check:mobile-release` (also runs before `pnpm mobile:ios`)
+
 ## What is already done (works from Windows)
 
 - `mobile/ios/` Xcode project scaffolded (`npx cap add ios`, Capacitor 8 + Swift Package Manager — no CocoaPods)
@@ -61,15 +65,22 @@ Apple rejects apps that are "just a website in a wrapper" far more aggressively 
 ## App Store checklist
 
 - [ ] Web app live at production URL; `server.url` set in `mobile/capacitor.config.json`
+- [ ] `pnpm check:mobile-release` green
 - [ ] Apple Developer account + App Store Connect app created (bundle ID `ai.musashi.app`)
 - [ ] Signed archive uploaded via Xcode
 - [x] IAP compliance — purchase UI hidden in the iOS shell (done in code)
 - [x] In-app account deletion (done in code — Profile → Danger Zone)
 - [ ] Privacy policy URL (`/privacy`) + terms (`/terms`)
-- [ ] App Privacy questionnaire (camera, video uploads, account data)
-- [ ] Screenshots: 6.7" and 6.5" iPhone required; iPad if you keep iPad support
-- [ ] TestFlight internal test on a real device (camera + upload + checkout flows)
-- [ ] Review notes explaining live pose tracking (helps with 4.2)
+- [ ] App Privacy questionnaire — fill from [`STORE_DATA_SAFETY.md`](./STORE_DATA_SAFETY.md)
+- [ ] Screenshots: 6.7" and 6.5" iPhone required; iPad if you keep iPad support (v1: prefer iPhone-only)
+- [ ] TestFlight internal test on a real device — [`MOBILE_STORE_QA.md`](./MOBILE_STORE_QA.md)
+- [ ] Review notes explaining live pose tracking (helps with 4.2) — paste from STORE_DATA_SAFETY.md
+
+### Suggested App Review notes (Guideline 4.2)
+
+Paste into App Store Connect → App Review Information → Notes (edit host if needed):
+
+> Musashi provides interactive live camera pose tracking (on-device MediaPipe), client-side video trimming for free (10s) / Pro (30s) clip limits, AI coaching analysis, and a coaching quality feedback loop (thumbs up/down for admin review). The iOS app is a Capacitor shell over our production web app so auth and entitlements stay consistent across web and mobile. Please exercise: sign-in at /welcome → upload a long clip → trim → run analysis → rate coaching. Live camera pose is available from Fight Lab on a physical device.
 
 ## PWA alternative (no Mac, no store, no IAP cut)
 

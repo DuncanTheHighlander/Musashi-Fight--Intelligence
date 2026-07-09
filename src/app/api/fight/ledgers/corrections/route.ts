@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 import { getDbOrNull } from '@/lib/db'
 import { requireUser } from '@/lib/musashiAuth'
 import { addLedgerCorrection, type CorrectionItemType, type CorrectionVerdict } from '@/lib/ledgerStore'
+import { captureTrainingSampleFromCorrection } from '@/lib/trainingDatasetStore'
 
 type CorrectionRequest = {
   ledgerId?: string
@@ -69,7 +70,27 @@ export async function POST(request: Request) {
       note: body.note ?? null,
       createdBy: user.id,
     })
-    return NextResponse.json({ success: true, correctionId: id })
+
+    let trainingSampleId: string | null = null
+    try {
+      trainingSampleId = await captureTrainingSampleFromCorrection({
+        db,
+        ledgerId: body.ledgerId,
+        correctionId: id,
+        itemType: body.itemType,
+        itemId: body.itemId,
+        originalKind: body.originalKind,
+        verdict: body.verdict,
+        correctedKind: body.correctedKind ?? null,
+      })
+    } catch (trainErr) {
+      console.warn(
+        '[TrainingDataset] Capture failed (non-fatal):',
+        trainErr instanceof Error ? trainErr.message : trainErr
+      )
+    }
+
+    return NextResponse.json({ success: true, correctionId: id, trainingSampleId })
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     const status = message.startsWith('Ledger not found') ? 404 : 500

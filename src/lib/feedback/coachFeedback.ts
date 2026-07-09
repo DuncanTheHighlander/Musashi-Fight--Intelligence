@@ -315,7 +315,7 @@ export function sanitizeCoachText(
   text: string,
   opts?: { clipDurationMs?: number | null }
 ): string {
-  if (typeof text !== 'string' || !text.trim()) return text
+  if (typeof text !== 'string' || !text.trim()) return ''
   if (!looksLikeCoachingJson(text)) {
     // Still strip stray code fences so users never see developer formatting.
     return text.includes('```') ? text.replace(/```[a-z]*\n?/gi, '').trim() : text

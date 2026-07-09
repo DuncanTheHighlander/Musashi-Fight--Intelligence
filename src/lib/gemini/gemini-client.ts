@@ -6,6 +6,8 @@ import { getServerSecret, requireGeminiApiKey } from '@/lib/cloudflare/secrets'
 import { getCoachingCache, sha256Hex } from '@/lib/ai/coachingCache'
 import { buildCoachBrainBlock, type CoachBrainContext } from '@/lib/coachBrain/coachBrain'
 import { isGrapplingClip } from '@/lib/grapplingAnalysisPrompt'
+import type { FactualLedger } from '@/lib/fightAnalysisPrompt'
+import type { TemporalEvidence } from '@/lib/evidence/sessionEvidenceExtensions'
 
 class GeminiQuotaError extends Error {
   status: number
@@ -102,6 +104,10 @@ export function buildGroundedCoachingPrompt(args: {
   focusTarget?: CoachingFocusTarget
   /** Coach-brain context: selectedSport, clipType, userQuestion, poseEngine, poseQuality. */
   coachBrain?: CoachBrainContext
+  /** Verified vision ledger from Flash scan + verification pass (Phase 2). */
+  visionLedger?: FactualLedger | null
+  /** Phase 3 temporal context: exchange windows + peak motion burst. */
+  temporalEvidence?: TemporalEvidence | null
 }): string {
   // Keep the model constrained: ledger is truth; everything must cite evidence ids when available.
   const ledgerJson = JSON.stringify(
@@ -156,11 +162,57 @@ SHORT CLIP MODE (under ~16s): Every sentence must earn its place. Lead with the 
 GRAPPLING EVIDENCE OVERRIDE (CRITICAL — this clip is BJJ/grappling):
 - Body-on-body grappling causes severe pose-tracking occlusion, so the FightEvidenceLedger is highly prone to errors on this clip.
 - If the ledger contains striking-classified events (jab, cross, hooks, kicks) or striking faults (guard_drop, guard_low), treat them as compiler artifacts and IGNORE them entirely. Do not coach punches on a grappling roll.
-- If a video file is attached, the video is your primary evidence for positions, transitions, frames, and submissions. Use the ledger ONLY for macro trunk geometry (spine flattened, hip alignment) and pacing/scramble intensity.
+${
+  args.visionLedger?.video_analysis_ledger?.length
+    ? `- The VideoAnalysisLedger below is your ABSOLUTE SOURCE OF TRUTH for positions, transitions, and techniques. Coach ONLY what appears in techniques_identified and action_events. If techniques_identified is "UNKNOWN", say you cannot name the technique confidently — never substitute ARMBAR or TRIANGLE for a wrist ride or grip fight.`
+    : `- If a video file is attached, the video is your primary evidence for positions, transitions, frames, and submissions. Use the ledger ONLY for macro trunk geometry (spine flattened, hip alignment) and pacing/scramble intensity.`
+}
 - Coach positional hierarchy, wedges and frames: did the athlete establish position before hunting the submission? Did the top player clear frames and pin the hips? Did the bottom player build skeletal structures to manage weight?
 - If the footage is occluded or a scramble is chaotic, say so plainly in the confidence note — never reconstruct hidden grips, hooks, or foot positions.
 - The 3 suggestedCorrections must be grappling corrections (frames, hips, posture, underhooks, guard retention, passing stability, control before submission) — never striking corrections.`
     : ''
+
+  const visionLedgerBlock =
+    isGrappling && args.visionLedger?.video_analysis_ledger?.length
+      ? `
+
+VIDEO ANALYSIS LEDGER (VERIFIED — ABSOLUTE SOURCE OF TRUTH for this grappling clip):
+${JSON.stringify(
+  {
+    video_analysis_ledger: args.visionLedger.video_analysis_ledger,
+    forbidden_claims: args.visionLedger.forbidden_claims ?? [],
+    unknowns: args.visionLedger.unknowns ?? [],
+    video_quality_notes: args.visionLedger.video_quality_notes ?? [],
+  },
+  null,
+  2,
+)}
+
+`
+      : ''
+
+  const burst = args.temporalEvidence?.motionBurst
+  const centerSec = burst ? (burst.centerMs / 1000).toFixed(1) : null
+  const temporalBurstBlock = burst
+    ? `
+
+HIGH-RESOLUTION MOTION BURST (±500ms around peak scramble at ${centerSec}s):
+- Peak motion score: ${burst.peakScore.toFixed(2)} (${burst.captureReason}).
+- This burst is the highest-intensity window in the clip — prioritize coaching the transition visible here (back take, combo, scramble).
+- Do not invent details absent from burst pose frames or the verified vision ledger.
+- Burst frame count: ${burst.frames.length}; focus target: ${burst.focusTarget}.
+${burst.eventKind ? `- Trigger: ${burst.eventKind}` : ''}
+`
+    : ''
+
+  const exchangeWindowsBlock =
+    args.temporalEvidence?.exchangeWindows?.length
+      ? `
+
+EXCHANGE WINDOWS (Phase 3 — strike/fault detections were gated to these intervals):
+${JSON.stringify(args.temporalEvidence.exchangeWindows, null, 2)}
+`
+      : ''
 
   return `You are Musashi Fight Intelligence - an elite combat-sports coach and tactical fight analyst.
 
@@ -185,6 +237,9 @@ CRITICAL CONTRACT:
 - Do not structure the response as Moment 1 / Moment 2 / Moment 3. Timestamps are evidence, not the main structure.
 - When evidence allows, return exactly 3 high-value adjustments: technical, tactical, and training/habit.
 ${grapplingOverrideBlock}
+${visionLedgerBlock}
+${temporalBurstBlock}
+${exchangeWindowsBlock}
 SOURCE INFLUENCE LIBRARY:
 Use these as analytical lenses only. Do not copy any creator, do not cite paid instructionals, and do not imitate a living person's voice. Musashi must have its own original voice: direct, precise, serious, evidence-based, and coach-like.
 - tactical pattern recognition: stance matchups, entries, exits, traps, feints, counters, range games, and why a technique works against this opponent.
@@ -404,6 +459,13 @@ async function attemptCoachingWithModel(args: {
   }
   parts.push({ text: args.prompt })
 
+  // Gemini 3.x Pro rejects thinkingBudget:0 ("only works in thinking mode").
+  // Use thinkingLevel for 3.x; keep thinkingBudget for 2.5 Flash-style models.
+  const isGemini3 = /gemini-3/i.test(args.model)
+  const thinkingConfig = isGemini3
+    ? { thinkingLevel: 'LOW' as const }
+    : { thinkingBudget: 0 }
+
   const body = JSON.stringify({
     contents: [{ role: 'user', parts }],
     generationConfig: {
@@ -412,7 +474,7 @@ async function attemptCoachingWithModel(args: {
       topK: 40,
       maxOutputTokens: 8192,
       responseMimeType: 'application/json',
-      thinkingConfig: { thinkingBudget: 0 },
+      thinkingConfig,
     },
   })
 
@@ -465,6 +527,10 @@ export async function generateGroundedCoaching(args: {
   videoMimeType?: string
   /** Coach-brain context: selectedSport, clipType, userQuestion, poseEngine, poseQuality. */
   coachBrain?: CoachBrainContext
+  /** Verified vision ledger (Phase 2 SessionEvidence merge output). */
+  visionLedger?: FactualLedger | null
+  /** Phase 3 temporal evidence (exchange windows + motion burst). */
+  temporalEvidence?: TemporalEvidence | null
 }): Promise<{ model: string; payload: CoachingPayload; rawText: string }> {
   // DRY_RUN short-circuit — returns a deterministic mock payload so smoke
   // tests and local iteration don't burn Gemini tokens. Toggle via env:
@@ -487,6 +553,8 @@ export async function generateGroundedCoaching(args: {
     retrievedSnippets: args.retrievedSnippets,
     focusTarget: args.focusTarget,
     coachBrain: args.coachBrain,
+    visionLedger: args.visionLedger,
+    temporalEvidence: args.temporalEvidence,
   })
 
   // Phase 2: dedupe + LRU result cache. Two callers with literally identical

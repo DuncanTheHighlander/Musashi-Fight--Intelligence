@@ -85,6 +85,8 @@ export type CoachBrainContext = Readonly<{
   poseEngine?: string | null
   /** 0..1 score or 'low' | 'medium' | 'high'. */
   poseQuality?: number | string | null
+  /** Cross-session recurring faults (Phase 3). Labels only — current evidence must still support claims. */
+  recurringFaults?: ReadonlyArray<string>
 }>
 
 /**
@@ -193,12 +195,28 @@ export function buildCoachBrainBlock(ctx: CoachBrainContext = {}): string {
   if (ctx.fighterFocus) contextLines.push(`Fighter focus: ${ctx.fighterFocus}`)
   if (ctx.userQuestion) contextLines.push(`User question: ${ctx.userQuestion}`)
 
+  const historicalBlock =
+    ctx.recurringFaults && ctx.recurringFaults.length > 0
+      ? [
+          'HISTORICAL ATHLETE DATA:',
+          'This athlete has a known history of these recurring errors:',
+          ...ctx.recurringFaults.map((f) => `- ${f}`),
+          '',
+          'Instructions:',
+          '- Prioritize checking whether these faults appear in the CURRENT evidence (ledger + vision).',
+          '- If the same fault appears again, escalate coaching tone (direct, urgent) and name the repetition explicitly.',
+          '- Do NOT claim a fault happened unless supported by current evidence — history only raises scrutiny.',
+        ].join('\n')
+      : null
+
   const sections: string[] = [
     'MUSASHI COACH BRAIN (sport-specific coaching knowledge — apply it on top of the evidence contract, never against it):',
     contextLines.join('\n'),
     buildPoseEvidenceLines(ctx).join('\n'),
     `GLOBAL COACH RULES:\n${getGlobalCoachRules()}`,
   ]
+
+  if (historicalBlock) sections.push(historicalBlock)
 
   if (brain) {
     sections.push(`SPORT BRAIN (${brain.key}):\n${brain.markdown}`)

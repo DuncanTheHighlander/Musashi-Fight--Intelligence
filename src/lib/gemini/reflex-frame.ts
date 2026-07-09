@@ -213,6 +213,8 @@ export function buildReflexFramePrompt(context: ReflexFrameContext = {}): string
   const focusTarget = normalizeFocusTarget(context.focusTarget)
   const fighterMemory = context.fighterProfile ?? context.fighterProfiles
   const gymRuleMemory = context.gymRules ?? context.adminRules
+  const sport = String(context.discipline || context.sport || '').trim()
+  const clipType = String(context.clipType || '').trim()
 
   return [
     'You are Musashi Reflex, an elite real-time fight intelligence engine.',
@@ -220,6 +222,14 @@ export function buildReflexFramePrompt(context: ReflexFrameContext = {}): string
     'Do not rely on MediaPipe-style heuristics when vision can decide directly.',
     'Map all visible fighter coordinates onto a 0-1000 coordinate plane.',
     'Return tactical semantics and spatial mapping in one JSON object.',
+    '',
+    ...(sport
+      ? [
+          `COMBAT SPORT: ${sport}`,
+          'Coach ONLY for this sport. Never default to boxing cues when the scene is grappling, fencing, or another discipline.',
+        ]
+      : ['COMBAT SPORT: not specified — infer from the frame, do not assume boxing.']),
+    ...(clipType ? [`CLIP TYPE: ${clipType}`] : []),
     '',
     'VOICE OF SENSEI CONTRACT:',
     `- cue must be ${SENSEI_CUE_MAX_WORDS} words or fewer.`,

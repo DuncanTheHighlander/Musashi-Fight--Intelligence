@@ -82,7 +82,7 @@ export default function LibrarySection() {
     try {
       const res = await fetch('/api/library')
       if (res.status === 401) {
-        window.location.href = '/login'
+        window.location.href = '/welcome'
         return
       }
       const data = await parseApiResponse(res) as Record<string, any>

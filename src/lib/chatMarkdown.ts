@@ -15,6 +15,7 @@ export type ChatMdBlock =
   | { type: 'list'; items: string[] }
 
 export function parseChatMarkdown(input: string): ChatMdBlock[] {
+  if (typeof input !== 'string' || !input.trim()) return []
   const lines = input.replace(/\r\n/g, '\n').split('\n')
   const blocks: ChatMdBlock[] = []
   let paragraphBuf: string[] = []

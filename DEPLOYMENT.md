@@ -115,3 +115,18 @@ Windows note: `build:cf` needs Developer Mode ON (symlinks) — or deploy from W
 - Password reset email arrives (Resend)
 
 Never set `MUSASHI_DISABLE_AUTH` in production — startup validation refuses to boot.
+
+## 9. Mobile store shells (after web is live)
+
+```powershell
+pnpm check:mobile-release   # appId, https URL, allowBackup, iOS usage strings
+pnpm mobile:sync
+pnpm mobile:android         # Play AAB via Android Studio
+# on a Mac: pnpm mobile:ios
+```
+
+- Gap inventory: `docs/superpowers/specs/2026-07-09-mobile-store-gaps.md`
+- Data safety / App Privacy: `docs/STORE_DATA_SAFETY.md`
+- Device QA (welcome, 10s/30s trimmer, thumbs-down): `docs/MOBILE_STORE_QA.md`
+
+`MUSASHI_APP_URL` and `mobile/capacitor.config.json` → `server.url` must be the same host.

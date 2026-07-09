@@ -184,6 +184,21 @@ describe('buildCoachBrainBlock', () => {
     expect(block).toContain('Event → Consequence → Correction → Drill')
   })
 
+  it('includes HISTORICAL ATHLETE DATA when recurring faults are provided', () => {
+    const block = buildCoachBrainBlock({
+      selectedSport: 'bjj',
+      recurringFaults: ['hips flattened on bottom', 'guard dropping before entries'],
+    })
+    expect(block).toContain('HISTORICAL ATHLETE DATA')
+    expect(block).toContain('hips flattened on bottom')
+    expect(block).toContain('Do NOT claim a fault happened unless supported by current evidence')
+  })
+
+  it('omits HISTORICAL section when recurring faults are empty', () => {
+    const block = buildCoachBrainBlock({ selectedSport: 'boxing', recurringFaults: [] })
+    expect(block).not.toContain('HISTORICAL ATHLETE DATA')
+  })
+
   it('blocks fake numeric precision via the evidence rules', () => {
     const block = buildCoachBrainBlock({ selectedSport: 'boxing' })
     expect(block).toContain('never output them as measurements')

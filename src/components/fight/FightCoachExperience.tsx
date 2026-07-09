@@ -20,6 +20,7 @@ import {
 } from '@/components/ui/alert-dialog'
 import { useToast } from '@/hooks/use-toast'
 import { CompactFocusToggle } from '@/components/fight/FocusToggle'
+import { PoseQualityBadge } from '@/components/fight/PoseQualityBadge'
 import RotatingWisdom from '@/components/fight/RotatingWisdom'
 import ChatMarkdown from '@/components/fight/ChatMarkdown'
 import {
@@ -33,12 +34,13 @@ import {
 } from '@/lib/fightLocalStore'
 import {
   type KinematicsSnapshot,
+  type LandmarkHistory,
 } from '@/lib/kinematics'
 import type { NormalizedLandmark } from '@mediapipe/tasks-vision'
 // Video upload now routed through /api/fight server action (keeps API key secure)
 import { segmentExchanges, type ExchangeTimeline } from '@/services/exchangeSegmenter'
 import { detectPatterns, exportPatternsForAI, type PatternAnalysisResult } from '@/services/patternDetector'
-import { parseApiResponse } from '@/lib/safeJson'
+import { parseApiResponse, fetchAndParseApiResponse } from '@/lib/safeJson'
 import { uploadMarketplaceFile } from '@/lib/storage/uploadClient'
 import { toAssetRef } from '@/lib/storage/assetRef'
 import { getPerformanceProfile, SERVER_DEFAULT_PROFILE } from '@/lib/performanceProfile'
@@ -68,11 +70,15 @@ import { FightAnalyzer } from '@/components/video/FightAnalyzer'
 import { pickByClick } from '@/lib/pose/fighterSelection'
 import { isRtmposeReady, rtmposeRequested } from '@/lib/pose/rtmposeBackend'
 import type { PoseEngineInfo } from '@/lib/pose/poseQuality'
+import { filterFramesByVisibility } from '@/lib/pose/poseQuality'
 import type { FightEvidenceLedger } from '@/lib/fightlang/ledger'
 import { createEmptyLedger, ingestFrameEvidence } from '@/lib/compiler/evidenceCompiler'
 import { FightOverlay } from '@/components/overlay/FightOverlay'
 import { CoachingPanel } from '@/components/feedback/CoachingPanel'
+import VideoTrimmer from '@/components/fight/VideoTrimmer'
 import { sanitizeCoachText, looksLikeCoachingJson } from '@/lib/feedback/coachFeedback'
+import { probeVideoDuration } from '@/lib/videoTrim'
+import { FREE_MAX_VIDEO_SEC, PRO_MAX_VIDEO_SEC, SHOGUN_MAX_VIDEO_SEC } from '@/lib/videoTierLimits'
 import type {
   PoseFrame as FightLangPoseFrame,
   PoseLandmark as FightLangPoseLandmark,
@@ -90,6 +96,10 @@ import {
   type MediaPreloadOutcome,
 } from '@/lib/bootVerification'
 import { dedupeInflight, fingerprintSlice } from '@/lib/ai/clientInflight'
+import { findPeakMotionMs, PEAK_MOTION_THRESHOLDS } from '@/services/motionScore'
+import { captureBurstFromBuffer } from '@/services/captureBurst'
+import { isGrapplingClip } from '@/lib/grapplingAnalysisPrompt'
+import type { MotionBurstEvidence } from '@/lib/evidence/sessionEvidenceExtensions'
 import {
   CLIP_TYPE_OPTIONS,
   SPORT_OPTIONS,
@@ -110,6 +120,29 @@ function getFightLangSchedule(durSec: number) {
     return { fastDelayMs: 400, fastIntervalMs: 3200, llmDelayMs: 2200, llmIntervalMs: 8000, minFramesFast: 10, minFramesLlm: 14 }
   }
   return { fastDelayMs: 1200, fastIntervalMs: 5000, llmDelayMs: 4200, llmIntervalMs: 12000, minFramesFast: 18, minFramesLlm: 26 }
+}
+
+function poseFramesToLandmarkHistories(frames: FightLangPoseFrame[]): {
+  A: LandmarkHistory[]
+  B: LandmarkHistory[]
+} {
+  const A: LandmarkHistory[] = []
+  const B: LandmarkHistory[] = []
+  const toNorm = (lm: FightLangPoseLandmark): NormalizedLandmark => ({
+    x: lm.x,
+    y: lm.y,
+    z: lm.z ?? 0,
+    visibility: lm.visibility ?? 1,
+  })
+  for (const f of frames) {
+    if (f.actors.A?.length) {
+      A.push({ timestampMs: f.tMs, landmarks: f.actors.A.map(toNorm) })
+    }
+    if (f.actors.B?.length) {
+      B.push({ timestampMs: f.tMs, landmarks: f.actors.B.map(toNorm) })
+    }
+  }
+  return { A, B }
 }
 
 type PlaybackSnapshot = {
@@ -339,6 +372,21 @@ type ChatMessage = {
   content: string
 }
 
+function normalizeChatMessages(raw: unknown): ChatMessage[] {
+  if (!Array.isArray(raw)) return []
+  return raw
+    .filter((m): m is { role: string; content?: unknown } => Boolean(m && typeof m === 'object'))
+    .filter((m) => m.role === 'user' || m.role === 'assistant')
+    .map((m) => ({
+      role: m.role as ChatMessage['role'],
+      content: typeof m.content === 'string' ? m.content : '',
+    }))
+}
+
+function asChatContent(value: unknown): string {
+  return sanitizeCoachText(typeof value === 'string' ? value : '')
+}
+
 type ReflexResponse = {
   cue: string
   focus?: string
@@ -515,6 +563,7 @@ export default function FightCoachExperience({
   // request silently fail or spam the toast system.
   const [aiQuotaState, setAiQuotaState] = useState<AiQuotaState | null>(null)
   const fightLangPoseFramesRef = useRef<FightLangPoseFrame[]>([])
+  const pose3DFramesRef = useRef<FightLangPoseFrame[]>([])
   /** One FightLang buffer sample per ~100ms of *video* time (wall-clock throttle broke seek pre-scan). */
   const lastFightLangVideoBucketRef = useRef<number | null>(null)
   const clipEndPassCountRef = useRef(0)
@@ -581,6 +630,9 @@ export default function FightCoachExperience({
   // every analyze call so the coach softens claims on fallback/weak pose data.
   const [poseEngineInfo, setPoseEngineInfo] = useState<PoseEngineInfo | null>(null)
   const poseEngineInfoRef = useRef<PoseEngineInfo | null>(null)
+  const [poseQualityOverride, setPoseQualityOverride] = useState(false)
+  const poseQualityOverrideRef = useRef(false)
+  poseQualityOverrideRef.current = poseQualityOverride
   const earlyCompileOnceRef = useRef(false)
   /** Fires the AI-coaching consent dialog once per clip, the moment play is first pressed — instead of requiring the user to dig into Advanced Controls. */
   const autoCoachPromptShownRef = useRef(false)
@@ -661,6 +713,10 @@ export default function FightCoachExperience({
       }),
     [],
   )
+  const isPoseQualitySpendBlocked = useCallback(() => {
+    if (poseQualityOverrideRef.current) return false
+    return poseEngineInfoRef.current?.quality?.recommendation === 'request_better_clip'
+  }, [])
   useEffect(() => {
     try {
       const stored = window.localStorage.getItem('musashiSelectedSport')
@@ -732,6 +788,33 @@ export default function FightCoachExperience({
   const presetTemplates = useRef<PresetTemplates | null>(null)
   const { user } = useAuth()
   const isShogun = user?.role === 'shogun'
+  const [isPro, setIsPro] = useState(false)
+  const maxClipSec = isShogun ? SHOGUN_MAX_VIDEO_SEC : isPro ? PRO_MAX_VIDEO_SEC : FREE_MAX_VIDEO_SEC
+  const [trimRequest, setTrimRequest] = useState<File | null>(null)
+
+  useEffect(() => {
+    if (!user || user.role === 'shogun') {
+      setIsPro(user?.role === 'shogun')
+      return
+    }
+    let cancelled = false
+    ;(async () => {
+      try {
+        const res = await fetch('/api/billing/status', { credentials: 'include' })
+        if (!res.ok) {
+          if (!cancelled) setIsPro(false)
+          return
+        }
+        const data = (await res.json()) as { active?: boolean }
+        if (!cancelled) setIsPro(Boolean(data.active))
+      } catch {
+        if (!cancelled) setIsPro(false)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [user])
 
   // YouTube-style breakdown
   const [breakdownLoading, setBreakdownLoading] = useState(false)
@@ -1078,7 +1161,7 @@ export default function FightCoachExperience({
   const redirectToLoginIfUnauthorized = (res: Response): boolean => {
     if (res.status !== 401) return false
     if (typeof window !== 'undefined') {
-      window.location.href = '/login'
+      window.location.href = '/welcome'
     }
     return true
   }
@@ -1183,6 +1266,7 @@ export default function FightCoachExperience({
     localSessionIdRef.current = sessionId
     poseEngineInfoRef.current = null
     setPoseEngineInfo(null)
+    setPoseQualityOverride(false)
     fightLangPoseFramesRef.current = []
     lastFightLangVideoBucketRef.current = null
     clipEndPassCountRef.current = 0
@@ -1224,6 +1308,24 @@ export default function FightCoachExperience({
 
   const onPickVideoRef = useRef(onPickVideo)
   onPickVideoRef.current = onPickVideo
+
+  /** User-picked uploads must respect free 10s / Pro 30s. Demo + restored skip trimmer. */
+  const requestVideoPick = useCallback(
+    async (file: File, opts?: ClipPickOptions) => {
+      const source = opts?.source ?? 'upload'
+      if (source !== 'upload') {
+        onPickVideoRef.current(file, opts)
+        return
+      }
+      const dur = await probeVideoDuration(file)
+      if (dur > maxClipSec) {
+        setTrimRequest(file)
+        return
+      }
+      onPickVideoRef.current(file, opts)
+    },
+    [maxClipSec],
+  )
 
   const persistClipSession = useCallback(async (file: File, sessionId: string) => {
     if (clipPersistInFlightRef.current) return
@@ -1370,7 +1472,9 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
             image: base64,
             kinematics: kinematicsContext,
             frameAnalysis: true,
-            fighterIdentification: true
+            fighterIdentification: true,
+            focusTarget,
+            ...currentFightClipAiMetadata(),
           }
         })
       })
@@ -1499,6 +1603,8 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
 
   const analyzeFightLangWindow = useCallback(
     async (opts?: { mode?: 'window' | 'full'; windowMs?: number; replayPass?: number }) => {
+      if (isPoseQualitySpendBlocked()) return
+
       const frames = fightLangPoseFramesRef.current
       const video = videoRef.current
       const durMs = video && video.duration > 0 ? Math.round(video.duration * 1000) : 0
@@ -1506,10 +1612,21 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
       const mode = opts?.mode ?? 'window'
       const windowMs =
         opts?.windowMs ?? (durMs > 0 && durMs < 22_000 ? durMs : 15_000)
-      const slice =
+      const rawSlice =
         mode === 'full' && durMs > 0
           ? slicePoseFramesFullClip(frames, durMs)
           : slicePoseFramesWindow(frames, windowMs)
+      const slice = filterFramesByVisibility(
+        rawSlice as Array<{
+          tMs: number
+          actors?: Partial<Record<'A' | 'B', Array<{ visibility?: number }>>>
+        }>,
+        {
+          discipline: selectedSportRef.current,
+          clipType: selectedClipTypeRef.current,
+          focusTarget,
+        },
+      )
       if (slice.length < 4) return
 
       const raceId = ++analyzeRaceIdRef.current
@@ -1525,6 +1642,50 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
         replayPass > 1
           ? ' Timeline was re-sampled across a full replay — tighten the narrative and note any pattern that only shows across the whole clip.'
           : ''
+
+      const clipMeta = currentFightClipAiMetadata()
+      const grappling = isGrapplingClip({
+        discipline: clipMeta.sport,
+        clipType: clipMeta.clipType,
+      })
+      const first = slice[0]
+      const last = slice[slice.length - 1]
+      const kinSlice = localKinematicsSeriesRef.current.filter((k) => {
+        const start = first?.tMs ?? 0
+        const end = last?.tMs ?? Infinity
+        return k.capturedAtMs >= start - 500 && k.capturedAtMs <= end + 500
+      })
+      const kinForPeak = kinSlice.length >= 4 ? kinSlice : localKinematicsSeriesRef.current
+
+      let temporalBurst: MotionBurstEvidence | undefined
+      try {
+        const peak = findPeakMotionMs(kinForPeak, { grappling })
+        const minScore = grappling
+          ? PEAK_MOTION_THRESHOLDS.MIN_BURST_SCORE_GRAPPLING
+          : PEAK_MOTION_THRESHOLDS.MIN_BURST_SCORE
+        if (peak && peak.score >= minScore) {
+          const { A, B } = poseFramesToLandmarkHistories(frames)
+          const burstFocus =
+            focusTarget === 'A' ? 'A' : focusTarget === 'B' ? 'B' : ('both' as const)
+          const raw = captureBurstFromBuffer(A, B, peak.tMs, burstFocus, 'peak-motion', 'peak-motion')
+          temporalBurst = {
+            burstId: raw.burstId,
+            centerMs: raw.centerMs,
+            focusTarget: raw.focusTarget,
+            captureReason: 'peak-motion',
+            peakScore: peak.score,
+            eventKind: 'peak-motion',
+            frames: raw.poseFrames.map((f) => ({
+              seq: f.seq,
+              dtMs: f.dtMs,
+              landmarks: f.landmarks,
+              landmarksB: f.landmarksB,
+            })),
+          }
+        }
+      } catch (burstErr) {
+        console.warn('[FightLang] Auto-burst capture failed (non-fatal):', burstErr)
+      }
 
     setFightLangLoading(true)
     try {
@@ -1543,14 +1704,25 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
         selectedSportRef.current,
         selectedClipTypeRef.current,
         geminiFileUriRef.current ?? '',
+        temporalBurst?.centerMs ?? '',
       ])}`
 
-      const res = await dedupeInflight(dedupeKey, () =>
-        fetch('/api/fight/analyze', {
+      const pose3dSlice =
+        pose3DFramesRef.current.length >= 4
+          ? mode === 'full' && durMs > 0
+            ? slicePoseFramesFullClip(pose3DFramesRef.current, durMs)
+            : slicePoseFramesWindow(pose3DFramesRef.current, windowMs)
+          : []
+
+      const result = await dedupeInflight(dedupeKey, () =>
+        fetchAndParseApiResponse<any>('/api/fight/analyze', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             poseFrames: slice,
+            ...(kinSlice.length >= 4 ? { kinematics: kinSlice } : {}),
+            ...(temporalBurst ? { temporalBurst } : {}),
+            ...(pose3dSlice.length >= 4 ? { pose3DFrames: pose3dSlice } : {}),
             userIntent: `Give tactical coaching: openings, counters, habits, and who is controlling space. Ground every claim in the ledger.${dense}${replay}`,
             focusTarget,
             llm: { enabled: true },
@@ -1575,22 +1747,20 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
         })
       )
 
-      // Phase 1+2: detect guard responses BEFORE parseApiResponse, which
-      // throws on certain non-JSON bodies. We always read the body as JSON
-      // when the status is one of our guard codes — `aiGuard` always returns
-      // structured JSON.
-      if (res.status === 401 || res.status === 402 || res.status === 429 || res.status === 503) {
+      if (result.kind === 'guard') {
         if (isStale()) return
-        const guardBody = await res.json().catch(() => null) as { code?: string; hint?: string } | null
-        const retryAfter = Number(res.headers.get('Retry-After') || '') || undefined
-        if (res.status === 401) setAiQuotaState({ kind: 'auth' })
-        else if (res.status === 402) setAiQuotaState({ kind: 'quota_exhausted' })
-        else if (res.status === 429) setAiQuotaState({ kind: 'rate_limited', retryAfterSec: retryAfter })
-        else if (res.status === 503 && guardBody?.code === 'AI_KILL_SWITCH') setAiQuotaState({ kind: 'kill_switch', hint: guardBody.hint })
+        const guardBody = result.body
+        if (result.status === 401) setAiQuotaState({ kind: 'auth' })
+        else if (result.status === 402) setAiQuotaState({ kind: 'quota_exhausted' })
+        else if (result.status === 429) setAiQuotaState({ kind: 'rate_limited', retryAfterSec: result.retryAfter })
+        else if (result.status === 503 && guardBody?.code === 'AI_KILL_SWITCH') {
+          setAiQuotaState({ kind: 'kill_switch', hint: guardBody.hint })
+        }
         return
       }
+
       setAiQuotaState(null)
-      const json = await parseApiResponse<any>(res)
+      const json = result.data
       // Race-ID gate: if a newer analyze call superseded us, drop this result.
       if (isStale()) {
         console.log('[FightLang] Dropping stale analyze result')
@@ -1616,11 +1786,20 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
         if (Array.isArray(json?.overlayAnnotations)) {
           setFightLangOverlayAnnotations(json.overlayAnnotations)
         }
+      } catch (err) {
+        if (!isStale()) {
+          console.warn('[FightLang analyze]', err)
+          toast({
+            title: 'Analysis failed',
+            description: err instanceof Error ? err.message : 'Could not load coaching',
+            variant: 'destructive',
+          })
+        }
       } finally {
         if (!isStale()) setFightLangLoading(false)
       }
     },
-    [currentFightClipAiMetadata, focusTarget]
+    [currentFightClipAiMetadata, focusTarget, isPoseQualitySpendBlocked]
   )
   const styleScanThreeFrames = async () => {
     if (!videoRef.current) return
@@ -1717,9 +1896,11 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
       })
       
       const result = await parseApiResponse(response) as { message: string }
-      const coachingText = sanitizeCoachText(result.message)
-      setMessages((prev) => [...prev, { role: 'assistant', content: coachingText }])
-      speakText(coachingText)
+      const coachingText = asChatContent(result.message)
+      if (coachingText) {
+        setMessages((prev) => [...prev, { role: 'assistant', content: coachingText }])
+        speakText(coachingText)
+      }
     } catch (error) {
       toast({
         title: 'Coaching generation failed',
@@ -1811,9 +1992,11 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
       } else {
         const chat = parsed as { message: string }
         // Guard: a leaked internal coaching-JSON payload becomes clean prose.
-        const chatText = sanitizeCoachText(chat.message)
-        setMessages((prev) => [...prev, { role: 'assistant', content: chatText }])
-        speakText(chatText)
+        const chatText = asChatContent(chat.message)
+        if (chatText) {
+          setMessages((prev) => [...prev, { role: 'assistant', content: chatText }])
+          speakText(chatText)
+        }
       }
     } catch (error) {
       console.error('Chat failed:', error)
@@ -2006,7 +2189,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
       
       setLocalSessionId(id)
       setAnalysis(session.analysis as any)
-      setMessages((session.messages as ChatMessage[]) || [])
+      setMessages(normalizeChatMessages(session.messages))
       
       // Prefer persisted bytes — blob: URLs from a prior tab are revoked after reload.
       if (session.videoBlob && session.videoBlob.byteLength > 0) {
@@ -2212,8 +2395,10 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
       const result = await parseApiResponse(response) as { message?: string; error?: string }
       if (!response.ok) throw new Error(result.error || 'Full clip analysis failed')
 
-      const message = sanitizeCoachText(result.message || 'No response')
-      setMessages([{ role: 'assistant', content: message }])
+      const message = asChatContent(result.message || 'No response')
+      if (message) {
+        setMessages([{ role: 'assistant', content: message }])
+      }
       setInitialAnalysisReady(true)
       setInitialAnalysisStatus(null)
       speakText(message)
@@ -2572,6 +2757,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
         focusTarget,
         analysis,
         kinematics: kinematicsRef.current,
+        ...currentFightClipAiMetadata(),
         ...(geminiFileUri ? { videoFileUri: geminiFileUri } : {})
       }
       
@@ -2661,6 +2847,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
           clip: { durationMs: durMs },
           style: breakdownStyle,
           focusActor: focusTarget,
+          ...currentFightClipAiMetadata(),
         }),
       })
       const json = await parseApiResponse<any>(res)
@@ -2730,16 +2917,17 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
         form.append('action', 'reflex')
         form.append('image', frameBlob, 'frame.jpg')
         const kin = kinematicsForAi()
-          const context = {
-            videoTimeSec:
-              typeof video.currentTime === 'number' && Number.isFinite(video.currentTime) ? video.currentTime : null,
-            analysisSource,
-            selectedFighterId,
-            focusTarget,
-            pov: { myCorner, cornerForFighter: CORNER_FOR_FIGHTER },
-            kinematics: kin,
-            poseFocus: aiFocusPose,
-          }
+        const context = {
+          videoTimeSec:
+            typeof video.currentTime === 'number' && Number.isFinite(video.currentTime) ? video.currentTime : null,
+          analysisSource,
+          selectedFighterId,
+          focusTarget,
+          pov: { myCorner, cornerForFighter: CORNER_FOR_FIGHTER },
+          kinematics: kin,
+          poseFocus: aiFocusPose,
+          ...currentFightClipAiMetadata(),
+        }
         form.append('context', JSON.stringify(context))
 
         const res = await fetch('/api/fight', {
@@ -2982,6 +3170,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
 
     const tryFullAnalyze = () => {
       if (stopped) return
+      if (isPoseQualitySpendBlocked()) return
       const frames = fightLangPoseFramesRef.current
       if (frames.length < sched.minFramesLlm) return
       // Dedup: skip calls when the underlying evidence hasn't changed.
@@ -3006,7 +3195,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
       clearTimeout(startDelay)
       if (llmTimer) clearInterval(llmTimer)
     }
-  }, [videoUrl, clipDurationSec, playbackUnlocked, coachingEnabled, llmCallCount, analyzeFightLangWindow])
+  }, [videoUrl, clipDurationSec, playbackUnlocked, coachingEnabled, llmCallCount, analyzeFightLangWindow, isPoseQualitySpendBlocked])
 
   // Auto-trigger strategy once initial clip analysis finishes (after playback gate opens)
   useEffect(() => {
@@ -3128,6 +3317,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
     setLastCompileError(null)
     poseEngineInfoRef.current = null
     setPoseEngineInfo(null)
+    setPoseQualityOverride(false)
     fightLangPoseFramesRef.current = []
     lastFightLangVideoBucketRef.current = null
     earlyCompileOnceRef.current = false
@@ -3341,6 +3531,17 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
 
   return (
     <div className={idleCollapsed ? 'w-full' : 'min-h-screen w-full bg-background'}>
+      {trimRequest && (
+        <VideoTrimmer
+          file={trimRequest}
+          maxSec={maxClipSec}
+          onConfirm={(trimmed) => {
+            setTrimRequest(null)
+            onPickVideoRef.current(trimmed, { source: 'upload' })
+          }}
+          onCancel={() => setTrimRequest(null)}
+        />
+      )}
       {/* Clip context step — opens on every fresh upload; non-blocking (local pipeline keeps booting). */}
       <Dialog open={sportPickerOpen} onOpenChange={setSportPickerOpen}>
         <DialogContent className="max-w-lg max-h-[85vh] overflow-y-auto">
@@ -3452,7 +3653,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                     className="hidden"
                     onChange={(e) => {
                       const f = e.target.files?.[0]
-                      if (f) onPickVideo(f)
+                      if (f) void requestVideoPick(f)
                       e.target.value = ''
                     }}
                   />
@@ -3488,7 +3689,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                           : 'bg-muted/60 border border-border/50 text-foreground',
                       )}
                     >
-                      {m.role === 'assistant' ? <ChatMarkdown text={m.content} /> : m.content}
+                      {m.role === 'assistant' ? <ChatMarkdown text={m.content ?? ''} /> : (m.content ?? '')}
                     </div>
                   </div>
                 ))}
@@ -3535,10 +3736,16 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
           idleChatSlotEl,
         )
       ) : (
-      <div className="mx-auto max-w-7xl px-4 py-6">
-        <div className="grid grid-cols-1 lg:grid-cols-[1fr,420px] gap-6">
+      <div className="mx-auto w-full max-w-7xl px-4 py-6">
+        {/* Single column always: the whole (app) group renders inside
+            MobileShell's phone-width frame (max-w-[440px], overflow-x-hidden).
+            A viewport-based lg: two-column grid (1fr + 420px) can never fit in
+            that container — it pushed the chat panel outside the frame on
+            desktop, where it was clipped and unreachable. Video stacks above,
+            chat + coaching below, at every screen size. */}
+        <div className="grid grid-cols-1 gap-6">
             {/* LEFT: Video Player */}
-            <div className="space-y-4">
+            <div className="min-w-0 space-y-4">
               {/* Video Container */}
               <div className="overflow-hidden rounded-2xl border border-border/50 bg-black shadow-2xl">
                 {videoUrl && videoFile && (
@@ -3635,6 +3842,16 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                       {poseOverlayOn ? 'Skeleton ON' : 'Skeleton OFF'}
                     </div>
                   )}
+                  {videoUrl && playbackUnlocked && poseEngineInfo && (
+                    <div className="absolute bottom-2 left-2 z-30">
+                      <PoseQualityBadge
+                        info={poseEngineInfo}
+                        blocked={poseEngineInfo.quality?.recommendation === 'request_better_clip'}
+                        overrideActive={poseQualityOverride}
+                        onOverride={() => setPoseQualityOverride(true)}
+                      />
+                    </div>
+                  )}
                   {/* Mute + Slow-Mo buttons */}
                   <div className="absolute right-2 top-2 z-30 flex flex-col gap-1.5">
                     <Button type="button" size="icon" variant="secondary" disabled={!videoUrl} className="h-8 w-8 rounded-full border border-border/60 bg-background/70 shadow-md backdrop-blur-sm disabled:opacity-50" title={videoMuted ? 'Unmute' : 'Mute'} onClick={() => setVideoMuted((m) => !m)}>
@@ -3705,7 +3922,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                         lastFullClipEndRunRef.current = now
                         clipEndPassCountRef.current += 1
                         void compileFightLangFast({ mode: 'full' })
-                        if (coachingEnabled && llmCallCount < LLM_CALL_CAP) {
+                        if (coachingEnabled && llmCallCount < LLM_CALL_CAP && !isPoseQualitySpendBlocked()) {
                           setLlmCallCount((n) => n + 1)
                           void analyzeFightLangWindow({ mode: 'full', replayPass: clipEndPassCountRef.current })
                         }
@@ -3912,7 +4129,11 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                       if (info) {
                         poseEngineInfoRef.current = info
                         setPoseEngineInfo(info)
+                        setPoseQualityOverride(false)
                       }
+                    }}
+                    onPose3DTrackReady={(frames) => {
+                      pose3DFramesRef.current = frames
                     }}
                     onPoseVideoTime={(videoTimeMs) => {
                       latestPoseVideoTimeMsRef.current = videoTimeMs
@@ -4373,8 +4594,8 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
               )}
             </div>
 
-            {/* RIGHT: AI Chat + Coaching Sidebar */}
-            <div className="space-y-4">
+            {/* AI Chat + Coaching (stacks below the video inside the phone frame) */}
+            <div className="min-w-0 space-y-4">
               {/* Upload info */}
               {videoFile && (
                 <div className="rounded-xl border border-border/40 bg-card/30 px-4 py-3">
@@ -4459,7 +4680,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                             : 'bg-muted/60 border border-border/50 text-foreground',
                         )}
                       >
-                        {m.role === 'assistant' ? <ChatMarkdown text={m.content} /> : m.content}
+                        {m.role === 'assistant' ? <ChatMarkdown text={m.content ?? ''} /> : (m.content ?? '')}
                       </div>
                     </div>
                   ))}

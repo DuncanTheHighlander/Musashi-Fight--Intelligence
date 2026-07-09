@@ -2,6 +2,14 @@ import { describe, it, expect } from 'vitest'
 import { isPublicPath, isAuthRateBucket } from './middleware-helpers'
 
 describe('middleware decisions', () => {
+  it('makes / protected so the first screen is auth (redirect handled in middleware)', () => {
+    expect(isPublicPath('/')).toBe(false)
+  })
+
+  it('treats /welcome as the public auth front door', () => {
+    expect(isPublicPath('/welcome')).toBe(true)
+  })
+
   it('treats /api/auth/logout as public so expired sessions can still log out', () => {
     expect(isPublicPath('/api/auth/logout')).toBe(true)
   })

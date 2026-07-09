@@ -2,6 +2,10 @@
 
 Musashi ships to Google Play as a **Capacitor WebView shell** that loads the production web app. This avoids maintaining a separate native codebase while still listing on the Play Store.
 
+**Gap spec (everything still missing for store submit):** [`docs/superpowers/specs/2026-07-09-mobile-store-gaps.md`](./superpowers/specs/2026-07-09-mobile-store-gaps.md)  
+**Data safety answers:** [`docs/STORE_DATA_SAFETY.md`](./STORE_DATA_SAFETY.md) · **Device QA:** [`docs/MOBILE_STORE_QA.md`](./MOBILE_STORE_QA.md)  
+**Release gate:** `pnpm check:mobile-release` (also runs before `pnpm mobile:sync` / `mobile:android`)
+
 ## Architecture
 
 ```
@@ -78,14 +82,17 @@ See [`mobile/README.md`](../mobile/README.md) for emulator / LAN dev URLs.
 - [ ] Signed release AAB built in Android Studio
 - [ ] Package name: `ai.musashi.app` (matches Capacitor `appId`)
 - [ ] App name: **Musashi**
+- [ ] `pnpm check:mobile-release` green (`allowBackup=false`, https `server.url`, correct appId)
 - [ ] Privacy policy URL — `/privacy` on your domain
 - [ ] Terms URL — `/terms` on your domain
 - [ ] 512×512 store icon (generate from `public/musashi-icon.svg` or use `public/musashi-icon-512.png`)
-- [ ] Feature graphic + phone screenshots (Fight Lab, marketplace, etc.)
+- [ ] Feature graphic + phone screenshots (Welcome/sign-in, Fight Lab, trimmer, coaching)
 - [ ] Short + full description
 - [ ] Content rating questionnaire (sports / fitness)
-- [ ] Data safety form (camera, video upload, account data — align with privacy policy)
+- [ ] Data safety form — fill from [`STORE_DATA_SAFETY.md`](./STORE_DATA_SAFETY.md)
+- [ ] Device QA matrix in [`MOBILE_STORE_QA.md`](./MOBILE_STORE_QA.md) signed off
 - [x] In-app account deletion (Play policy requirement — done in code: Profile → Danger Zone; also declare the deletion URL/path in the data safety form)
+- [x] `android:allowBackup="false"` on release manifest
 
 ### Recommended
 
@@ -108,6 +115,8 @@ The Capacitor shell and PWA share the same web codebase; Play Store is optional 
 - Session cookies / auth tokens behave like mobile Safari/Chrome
 - Rotate secrets via `wrangler secret put` — no app store resubmit needed for API key rotation
 - Do not embed `.env` values in the Android project
+- Release manifest sets `android:allowBackup="false"`
+- Never ship `cleartext: true` — `pnpm check:mobile-release` blocks it
 
 ## Troubleshooting
 

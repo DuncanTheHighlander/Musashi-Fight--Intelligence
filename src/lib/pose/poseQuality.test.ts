@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { assessDenseTrackQuality, cloudTrackUsable } from './poseQuality'
+import { assessDenseTrackQuality, cloudTrackUsable, filterFramesByVisibility } from './poseQuality'
 
 type Lm = { x: number; y: number; visibility?: number }
 
@@ -59,5 +59,65 @@ describe('assessDenseTrackQuality', () => {
     expect(q.overall).toBe('low')
     expect(q.coverage).toBe(0)
     expect(q.footConfidence).toBe(0)
+  })
+})
+
+describe('filterFramesByVisibility', () => {
+  it('keeps striking frames with visible wrists and drops low-visibility frames', () => {
+    const good = {
+      tMs: 0,
+      actors: {
+        A: Array.from({ length: 33 }, (_, i) => ({
+          x: 0.5,
+          y: 0.5,
+          visibility: [15, 16].includes(i) ? 0.9 : 0.5,
+        })),
+      },
+    }
+    const bad = {
+      tMs: 100,
+      actors: {
+        A: Array.from({ length: 33 }, (_, i) => ({
+          x: 0.5,
+          y: 0.5,
+          visibility: [15, 16].includes(i) ? 0.1 : 0.5,
+        })),
+      },
+    }
+    const out = filterFramesByVisibility([good, bad], {
+      discipline: 'boxing',
+      focusTarget: 'A',
+    })
+    expect(out).toHaveLength(1)
+    expect(out[0]?.tMs).toBe(0)
+  })
+
+  it('uses trunk joints for grappling clips', () => {
+    const good = {
+      tMs: 0,
+      actors: {
+        A: Array.from({ length: 33 }, (_, i) => ({
+          x: 0.5,
+          y: 0.5,
+          visibility: [11, 12, 23, 24].includes(i) ? 0.8 : 0.1,
+        })),
+      },
+    }
+    const bad = {
+      tMs: 100,
+      actors: {
+        A: Array.from({ length: 33 }, (_, i) => ({
+          x: 0.5,
+          y: 0.5,
+          visibility: [11, 12, 23, 24].includes(i) ? 0.1 : 0.9,
+        })),
+      },
+    }
+    const out = filterFramesByVisibility([good, bad], {
+      discipline: 'bjj',
+      focusTarget: 'both',
+    })
+    expect(out).toHaveLength(1)
+    expect(out[0]?.tMs).toBe(0)
   })
 })

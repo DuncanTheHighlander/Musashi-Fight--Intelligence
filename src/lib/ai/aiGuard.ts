@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { enforceUsage, type MusashiAction } from '@/lib/musashiUsage'
 import type { MusashiUser } from '@/lib/musashiAuth'
-import { requireUser } from '@/lib/musashiAuth'
+import { assertEmailVerified, requireUser } from '@/lib/musashiAuth'
 
 /**
  * Shared "wallet gate" for every AI-spending route.
@@ -199,7 +199,7 @@ export const aiErrorResponse = (err: unknown): NextResponse => {
       {
         error: 'Free video analysis limit reached.',
         code: 'FREE_VIDEO_QUOTA',
-        hint: 'Free includes 1 AI video (10s max). Upgrade to Pro for weekly 30s clips. Marketplace stays available.',
+        hint: 'Free includes 2 AI videos (10s max). Upgrade to Pro for weekly 30s clips. Marketplace stays available.',
       },
       402
     )

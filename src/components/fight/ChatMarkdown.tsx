@@ -17,7 +17,7 @@ function InlineText({ text }: { text: string }) {
 }
 
 export default function ChatMarkdown({ text }: { text: string }) {
-  const blocks = parseChatMarkdown(text)
+  const blocks = parseChatMarkdown(text ?? '')
   if (blocks.length === 0) return null
 
   return (

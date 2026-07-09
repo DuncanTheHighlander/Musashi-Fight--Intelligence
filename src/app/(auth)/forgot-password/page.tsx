@@ -101,7 +101,7 @@ export default function ForgotPasswordPage() {
           </CardContent>
           <CardFooter className="flex flex-col gap-3">
             <div className="text-center text-sm text-muted-foreground">
-              <Link href="/login" className="font-medium text-primary hover:underline">
+              <Link href="/welcome" className="font-medium text-primary hover:underline">
                 Back to sign in
               </Link>
             </div>

@@ -31,6 +31,7 @@ except ModuleNotFoundError:  # Modal deploy imports this file before building th
 APP_ROOT = Path("/root/musashi")
 MODEL_PATH = Path("/models/rtmpose-halpe26.onnx")
 REMOTE_PIPELINE_PATH = "/root/musashi/cloud/pose_pipeline.py"
+REMOTE_LIFTER_PATH = "/root/musashi/cloud/pose3d_lifter.py"
 REMOTE_MODEL_PATH = "/models/rtmpose-halpe26.onnx"
 
 image = (
@@ -44,6 +45,7 @@ image = (
         "opencv-python-headless>=4.10,<5",
     )
     .add_local_file("cloud/pose_pipeline.py", REMOTE_PIPELINE_PATH)
+    .add_local_file("cloud/pose3d_lifter.py", REMOTE_LIFTER_PATH)
     .add_local_file("public/models/rtmpose-halpe26.onnx", REMOTE_MODEL_PATH)
 )
 
@@ -147,6 +149,20 @@ async def analyze_pose(request: Request):
         except OSError:
             pass
 
+    pose3d_frames = None
+    lift3d_raw = str(form.get("lift3d", os.environ.get("MUSASHI_ENABLE_POSE_3D", "false"))).lower()
+    lift3d_enabled = lift3d_raw in {"1", "true", "yes", "on"}
+    if lift3d_enabled and use_rtmpose and frames:
+        try:
+            sys.path.insert(0, str(APP_ROOT / "cloud"))
+            from pose3d_lifter import try_lift_pose3d
+
+            pose3d_frames = try_lift_pose3d(frames, fps=fps, enabled=True)
+        except Exception as exc:
+            # Never fail the 2D response because 3D lifting failed.
+            pose3d_frames = None
+            print(f"[musashi-pose-api] 3D lift failed (2D-only): {exc}")
+
     candidate_frames = sum(1 for frame in frames if frame.get("candidates"))
     two_fighter_frames = sum(1 for frame in frames if len(frame.get("candidates", [])) >= 2)
     elapsed_ms = round((time.time() - started) * 1000)
@@ -159,6 +175,8 @@ async def analyze_pose(request: Request):
             "candidateFrames": candidate_frames,
             "twoFighterFrames": two_fighter_frames,
             "elapsedMs": elapsed_ms,
+            "pose3DEnabled": pose3d_frames is not None,
         },
         "frames": frames,
+        "pose3DFrames": pose3d_frames,
     }

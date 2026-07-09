@@ -15,6 +15,8 @@ import { User, Mail, Shield, Calendar, Activity, Loader2, TriangleAlert, ShieldC
 import { useSection } from '@/contexts/SectionContext'
 import { SectionShell } from '@/components/ui/section-header'
 import { parseApiResponse } from '@/lib/safeJson'
+import { sendVerificationEmail } from '@/lib/auth'
+import Link from 'next/link'
 
 /** In-app account deletion — required by Apple 5.1.1(v) and Google Play for
  *  apps with account creation. Two-step: reveal, then password + confirm. */
@@ -175,13 +177,89 @@ function AiConsentCard() {
   )
 }
 
+/** Prompt unverified users to confirm email (required for AI coaching in production). */
+function EmailVerificationCard({
+  email,
+  verified,
+  onVerifiedRefresh,
+}: {
+  email: string
+  verified: boolean
+  onVerifiedRefresh: () => Promise<void>
+}) {
+  const { toast } = useToast()
+  const [sending, setSending] = useState(false)
+
+  if (verified) {
+    return (
+      <Card className="border-border/50">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-lg">
+            <Mail className="h-5 w-5 text-primary" />
+            Email
+          </CardTitle>
+          <CardDescription>
+            <span className="text-emerald-600 dark:text-emerald-400">Verified</span> — {email}
+          </CardDescription>
+        </CardHeader>
+      </Card>
+    )
+  }
+
+  const onResend = async () => {
+    setSending(true)
+    try {
+      const result = await sendVerificationEmail()
+      if (result.alreadyVerified) {
+        await onVerifiedRefresh()
+        toast({ title: 'Email already verified' })
+        return
+      }
+      toast({
+        title: 'Verification email sent',
+        description: result.dryRun
+          ? 'Email provider is in dry-run mode (dev). Check server logs for the link.'
+          : `Check ${email} for a Musashi verification link.`,
+      })
+    } catch (err) {
+      toast({
+        title: 'Could not send email',
+        description: err instanceof Error ? err.message : 'Try again later',
+        variant: 'destructive',
+      })
+    } finally {
+      setSending(false)
+    }
+  }
+
+  return (
+    <Card className="border-amber-500/30 bg-amber-500/5">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-lg">
+          <Mail className="h-5 w-5 text-amber-600" />
+          Verify your email
+        </CardTitle>
+        <CardDescription>
+          Confirm <strong>{email}</strong> to unlock AI coaching analysis. Marketplace browsing still works.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <Button type="button" onClick={() => void onResend()} disabled={sending} className="h-10">
+          {sending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+          {sending ? 'Sending…' : 'Resend verification email'}
+        </Button>
+      </CardContent>
+    </Card>
+  )
+}
+
 export default function ProfileSection() {
   const router = useRouter()
-  const { user, loading } = useAuth()
+  const { user, loading, checkSession } = useAuth()
   const { setActiveSection } = useSection()
 
   useEffect(() => {
-    if (!loading && !user) router.push('/login')
+    if (!loading && !user) router.push('/welcome')
   }, [loading, router, user])
 
   if (loading) {
@@ -310,13 +388,18 @@ export default function ProfileSection() {
             <Button variant="outline" className="justify-start h-10" onClick={() => setActiveSection('library')}>
               View Library
             </Button>
-            <Button variant="outline" className="justify-start h-10" disabled>
-              Account Settings (Coming Soon)
+            <Button variant="outline" className="justify-start h-10" asChild>
+              <Link href="/pricing">Billing &amp; plans</Link>
             </Button>
           </div>
         </CardContent>
       </Card>
 
+      <EmailVerificationCard
+        email={user.email}
+        verified={Boolean(user.emailVerifiedAt)}
+        onVerifiedRefresh={checkSession}
+      />
       <AiConsentCard />
       <DangerZoneCard isAdmin={user.role === 'shogun'} />
     </SectionShell>

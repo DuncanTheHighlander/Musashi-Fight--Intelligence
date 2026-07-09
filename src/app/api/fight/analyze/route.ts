@@ -15,6 +15,16 @@ import { maybeEnforceVideoFromAnalyzeRequest } from '@/lib/musashiUsage'
 import { getDbOrNull } from '@/lib/db'
 import { getCurrentUser } from '@/lib/musashiAuth'
 import { saveAnalysisLedger } from '@/lib/ledgerStore'
+import { saveLedgerPoseSnapshot } from '@/lib/trainingDatasetStore'
+import { buildSessionEvidence } from '@/lib/evidence/sessionEvidence'
+import {
+  buildVisionLedger,
+  fightLangToVerificationCandidate,
+  verifyVisionLedger,
+} from '@/lib/evidence/verifyEvidenceLedger'
+import type { MotionBurstEvidence, TemporalEvidence } from '@/lib/evidence/sessionEvidenceExtensions'
+import { clientKinematicsToFightLang } from '@/lib/compiler/segmentation'
+import { getRecurringFaultsForUser } from '@/lib/coachBrain/recurringFaults'
 
 export const maxDuration = 60
 
@@ -49,6 +59,12 @@ type AnalyzeRequest = {
   clipType?: string
   /** Pose pipeline metadata: which engine fed the ledger and how clean the tracking was. */
   pose?: { engine?: string; quality?: number | string }
+  /** Phase 3: peak-motion burst from client captureBurst (pose-aligned). */
+  temporalBurst?: MotionBurstEvidence
+  /** Phase 3: optional exchange windows (usually derived server-side from compile). */
+  exchangeWindows?: Array<{ startMs: number; endMs: number }>
+  /** Phase 5: optional 3D-lifted pose frames from cloud pass (falls back to 2D if absent). */
+  pose3DFrames?: PoseFrame[]
 }
 
 const inMemStore = new InMemoryRetrievalStore()
@@ -154,12 +170,25 @@ export async function POST(request: Request) {
       return NextResponse.json({ success: false, error: 'Provide poseFrames or poseTimeline.' }, { status: 400 })
     }
 
-    const { ledger, overlayAnnotations: compilerOverlays } = compileFightLang({
-      poseFrames,
-      kinematics: Array.isArray(data.kinematics) ? (data.kinematics as any) : undefined,
-      actors: data.actors,
-      clip: data.clip,
-    })
+    const pose3DFrames =
+      Array.isArray(data.pose3DFrames) && data.pose3DFrames.length > 0
+        ? [...data.pose3DFrames].sort((a, b) => a.tMs - b.tMs)
+        : undefined
+
+    const kinematicsForCompile = Array.isArray(data.kinematics)
+      ? clientKinematicsToFightLang(data.kinematics as any)
+      : undefined
+
+    const { ledger, overlayAnnotations: compilerOverlays, exchangeWindows, suppressionStats } =
+      compileFightLang({
+        poseFrames,
+        ...(pose3DFrames ? { pose3DFrames } : {}),
+        kinematics: kinematicsForCompile,
+        actors: data.actors,
+        clip: data.clip,
+        sport: data.sport,
+        clipType: data.clipType,
+      })
 
     const ledgerValidation = validateFightEvidenceLedger(ledger)
     if (!ledgerValidation.ok) {
@@ -170,6 +199,94 @@ export async function POST(request: Request) {
     }
 
     const strategyAssessment = ledger.actors.map((actorId) => inferStyle(ledger, actorId))
+
+    // Phase 2: SessionEvidence — vision flash scan + verification before coaching.
+    let sessionEvidence = buildSessionEvidence({
+      fightLang: ledger,
+      visionLedger: null,
+      sport: data.sport ?? null,
+      clipType: data.clipType ?? null,
+      poseEngine: data.pose?.engine ?? null,
+      poseQuality: data.pose?.quality ?? null,
+      videoSeen: Boolean(data.videoFileUri),
+      ...(pose3DFrames ? { pose3DFrames } : {}),
+    })
+
+    if (llmEnabled && data.videoFileUri) {
+      try {
+        const mode = sessionEvidence.provenance.mode
+        const focusTargetStr =
+          data.focusTarget === 'A'
+            ? 'A'
+            : data.focusTarget === 'B'
+              ? 'B'
+              : data.focusTarget === 'unsure'
+                ? 'both'
+                : 'both'
+
+        const fightLangCandidate =
+          mode === 'striking' ? fightLangToVerificationCandidate(ledger) : null
+
+        let visionLedger = await buildVisionLedger({
+          videoFileUri: data.videoFileUri,
+          videoMimeType: data.videoMimeType,
+          mode,
+          clipDurationMs: data.clip?.durationMs,
+          focusTarget: focusTargetStr,
+          fightLangCandidate,
+        })
+
+        visionLedger = await verifyVisionLedger({
+          candidate: visionLedger,
+          videoFileUri: data.videoFileUri,
+          videoMimeType: data.videoMimeType,
+          mode,
+          clipDurationMs: data.clip?.durationMs,
+        })
+
+        sessionEvidence = buildSessionEvidence({
+          fightLang: ledger,
+          visionLedger,
+          sport: data.sport ?? null,
+          clipType: data.clipType ?? null,
+          poseEngine: data.pose?.engine ?? null,
+          poseQuality: data.pose?.quality ?? null,
+          videoSeen: true,
+          ...(pose3DFrames ? { pose3DFrames } : {}),
+        })
+
+        console.log(
+          `[FightLang] SessionEvidence: mode=${sessionEvidence.provenance.mode} mergeNotes=${sessionEvidence.merged.mergeNotes.join(' | ')}`,
+        )
+      } catch (visionErr) {
+        console.warn(
+          '[FightLang] Vision scan/verify failed (non-fatal, coaching uses FightLang only):',
+          visionErr instanceof Error ? visionErr.message : visionErr,
+        )
+      }
+    }
+
+    const coachingLedger = sessionEvidence.merged.coachingLedger
+
+    const temporal: TemporalEvidence = {
+      exchangeWindows: data.exchangeWindows?.length ? data.exchangeWindows : (exchangeWindows ?? []),
+      motionBurst: data.temporalBurst ?? null,
+      suppressionStats: suppressionStats ?? undefined,
+    }
+
+    let recurringFaultLabels: string[] = []
+    try {
+      const user = await getCurrentUser(request).catch(() => null)
+      if (user?.id) {
+        const recurring = await getRecurringFaultsForUser(user.id, {
+          sport: data.sport ?? null,
+          limit: 5,
+        })
+        recurringFaultLabels = recurring.map((f) => f.label)
+      }
+    } catch {
+      // non-fatal — anonymous and offline paths continue without memory
+    }
 
     let coaching: CoachingPayload | null = null
     let retrieved: {
@@ -224,11 +341,10 @@ export async function POST(request: Request) {
       // fall back to in-memory only retrieval otherwise
       if (db) {
         try {
-          const ledgerAsFactual = ledger as any
           const fullRetrieval = await retrieveForLedger({
             db,
             userId: 'local',
-            ledger: ledgerAsFactual,
+            ledger: coachingLedger as any,
             userIntent: data.userIntent || 'FightLang analysis',
           })
           retrieved = fullRetrieval
@@ -237,14 +353,14 @@ export async function POST(request: Request) {
           console.warn('[FightLang] Full retrieval failed, falling back to in-memory:', e instanceof Error ? e.message : e)
           retrieved = await retrieveSimilarContext({
             store: inMemStore,
-            ledger,
+            ledger: coachingLedger,
             userIntent: data.userIntent || 'FightLang analysis',
           })
         }
       } else {
         retrieved = await retrieveSimilarContext({
           store: inMemStore,
-          ledger,
+          ledger: coachingLedger,
           userIntent: data.userIntent || 'FightLang analysis',
         })
       }
@@ -256,22 +372,25 @@ export async function POST(request: Request) {
       // instead of showing a canned payload.
       try {
         const gen = await generateGroundedCoaching({
-          ledger,
+          ledger: coachingLedger,
           retrievedSnippets: retrieved.snippets,
           focusTarget: data.focusTarget,
           videoFileUri: data.videoFileUri,
           videoMimeType: data.videoMimeType,
+          visionLedger: sessionEvidence.merged.visionFacts,
+          temporalEvidence: temporal,
           coachBrain: {
             selectedSport: data.sport,
             clipType: data.clipType,
             userQuestion: data.userIntent,
             poseEngine: data.pose?.engine,
             poseQuality: data.pose?.quality,
+            recurringFaults: recurringFaultLabels,
           },
         })
         model = gen.model
 
-        const validated = validateCoachingPayloadAgainstLedger({ ledger, payload: gen.payload })
+        const validated = validateCoachingPayloadAgainstLedger({ ledger: coachingLedger, payload: gen.payload })
         coaching = validated.sanitized ?? gen.payload
         llmIssues = validated.issues
       } catch (llmErr) {
@@ -296,7 +415,7 @@ export async function POST(request: Request) {
           const user = await getCurrentUser(request).catch(() => null)
           savedLedgerId = await saveAnalysisLedger({
             db: dbForLedger,
-            ledger,
+            ledger: coachingLedger,
             userId: user?.id ?? null,
             sourceId: data.clip?.assetRef ?? data.clip?.sourceId ?? null,
             context: {
@@ -315,6 +434,20 @@ export async function POST(request: Request) {
                 }
               : null,
           })
+          if (savedLedgerId) {
+            try {
+              await saveLedgerPoseSnapshot({
+                db: dbForLedger,
+                ledgerId: savedLedgerId,
+                poseFrames,
+              })
+            } catch (snapErr) {
+              console.warn(
+                '[TrainingDataset] Pose snapshot save failed (non-fatal):',
+                snapErr instanceof Error ? snapErr.message : snapErr
+              )
+            }
+          }
         } catch (e) {
           console.warn('[FightLang] Ledger save failed (non-fatal):', e instanceof Error ? e.message : e)
         }
@@ -328,7 +461,16 @@ export async function POST(request: Request) {
 
     return NextResponse.json({
       success: true,
-      ledger,
+      ledger: coachingLedger,
+      sessionEvidence: {
+        provenance: sessionEvidence.provenance,
+        mergeNotes: sessionEvidence.merged.mergeNotes,
+        visionLedger: sessionEvidence.merged.visionFacts,
+        temporal,
+        ...(sessionEvidence.pose3DFrames?.length
+          ? { pose3DFrames: sessionEvidence.pose3DFrames, pose3DEnabled: true }
+          : { pose3DEnabled: false }),
+      },
       savedLedgerId,
       strategyAssessment,
       coaching,
@@ -349,6 +491,8 @@ export async function POST(request: Request) {
         retrievalSnippets: retrieved?.snippets?.length ?? 0,
         retrievalTopScore: retrieved?.snippets?.[0]?.score ?? null,
         llmEnabled,
+        evidenceMode: sessionEvidence.provenance.mode,
+        visionVerified: Boolean(sessionEvidence.merged.visionFacts),
       },
     })
   } catch (err) {

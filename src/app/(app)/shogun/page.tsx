@@ -170,7 +170,7 @@ export default function ShogunPage() {
   const loadUsers = useCallback(async () => {
     const res = await fetch('/api/shogun/limits', { method: 'GET' })
     if (res.status === 401) {
-      window.location.href = '/login'
+      window.location.href = '/welcome'
       return
     }
     if (res.status === 403) {
@@ -195,7 +195,7 @@ export default function ShogunPage() {
 
     const res = await fetch(`/api/shogun/prompts?key=${encodeURIComponent(key)}&audit=1`, { method: 'GET' })
     if (res.status === 401) {
-      window.location.href = '/login'
+      window.location.href = '/welcome'
       return
     }
     if (res.status === 403) {
@@ -351,7 +351,7 @@ export default function ShogunPage() {
             </CardHeader>
             <CardFooter>
               <Button asChild>
-                <Link href="/login">Login</Link>
+                <Link href="/welcome">Login</Link>
               </Button>
             </CardFooter>
           </Card>

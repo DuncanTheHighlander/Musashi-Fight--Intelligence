@@ -58,6 +58,7 @@ import { resolvedModels } from '@/lib/gemini/models'
 import { getDbOrNull } from '@/lib/db'
 import {
   buildGeminiReflexFrameRequest,
+  buildReflexFramePrompt,
   extractGeminiText,
   parseReflexFrameJson,
   type ReflexFrameContext,
@@ -1936,39 +1937,19 @@ const handleReflex = async (formData: FormData, user: any) => {
   const b64 = arrayBufferToBase64(await file.arrayBuffer())
   const mime = file.type || 'image/jpeg'
 
-  let focusTarget: 'blue' | 'red' | 'both' = 'both'
+  let frameContext: ReflexFrameContext = {}
   if (context) {
     try {
       const ctx = JSON.parse(context)
-      const ft = ctx.focusTarget
-      if (ft === 'blue' || ft === 'A') focusTarget = 'blue'
-      else if (ft === 'red' || ft === 'B') focusTarget = 'red'
-      else if (ft === 'both') focusTarget = 'both'
+      frameContext = { ...ctx }
     } catch { /* ignore */ }
   }
 
-  const focusInstruction =
-    focusTarget === 'blue'
-      ? 'Focus your cues ONLY on the fighter in the BLUE corner (Fighter A). Ignore the red corner.\n'
-      : focusTarget === 'red'
-        ? 'Focus your cues ONLY on the fighter in the RED corner (Fighter B). Ignore the blue corner.\n'
-        : 'Focus on BOTH fighters. Give cues for whoever needs correction most.\n'
-
-  const system =
-    'You are Musashi Reflex Coach: stoic, brief, intense.\n' +
-    'Your job is micro-corrections only. No essays. No disclaimers.\n' +
-    'Output STRICT JSON only.\n' +
-    focusInstruction
-
-  const prompt =
-    system +
-    'Return STRICT JSON only with schema:\n' +
-    '{"cue": string, "focus": string}\n' +
-    'Rules:\n' +
+  const reflexPrompt =
+    buildReflexFramePrompt(frameContext) +
+    '\nReturn STRICT JSON only: {"cue": string, "focus": string}\n' +
     '- cue must be <= 8 words.\n' +
-    '- focus is one of: "guard", "feet", "timing", "range", "defense", "offense", "clinching", "unknown".\n' +
-    '- If uncertain, still give a best-effort cue and set focus="unknown".\n' +
-    (context ? `Context JSON:\n${context}\n` : '')
+    '- focus is one of: "guard", "feet", "timing", "range", "defense", "offense", "clinching", "unknown".\n'
 
   try {
     if (provider === 'gemini' || (!provider && geminiKey)) {
@@ -1976,27 +1957,18 @@ const handleReflex = async (formData: FormData, user: any) => {
         throw new Error('GEMINI_API_KEY not set')
       }
 
-      const model = process.env.GEMINI_REFLEX_MODEL || process.env.GEMINI_MODEL || 'gemini-3.1-pro-preview'
+      const model = resolvedModels.reflex()
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(geminiKey)}`
+      const requestBody = buildGeminiReflexFrameRequest({
+        imageBase64: b64,
+        mimeType: mime,
+        context: frameContext,
+      })
 
       const resp = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [
-            {
-              role: 'user',
-              parts: [
-                { text: prompt },
-                { inlineData: { mimeType: mime, data: b64 } }
-              ]
-            }
-          ],
-          generationConfig: {
-            temperature: 0.2,
-            responseMimeType: 'application/json'
-          }
-        })
+        body: JSON.stringify(requestBody),
       })
 
       const data: any = await safeParseResponse(resp)
@@ -2004,16 +1976,12 @@ const handleReflex = async (formData: FormData, user: any) => {
         throw new Error(data?.error?.message || 'Gemini request failed')
       }
 
-      const text = data?.candidates?.[0]?.content?.parts?.map((p: any) => p.text).filter(Boolean).join('\n') || ''
-      const parsed = jsonFromText(text)
-      
-      if (!parsed || typeof parsed.cue !== 'string') {
-        throw new Error('Failed to parse model response')
-      }
+      const text = extractGeminiText(data)
+      const parsed = parseReflexFrameJson(text)
 
       return {
-        cue: String(parsed.cue || '').trim() || 'Hands up.',
-        focus: typeof parsed.focus === 'string' ? parsed.focus : undefined
+        cue: parsed.cue.trim() || 'Hands up.',
+        focus: parsed.focus,
       }
     }
 
@@ -2036,7 +2004,7 @@ const handleReflex = async (formData: FormData, user: any) => {
           {
             role: 'user',
             content: [
-              { type: 'text', text: prompt },
+              { type: 'text', text: reflexPrompt },
               { type: 'image_url', image_url: { url: `data:${mime};base64,${b64}` } }
             ]
           }

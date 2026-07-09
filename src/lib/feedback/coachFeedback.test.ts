@@ -144,6 +144,11 @@ describe('sanitizeCoachText', () => {
     expect(out).not.toMatch(/[{}]/)
     expect(out).not.toMatch(/"mainDiagnosis"/)
   })
+
+  it('returns empty string for undefined or blank input', () => {
+    expect(sanitizeCoachText(undefined as unknown as string)).toBe('')
+    expect(sanitizeCoachText('   ')).toBe('')
+  })
 })
 
 describe('looksLikeCoachingJson', () => {

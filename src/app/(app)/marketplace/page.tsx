@@ -160,7 +160,7 @@ export default function MarketplacePage() {
               className="h-10"
               onClick={() => {
                 if (!user) {
-                  router.push('/login')
+                  router.push('/welcome')
                   return
                 }
                 router.push('/marketplace/jobs/new')

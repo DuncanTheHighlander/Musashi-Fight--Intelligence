@@ -75,13 +75,13 @@ export function middleware(request: NextRequest) {
   if (!isPublicPath(pathname)) {
     const sessionCookie = request.cookies.get('musashi_session')
     if (!sessionCookie?.value) {
-      // API routes return 401, page routes redirect to login
+      // API routes return 401, page routes redirect to auth front door
       if (pathname.startsWith('/api/')) {
         return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
       }
-      const loginUrl = new URL('/login', request.url)
-      loginUrl.searchParams.set('redirect', pathname)
-      return NextResponse.redirect(loginUrl)
+      const welcomeUrl = new URL('/welcome', request.url)
+      welcomeUrl.searchParams.set('redirect', pathname)
+      return NextResponse.redirect(welcomeUrl)
     }
   }
 

@@ -60,6 +60,7 @@ describe('parseChatMarkdown', () => {
   test('empty input yields no blocks', () => {
     expect(parseChatMarkdown('')).toEqual([])
     expect(parseChatMarkdown('   \n  \n')).toEqual([])
+    expect(parseChatMarkdown(undefined as unknown as string)).toEqual([])
   })
 })
 

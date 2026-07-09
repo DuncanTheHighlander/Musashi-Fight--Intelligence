@@ -3,7 +3,7 @@
   "appName": "Musashi",
   "webDir": "www",
   "server": {
-    "url": "https://YOUR_PRODUCTION_URL.workers.dev",
+    "url": "https://app.duncanazsmith.workers.dev",
     "cleartext": false,
     "androidScheme": "https"
   },

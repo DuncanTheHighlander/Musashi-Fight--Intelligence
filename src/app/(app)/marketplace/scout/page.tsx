@@ -82,7 +82,7 @@ export default function ScoutOpponentPage() {
         <Card>
           <CardContent className="py-10 text-center space-y-3">
             <h2 className="text-lg font-semibold">Log in to scout an opponent</h2>
-            <Button onClick={() => router.push('/login')}>Log In</Button>
+            <Button onClick={() => router.push('/welcome')}>Log In</Button>
           </CardContent>
         </Card>
       </div>

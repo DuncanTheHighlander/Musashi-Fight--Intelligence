@@ -16,6 +16,7 @@ import type { PoseFrame, PoseLandmark, FightEvidenceLedger } from '@/lib/fightla
 import { generateGroundedBreakdown } from './breakdown-generator'
 import { InMemoryRetrievalStore, retrieveSimilarContext } from '@/lib/retrieval/retrieval'
 import { seedFightKnowledge } from '@/lib/retrieval/fight-knowledge-seed'
+import { buildCoachBrainBlock } from '@/lib/coachBrain/coachBrain'
 
 export const maxDuration = 120
 
@@ -26,6 +27,9 @@ type BreakdownRequest = {
   clip?: { durationMs?: number; fps?: number; sourceId?: string }
   style?: 'commentary' | 'coaching' | 'scouting'
   focusActor?: 'A' | 'B' | 'both'
+  discipline?: string
+  sport?: string
+  clipType?: string
 }
 
 function toPoseLandmarks(arr: number[][]): PoseLandmark[] {
@@ -114,12 +118,18 @@ export async function POST(request: Request) {
     })
 
     // Step 4: Gemini 3.1 Pro breakdown generation
+    const sport = data.sport || data.discipline
     const breakdown = await generateGroundedBreakdown({
       ledger,
       retrievedSnippets: retrieved.snippets,
       styleAssessments,
       style: data.style || 'commentary',
       focusActor: data.focusActor || 'both',
+      coachBrainBlock: buildCoachBrainBlock({
+        selectedSport: sport,
+        clipType: data.clipType,
+        fighterFocus: data.focusActor,
+      }),
     })
 
     return NextResponse.json({

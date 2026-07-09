@@ -17,19 +17,31 @@ import { detectPatterns } from './detectors/patterns'
 import { detectRange } from './detectors/range'
 import { detectRhythm } from './detectors/rhythm'
 import { detectStance } from './detectors/stance'
-import { detectStrikes } from './detectors/strikes'
+import { detectStrikes, hipZDisplacementBw } from './detectors/strikes'
 import { detectFaults } from './detectors/faults'
+import {
+  findExchangeWindows,
+  inExchangeWindow,
+  STRUCTURAL_FAULT_KINDS,
+  type ExchangeWindow,
+} from './segmentation'
 
 export type FightLangCompileInput = Readonly<{
   poseFrames: ReadonlyArray<PoseFrame>
+  /** Phase 5: optional 3D-lifted frames — used only when present; 2D path unchanged otherwise. */
+  pose3DFrames?: ReadonlyArray<PoseFrame>
   kinematics?: ReadonlyArray<KinematicSnapshot>
   clip?: FightEvidenceLedger['clip']
   actors?: ReadonlyArray<ActorId>
+  sport?: string | null
+  clipType?: string | null
 }>
 
 export type FightLangCompileOutput = Readonly<{
   ledger: FightEvidenceLedger
   overlayAnnotations: OverlayAnnotation[]
+  exchangeWindows?: ExchangeWindow[]
+  suppressionStats?: { strikesSkipped: number; faultsSkipped: number }
 }>
 
 function uniqueActorsFromFrames(frames: ReadonlyArray<PoseFrame>): ActorId[] {
@@ -40,6 +52,23 @@ function uniqueActorsFromFrames(frames: ReadonlyArray<PoseFrame>): ActorId[] {
   }
   // keep stable ordering
   return (['A', 'B'] as const).filter((x) => set.has(x))
+}
+
+function latestPose3DFrameAt(
+  frames: ReadonlyArray<PoseFrame> | undefined,
+  tMs: number
+): PoseFrame | null {
+  if (!frames?.length) return null
+  let best: PoseFrame | null = null
+  let bestDt = Number.POSITIVE_INFINITY
+  for (const f of frames) {
+    const dt = Math.abs(f.tMs - tMs)
+    if (dt < bestDt) {
+      best = f
+      bestDt = dt
+    }
+  }
+  return bestDt <= 70 ? best : null
 }
 
 function latestKinematicsAt(kin: ReadonlyArray<KinematicSnapshot>, tMs: number): KinematicSnapshot | null {
@@ -73,6 +102,13 @@ export function compileFightLang(input: FightLangCompileInput): FightLangCompile
   const overlayAnnotations: OverlayAnnotation[] = []
   const lastAnnotationMs: Record<string, number> = {}
   const ANNOTATION_COOLDOWN_MS = 2000
+
+  const exchangeWindows = findExchangeWindows(poseFrames, input.kinematics, {
+    sport: input.sport,
+    clipType: input.clipType,
+  })
+  let strikesSkipped = 0
+  let faultsSkipped = 0
 
   for (const frame of poseFrames) {
     const tMs = frame.tMs
@@ -128,6 +164,8 @@ export function compileFightLang(input: FightLangCompileInput): FightLangCompile
         evidence: geomEvidence,
       })
 
+      const inExchange = inExchangeWindow(tMs, exchangeWindows)
+
       const faultList = detectFaults({
         tMs,
         actorId,
@@ -135,30 +173,51 @@ export function compileFightLang(input: FightLangCompileInput): FightLangCompile
         guardExposureScore: guard.exposureScore,
       })
       for (const f of faultList) {
+        if (!inExchange && STRUCTURAL_FAULT_KINDS.has(f.kind)) {
+          faultsSkipped++
+          continue
+        }
         faults.push(f)
         for (const ev of f.evidence) evidenceIndex.push(ev)
       }
 
-      // Strike detection from kinematics + pose direction.
+      // Strike detection from kinematics + pose direction — gated to exchange windows.
       const handBurstBwps = kin?.actors?.[actorId]?.handBurstBwps ?? null
       const footBurstBwps = kin?.actors?.[actorId]?.footSpeedBwps ?? null
-      // Find previous frame landmarks for direction analysis
       const frameIdx = poseFrames.indexOf(frame)
       const prevFrame = frameIdx > 0 ? poseFrames[frameIdx - 1] : null
       const prevLandmarks = prevFrame?.actors[actorId]
-      const strikeEvts = detectStrikes({
-        tMs,
-        actorId,
-        handBurstBwps,
-        footBurstBwps,
-        thresholdBwps: 1.2,
-        landmarks,
-        prevLandmarks,
-        stanceSide: stance.stanceSide,
-      })
-      for (const e of strikeEvts) {
-        events.push(e)
-        for (const ev of e.evidence) evidenceIndex.push(ev)
+      let strikeEvts: ReturnType<typeof detectStrikes> = []
+      if (inExchange) {
+        const frame3d = latestPose3DFrameAt(input.pose3DFrames, tMs)
+        const prev3d =
+          frameIdx > 0 && input.pose3DFrames
+            ? latestPose3DFrameAt(input.pose3DFrames, poseFrames[frameIdx - 1]!.tMs)
+            : null
+        const landmarks3d = frame3d?.actors[actorId]
+        const prevLandmarks3d = prev3d?.actors[actorId]
+        const hipZDeltaBw =
+          landmarks3d && prevLandmarks3d
+            ? hipZDisplacementBw(landmarks3d, prevLandmarks3d)
+            : null
+
+        strikeEvts = detectStrikes({
+          tMs,
+          actorId,
+          handBurstBwps,
+          footBurstBwps,
+          thresholdBwps: 1.2,
+          landmarks,
+          prevLandmarks,
+          stanceSide: stance.stanceSide,
+          hipZDeltaBw,
+        })
+        for (const e of strikeEvts) {
+          events.push(e)
+          for (const ev of e.evidence) evidenceIndex.push(ev)
+        }
+      } else if (handBurstBwps != null && handBurstBwps >= 1.2) {
+        strikesSkipped++
       }
 
       // Emit state timeline sample (stable UI hook).
@@ -173,7 +232,10 @@ export function compileFightLang(input: FightLangCompileInput): FightLangCompile
       })
 
       // Overlay annotations for medium+ severity faults (cooldown-limited)
-      const notable = faultList.filter((x) => x.severity === 'high' || x.severity === 'medium')
+      const notable = faultList.filter((x) => {
+        if (!inExchange && STRUCTURAL_FAULT_KINDS.has(x.kind)) return false
+        return x.severity === 'high' || x.severity === 'medium'
+      })
       for (const f of notable) {
         const key = `fault_${f.kind}_${actorId}`
         if (tMs - (lastAnnotationMs[key] ?? -Infinity) < ANNOTATION_COOLDOWN_MS) continue
@@ -337,6 +399,11 @@ export function compileFightLang(input: FightLangCompileInput): FightLangCompile
     notes: ['FightLang compiler v1: stance/guard/range/rhythm + placeholder strike events.'],
   }
 
-  return { ledger, overlayAnnotations }
+  return {
+    ledger,
+    overlayAnnotations,
+    exchangeWindows,
+    suppressionStats: { strikesSkipped, faultsSkipped },
+  }
 }
 

@@ -4,6 +4,7 @@ import { AuthProvider } from '@/contexts/AuthContext'
 import { SectionProvider } from '@/contexts/SectionContext'
 import { PageErrorBoundary } from '@/components/PageErrorBoundary'
 import { MobileAppFrame } from '@/components/mobile/MobileAppFrame'
+import { OnboardingGate } from '@/components/auth/OnboardingGate'
 
 export default function AppLayout({
   children,
@@ -13,11 +14,13 @@ export default function AppLayout({
   return (
     <AuthProvider>
       <SectionProvider>
-        <MobileAppFrame>
-          <PageErrorBoundary>
-            {children}
-          </PageErrorBoundary>
-        </MobileAppFrame>
+        <OnboardingGate>
+          <MobileAppFrame>
+            <PageErrorBoundary>
+              {children}
+            </PageErrorBoundary>
+          </MobileAppFrame>
+        </OnboardingGate>
       </SectionProvider>
     </AuthProvider>
   )

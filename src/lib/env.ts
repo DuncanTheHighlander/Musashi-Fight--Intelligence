@@ -12,7 +12,6 @@ type EnvVar = {
 }
 
 const ENV_VARS: EnvVar[] = [
-  { key: 'GEMINI_API_KEY', required: true },
   { key: 'MUSASHI_SESSION_SECRET', required: true, secret: true },
   { key: 'MUSASHI_SHOGUN_EMAIL', required: false },
   { key: 'MUSASHI_SHOGUN_PASSWORD', required: false, secret: true },
@@ -130,6 +129,13 @@ export function validateEnv(): { valid: boolean; errors: string[]; warnings: str
 export async function validateProductionSecrets(): Promise<string[]> {
   const warnings: string[] = []
   if (process.env.NODE_ENV !== 'production') return warnings
+
+  const geminiKey = await getServerSecret('GEMINI_API_KEY')
+  if (!geminiKey) {
+    warnings.push(
+      'Gemini AI secret is not configured (Secrets Store binding SECRET_AI). Fight analysis will not work in production.',
+    )
+  }
 
   const stripeKey = await getServerSecret('STRIPE_SECRET_KEY')
   if (!stripeKey) {

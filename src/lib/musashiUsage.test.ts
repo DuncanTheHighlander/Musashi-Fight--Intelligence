@@ -16,7 +16,7 @@ describe('musashiUsage video tier defaults', () => {
   it('uses product-specified free and pro limits', () => {
     expect(FREE_MAX_VIDEO_SEC).toBe(10)
     expect(PRO_MAX_VIDEO_SEC).toBe(30)
-    expect(FREE_LIFETIME_VIDEOS).toBe(3)
+    expect(FREE_LIFETIME_VIDEOS).toBe(2)
     expect(PRO_WEEKLY_VIDEOS).toBe(10)
   })
 })

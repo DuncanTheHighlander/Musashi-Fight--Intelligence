@@ -6,6 +6,8 @@
  * Lists saved analysis ledgers; each detected event/fault/pattern can be
  * confirmed, rejected, or relabeled. Verdicts accumulate into the labeled
  * dataset (export at /api/fight/ledgers/export) used to tune detectors.
+ * Labeled pose windows auto-save to training_dataset on confirm/relabel
+ * (export at /api/admin/export-training-data).
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
@@ -428,6 +430,11 @@ export default function ReviewPage() {
               <Button size="sm" variant="outline" asChild>
                 <a href="/api/fight/ledgers/export" download>
                   <Download className="h-3.5 w-3.5 mr-1" /> Export dataset
+                </a>
+              </Button>
+              <Button size="sm" variant="outline" asChild>
+                <a href="/api/admin/export-training-data" download>
+                  <Download className="h-3.5 w-3.5 mr-1" /> Export training data
                 </a>
               </Button>
             </div>

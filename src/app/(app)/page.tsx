@@ -8,7 +8,7 @@ import { useSection } from '@/contexts/SectionContext'
 import { useAuth } from '@/hooks/useAuth'
 import VideoTrimmer from '@/components/fight/VideoTrimmer'
 import { probeVideoDuration } from '@/lib/videoTrim'
-import { PRO_MAX_VIDEO_SEC, SHOGUN_MAX_VIDEO_SEC } from '@/lib/videoTierLimits'
+import { FREE_MAX_VIDEO_SEC, PRO_MAX_VIDEO_SEC, SHOGUN_MAX_VIDEO_SEC } from '@/lib/videoTierLimits'
 
 // FightCoachExperience pulls in MediaPipe + WASM. Loading it on the server
 // (or even on the client during the initial RSC payload) crashes the dev
@@ -36,11 +36,37 @@ export default function HomePage() {
   const { activeSection } = useSection()
   const router = useRouter()
   const { user } = useAuth()
-  const maxClipSec = user?.role === 'shogun' ? SHOGUN_MAX_VIDEO_SEC : PRO_MAX_VIDEO_SEC
+  const [isPro, setIsPro] = useState(false)
+  const maxClipSec =
+    user?.role === 'shogun' ? SHOGUN_MAX_VIDEO_SEC : isPro ? PRO_MAX_VIDEO_SEC : FREE_MAX_VIDEO_SEC
   const [trimRequest, setTrimRequest] = useState<File | null>(null)
   const [bootstrapVideoFile, setBootstrapVideoFile] = useState<File | null>(null)
   const [autoPlayFixture, setAutoPlayFixture] = useState(false)
   const fixtureLoadedRef = useRef(false)
+
+  useEffect(() => {
+    if (!user || user.role === 'shogun') {
+      setIsPro(user?.role === 'shogun')
+      return
+    }
+    let cancelled = false
+    ;(async () => {
+      try {
+        const res = await fetch('/api/billing/status', { credentials: 'include' })
+        if (!res.ok) {
+          if (!cancelled) setIsPro(false)
+          return
+        }
+        const data = (await res.json()) as { active?: boolean }
+        if (!cancelled) setIsPro(Boolean(data.active))
+      } catch {
+        if (!cancelled) setIsPro(false)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [user])
 
   useEffect(() => {
     if (process.env.NODE_ENV === 'production' && !new URLSearchParams(window.location.search).get('qaLoop')) return
@@ -227,7 +253,9 @@ export default function HomePage() {
           </div>
           <div className="text-center">
             <div className="text-[15px] font-semibold text-ms-bone">Tap to upload your clip</div>
-            <div className="mt-[5px] font-jbmono text-[11px] text-ms-faint">MP4 · MOV · WEBM — up to 60s</div>
+            <div className="mt-[5px] font-jbmono text-[11px] text-ms-faint">
+              MP4 · MOV · WEBM — free {FREE_MAX_VIDEO_SEC}s · Pro {PRO_MAX_VIDEO_SEC}s
+            </div>
           </div>
         </label>
 

@@ -63,11 +63,13 @@ async function callUpstream(args: {
   video: File
   mode: string
   fps: FormDataEntryValue | null
+  lift3d?: FormDataEntryValue | null
 }): Promise<UpstreamAttempt> {
   const upstreamForm = new FormData()
   upstreamForm.set('mode', args.mode)
   upstreamForm.set('video', args.video, args.video.name)
   if (args.fps !== null) upstreamForm.set('fps', String(args.fps))
+  if (args.lift3d !== null && args.lift3d !== undefined) upstreamForm.set('lift3d', String(args.lift3d))
 
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS)
@@ -174,6 +176,7 @@ export async function POST(request: Request) {
   }
 
   const fps = form.get('fps')
+  const lift3d = form.get('lift3d')
 
   const attempts: UpstreamAttempt[] = []
   for (const plannedTarget of plan) {
@@ -181,7 +184,7 @@ export async function POST(request: Request) {
     if (!endpoint) {
       return jsonError(500, `MUSASHI_POSE_CLOUD_${plannedTarget.toUpperCase()}_URL is not configured.`)
     }
-    const attempt = await callUpstream({ endpoint, target: plannedTarget, token, video, mode, fps })
+    const attempt = await callUpstream({ endpoint, target: plannedTarget, token, video, mode, fps, lift3d })
     attempts.push(attempt)
     if (attempt.ok) {
       return NextResponse.json({

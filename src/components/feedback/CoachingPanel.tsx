@@ -43,7 +43,7 @@ function QuotaStateCard({ state }: { state: CoachingQuotaState }) {
     auth: {
       title: 'Sign in to use live coaching',
       body: 'Tactical analysis is a paid feature. Sign in to unlock the AI coach for your uploaded clips.',
-      cta: { href: '/login', label: 'Sign in' },
+      cta: { href: '/welcome', label: 'Sign in' },
       accent: 'cyan',
     },
     rate_limited: {

@@ -2,7 +2,7 @@
 
 export const FREE_MAX_VIDEO_SEC = 10
 export const PRO_MAX_VIDEO_SEC = 30
-export const FREE_LIFETIME_VIDEOS = 3
+export const FREE_LIFETIME_VIDEOS = 2
 /** Pro weekly cap — see musashiUsage.ts for COGS rationale. */
 export const PRO_WEEKLY_VIDEOS = 10
 export const SHOGUN_MAX_VIDEO_SEC = 600

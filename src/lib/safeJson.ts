@@ -23,12 +23,7 @@ export async function safeParseResponse(resp: Response): Promise<any> {
   }
 }
 
-/**
- * Client-side safe parsing for API responses.
- * When the server returns HTML (e.g. 500 error page), shows a user-friendly message.
- */
-export async function parseApiResponse<T = any>(res: Response): Promise<T> {
-  const text = await res.text()
+function parseApiResponseText<T>(res: Response, text: string): T {
   const trimmed = text.trim()
 
   if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) {
@@ -43,7 +38,68 @@ export async function parseApiResponse<T = any>(res: Response): Promise<T> {
 
   try {
     return JSON.parse(text) as T
-  } catch (e) {
+  } catch {
     throw new Error(`Server returned ${res.status} but body was invalid JSON. Check dev server.`)
+  }
+}
+
+/**
+ * Client-side safe parsing for API responses.
+ * When the server returns HTML (e.g. 500 error page), shows a user-friendly message.
+ */
+export async function parseApiResponse<T = any>(res: Response): Promise<T> {
+  const text = await res.text()
+  return parseApiResponseText<T>(res, text)
+}
+
+export type ApiGuardStatus = 401 | 402 | 429 | 503
+
+export type ApiGuardBody = {
+  code?: string
+  hint?: string
+  [key: string]: unknown
+}
+
+export type ParsedFetchResult<T> =
+  | { kind: 'ok'; status: number; data: T }
+  | { kind: 'guard'; status: ApiGuardStatus; body: ApiGuardBody | null; retryAfter?: number }
+
+const GUARD_STATUSES = new Set<number>([401, 402, 429, 503])
+
+/**
+ * Fetch + parse in one pass. Safe to share via dedupeInflight — concurrent
+ * callers receive the same parsed result instead of re-reading one Response body.
+ */
+export async function fetchAndParseApiResponse<T = any>(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+): Promise<ParsedFetchResult<T>> {
+  const res = await fetch(input, init)
+  const text = await res.text()
+
+  if (GUARD_STATUSES.has(res.status)) {
+    let body: ApiGuardBody | null = null
+    const trimmed = text.trim()
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+      try {
+        body = JSON.parse(text) as ApiGuardBody
+      } catch {
+        body = null
+      }
+    }
+    const retryAfterRaw = Number(res.headers.get('Retry-After') || '')
+    const retryAfter = Number.isFinite(retryAfterRaw) && retryAfterRaw > 0 ? retryAfterRaw : undefined
+    return {
+      kind: 'guard',
+      status: res.status as ApiGuardStatus,
+      body,
+      retryAfter,
+    }
+  }
+
+  return {
+    kind: 'ok',
+    status: res.status,
+    data: parseApiResponseText<T>(res, text),
   }
 }

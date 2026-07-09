@@ -34,8 +34,8 @@ export type ColorProfile = { torso: NormalizedRgb; legs: NormalizedRgb | null }
 
 const TORSO_CORNERS = [11, 12, 23, 24] as const
 const LEG_CORNERS = [23, 24, 25, 26] as const
-const TORSO_COLOR_WEIGHT = 0.6
-const LEGS_COLOR_WEIGHT = 0.4
+const TORSO_COLOR_WEIGHT = 0.45
+const LEGS_COLOR_WEIGHT = 0.55
 
 export function cloneColorProfile(c: ColorProfile): ColorProfile {
   return {

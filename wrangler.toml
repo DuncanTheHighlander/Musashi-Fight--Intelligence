@@ -90,6 +90,8 @@ MUSASHI_MARKETPLACE_PAYMENTS = "stripe"
 MUSASHI_STORAGE_MODE = "r2"
 GEMINI_EMBED_DIMENSION = "1536"
 NODE_ENV = "production"
+# Email verification is required for AI coaching when NODE_ENV=production (see assertEmailVerified).
+# Set MUSASHI_REQUIRE_EMAIL_VERIFIED=0 only as an emergency override (not recommended).
 # Email provider (Resend). EMAIL_API_KEY is a Worker secret — `wrangler secret put EMAIL_API_KEY`.
 # EMAIL_FROM_ADDRESS domain must be verified in the Resend dashboard.
 EMAIL_SERVICE_URL = "https://api.resend.com"

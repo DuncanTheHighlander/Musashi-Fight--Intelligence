@@ -18,6 +18,7 @@ import {
   type ReplayInFrame,
 } from '@/lib/identityReplayCore'
 import { assessDenseTrackQuality, type PoseQualitySummary } from '@/lib/pose/poseQuality'
+import type { PoseFrame } from '@/lib/fightlang/fightlang.types'
 
 const CLOUD_POSE_ENDPOINT = '/api/fight/cloud-pose'
 /** Client-side ceiling for one cloud dense pass (proxy upstream timeout is 290s). */
@@ -108,8 +109,16 @@ export function cloudPoseRequested(): boolean {
 type CloudUpstream = {
   version?: string
   backend?: string
-  meta?: { frames?: number; candidateFrames?: number; twoFighterFrames?: number; elapsedMs?: number }
+  meta?: {
+    frames?: number
+    candidateFrames?: number
+    twoFighterFrames?: number
+    elapsedMs?: number
+    pose3DEnabled?: boolean
+  }
   frames?: ReplayInFrame[]
+  /** Present only when optional 3D lifting succeeded on Modal. */
+  pose3DFrames?: ReplayInFrame[] | null
 }
 
 export type CloudDenseResult = {
@@ -119,6 +128,30 @@ export type CloudDenseResult = {
   meta: CloudUpstream['meta']
   /** Present when `durationMs` was provided — grade of the returned track. */
   quality?: PoseQualitySummary
+  /** A/B dense track from 3D-lifted candidates (optional). */
+  pose3DTrack?: DenseTrackSample[]
+}
+
+/** Convert identity-replay output to FightLang pose frames (preserves z when present). */
+export function denseTrackToPoseFrames(track: ReadonlyArray<DenseTrackSample>): PoseFrame[] {
+  return track.map((s) => ({
+    tMs: s.tMs,
+    videoTimeSec: s.tMs / 1000,
+    actors: {
+      ...(s.A?.length ? { A: s.A } : {}),
+      ...(s.B?.length ? { B: s.B } : {}),
+    },
+  }))
+}
+
+function pose3dRequested(): boolean {
+  if (typeof window === 'undefined') return false
+  try {
+    const params = new URLSearchParams(window.location.search)
+    return params.get('pose3d') === '1' || window.localStorage.getItem('musashiPose3d') === '1'
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -163,6 +196,7 @@ export async function fetchCloudDenseTrack(opts: {
     form.set('mode', opts.mode ?? 'rtmpose')
     form.set('target', opts.target ?? 'auto')
     if (opts.fps) form.set('fps', String(opts.fps))
+    if (pose3dRequested()) form.set('lift3d', 'true')
 
     const resp = await fetch(CLOUD_POSE_ENDPOINT, {
       method: 'POST',
@@ -186,6 +220,11 @@ export async function fetchCloudDenseTrack(opts: {
     }
 
     const track = replayCandidatesToDenseTrack(frames)
+    const pose3dCandidates = json.upstream?.pose3DFrames
+    const pose3DTrack =
+      Array.isArray(pose3dCandidates) && pose3dCandidates.length > 0
+        ? replayCandidatesToDenseTrack(pose3dCandidates)
+        : undefined
     const quality =
       typeof opts.durationMs === 'number' && opts.durationMs > 0
         ? assessDenseTrackQuality(track, expectedSamplesFor(track, opts.durationMs))
@@ -196,6 +235,7 @@ export async function fetchCloudDenseTrack(opts: {
       target: json.target ?? 'auto',
       meta: json.upstream?.meta,
       quality,
+      ...(pose3DTrack?.length ? { pose3DTrack } : {}),
     }
   } catch (err) {
     if (err instanceof DOMException && (err.name === 'AbortError' || err.name === 'TimeoutError')) {

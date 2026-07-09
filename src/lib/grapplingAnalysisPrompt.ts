@@ -54,6 +54,68 @@ export const GRAPPLING_TECHNICAL_FAULTS = [
   'neck_exposed',
 ] as const
 
+/**
+ * Strict technique vocabulary — the model may ONLY emit values from this list.
+ * If not highly confident, use UNKNOWN. Prevents "armbar" when the tape shows
+ * wrist ride, etc.
+ */
+export const GRAPPLING_TECHNIQUES = [
+  'WRIST_RIDE',
+  'ARMBAR',
+  'TRIANGLE',
+  'KIMURA',
+  'GUILLOTINE',
+  'REAR_NAKED_CHOKE',
+  'UNDERHOOK',
+  'OVERHOOK',
+  'SIDE_CONTROL',
+  'MOUNT',
+  'BACK_CONTROL',
+  'GUARD_PASS',
+  'SWEEP',
+  'TAKEDOWN',
+  'KNEE_ON_BELLY',
+  'NORTH_SOUTH',
+  'HALF_GUARD',
+  'CLOSED_GUARD',
+  'OPEN_GUARD',
+  'UNKNOWN',
+] as const
+
+export type GrapplingTechnique = (typeof GRAPPLING_TECHNIQUES)[number]
+
+const GRAPPLING_TECHNIQUE_SET = new Set<string>(GRAPPLING_TECHNIQUES)
+
+/** Coerce model output to allowed technique enum; unknown labels → UNKNOWN. */
+export function normalizeGrapplingTechnique(value: unknown): GrapplingTechnique {
+  const raw = String(value ?? '')
+    .trim()
+    .toUpperCase()
+    .replace(/[\s-]+/g, '_')
+  if (GRAPPLING_TECHNIQUE_SET.has(raw)) return raw as GrapplingTechnique
+  return 'UNKNOWN'
+}
+
+/** Sanitize a vision ledger after flash scan or verification. */
+export function sanitizeGrapplingVisionLedger(ledger: FactualLedger): FactualLedger {
+  const timeline = Array.isArray(ledger.video_analysis_ledger)
+    ? ledger.video_analysis_ledger.map((entry) => {
+        if (!entry || typeof entry !== 'object') return entry
+        const techniques = Array.isArray((entry as { techniques_identified?: unknown }).techniques_identified)
+          ? (entry as { techniques_identified: unknown[] }).techniques_identified.map(normalizeGrapplingTechnique)
+          : []
+        const action_events = Array.isArray(entry.action_events)
+          ? entry.action_events.filter((e) =>
+              GRAPPLING_ACTION_EVENTS.includes(e as (typeof GRAPPLING_ACTION_EVENTS)[number]),
+            )
+          : []
+        return { ...entry, techniques_identified: techniques, action_events }
+      })
+    : ledger.video_analysis_ledger
+
+  return { ...ledger, video_analysis_ledger: timeline }
+}
+
 const GRAPPLING_CLIP_TYPES = new Set(['rolling_grappling', 'guard_passing', 'submission'])
 
 /**
@@ -115,6 +177,12 @@ export const GRAPPLING_LEDGER_RESPONSE_SCHEMA = {
             type: 'ARRAY',
             items: { type: 'STRING', enum: [...GRAPPLING_TECHNICAL_FAULTS] },
           },
+          techniques_identified: {
+            type: 'ARRAY',
+            description:
+              'Visible grappling techniques at this timestamp. ONLY values from the allowed technique enum.',
+            items: { type: 'STRING', enum: [...GRAPPLING_TECHNIQUES] },
+          },
         },
         required: ['timestamp', 'dominant_position'],
       },
@@ -158,6 +226,9 @@ Hard rules:
 - "dominant_position" must be one of: ${GRAPPLING_POSITIONS.join(', ')}. If the position does not clearly match one of these, use "scramble_unresolved". If the camera pans away or the athletes leave frame, use "camera_occluded".
 - "action_events" entries must be from: ${GRAPPLING_ACTION_EVENTS.join(', ')}. Record an event only when it clearly completes on screen.
 - "technical_faults" entries must be from: ${GRAPPLING_TECHNICAL_FAULTS.join(', ')}.
+- "techniques_identified" entries must be ONLY from this list: ${GRAPPLING_TECHNIQUES.join(', ')}.
+- TECHNIQUE CONFIDENCE RULE: You may ONLY output techniques from the list above. If you are not highly confident in the exact technique (e.g. wrist ride vs armbar), output "UNKNOWN" — never guess a submission name.
+- Do NOT label a wrist ride, grip fight, or control position as ARMBAR unless the arm is clearly extended and the elbow joint is being hyperextended on screen.
 - Never invent grips, hooks, or foot positions you cannot see. Put uncertainty in "unknowns".
 - "top_player_identifier" is a visible-appearance description only (e.g., "black rashguard", "bare torso"). Never a name.
 - Add camera cuts, pans to other people, or blur to "video_quality_notes".
@@ -176,7 +247,8 @@ Return this shape:
       "dominant_position": "one of the allowed positions",
       "top_player_identifier": "visible appearance of the top player",
       "action_events": [],
-      "technical_faults": []
+      "technical_faults": [],
+      "techniques_identified": ["UNKNOWN"]
     }
   ],
   "key_moments": [],
@@ -199,9 +271,10 @@ export function buildGrapplingVerificationPrompt(
 
 ${durationHint}Rules:
 - Remove any entry describing a position or event that is not clearly visible on tape.
+- Remove or downgrade any "techniques_identified" entry that is not clearly visible (e.g. ARMBAR when only a wrist ride is visible → use WRIST_RIDE or UNKNOWN).
 - Downgrade unclear positions to "scramble_unresolved"; downgrade off-camera stretches to "camera_occluded".
 - Do not add new speculative entries. Corrections only.
-- Keep "dominant_position", "action_events", and "technical_faults" limited to their allowed enum values.
+- Keep "dominant_position", "action_events", "technical_faults", and "techniques_identified" limited to their allowed enum values.
 - Keep fighter identifiers consistent with visible appearance.
 
 Candidate ledger to verify:
@@ -285,7 +358,8 @@ VideoAnalysisLedger:
 ${JSON.stringify(ledger || {}, null, 2)}
 
 Rules:
-- Positions, transitions, action events, and technical faults in the ledger are the only things you may claim happened.
+- Positions, transitions, action events, technical faults, and techniques_identified in the ledger are the only things you may claim happened.
+- techniques_identified must use ONLY the allowed enum values. If the ledger says UNKNOWN, say the technique is unclear — do not rename it to ARMBAR or TRIANGLE.
 - "scramble_unresolved" and "camera_occluded" entries are visual gaps — acknowledge them plainly, never fill them in.
 - Anchor Micro-Adjustments to ledger timestamps when present; otherwise use moment language.
 - Format: What Worked, Micro-Adjustments, The Core Focus (one drill). Plain coaching prose, no JSON.`

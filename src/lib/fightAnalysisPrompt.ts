@@ -397,6 +397,7 @@ export interface FactualLedger {
     top_player_identifier?: string
     action_events?: string[]
     technical_faults?: string[]
+    techniques_identified?: string[]
   }>
   cv_evidence?: string[]
 }

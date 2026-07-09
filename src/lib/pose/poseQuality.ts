@@ -125,3 +125,90 @@ export function assessDenseTrackQuality(
 export function cloudTrackUsable(quality: PoseQualitySummary): boolean {
   return quality.recommendation !== 'request_better_clip'
 }
+
+const WRIST_JOINTS_FILTER = [15, 16]
+const TRUNK_JOINTS_FILTER = [11, 12, 23, 24]
+const GRAPPLING_SPORTS = new Set(['bjj', 'bjj_grappling', 'wrestling', 'judo', 'mma'])
+const GRAPPLING_CLIP_TYPES = new Set([
+  'rolling_grappling',
+  'guard_passing',
+  'submission',
+  'takedown',
+  'drilling',
+])
+
+export type VisibilityFilterFrame = {
+  tMs: number
+  actors?: Partial<Record<'A' | 'B', ReadonlyArray<{ visibility?: number }>>>
+}
+
+function meanJointVisibility(
+  pose: ReadonlyArray<{ visibility?: number }>,
+  joints: number[],
+): number | null {
+  let sum = 0
+  let n = 0
+  for (const idx of joints) {
+    const lm = pose[idx]
+    if (!lm) continue
+    sum += lm.visibility ?? 0
+    n++
+  }
+  return n > 0 ? sum / n : null
+}
+
+function isGrapplingVisibilityContext(args: {
+  discipline?: string | null
+  clipType?: string | null
+}): boolean {
+  const sport = String(args.discipline || '').trim().toLowerCase()
+  if (GRAPPLING_SPORTS.has(sport)) return true
+  const clipType = String(args.clipType || '').trim().toLowerCase()
+  return GRAPPLING_CLIP_TYPES.has(clipType)
+}
+
+function actorsForFocus(focusTarget?: string | null): Array<'A' | 'B'> {
+  if (focusTarget === 'blue' || focusTarget === 'A') return ['A']
+  if (focusTarget === 'red' || focusTarget === 'B') return ['B']
+  return ['A', 'B']
+}
+
+function framePassesVisibility(
+  frame: VisibilityFilterFrame,
+  actors: Array<'A' | 'B'>,
+  joints: number[],
+  minVisibility: number,
+): boolean {
+  const present = actors.filter((id) => (frame.actors?.[id]?.length ?? 0) > 0)
+  if (present.length === 0) return false
+  return present.every((id) => {
+    const pose = frame.actors?.[id]
+    if (!pose) return false
+    const vis = meanJointVisibility(pose, joints)
+    return vis !== null && vis >= minVisibility
+  })
+}
+
+/**
+ * Drop pose frames whose focus-relevant joints fall below a visibility floor
+ * before sending evidence to the LLM. Striking clips gate on wrists; grappling
+ * clips gate on trunk (shoulders/hips).
+ */
+export function filterFramesByVisibility<T extends VisibilityFilterFrame>(
+  frames: T[],
+  opts: {
+    discipline?: string | null
+    clipType?: string | null
+    focusTarget?: string | null
+    minVisibility?: number
+  } = {},
+): T[] {
+  const minVisibility = opts.minVisibility ?? 0.35
+  const joints = isGrapplingVisibilityContext(opts)
+    ? TRUNK_JOINTS_FILTER
+    : WRIST_JOINTS_FILTER
+  const actors = actorsForFocus(opts.focusTarget)
+  return frames.filter((frame) =>
+    framePassesVisibility(frame, actors, joints, minVisibility),
+  )
+}

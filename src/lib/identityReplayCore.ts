@@ -20,14 +20,23 @@ import type { NormalizedLandmark } from '@mediapipe/tasks-vision'
 import {
   advanceCrossingPhase,
   assignFighterTracks,
+  boxesInProximityLock,
+  boxesOverlap,
   clampVelocity,
   crossingHoldMs,
   crossingSmoothAlpha,
   dedupePoseCandidates,
   isCrossingPhase,
+  LOCK_RELEASE_FRAMES,
+  LOCK_SEPARATION_DIST,
+  poseVisBounds,
+  predictAnchor,
+  seedPairLockByTrajectory,
   updateIdentitySlotColor,
+  updateSlotKalman,
   type CrossingPhase,
   type IdentitySlot,
+  type PairLock,
   type PoseAnchor,
 } from '@/lib/identityTracking'
 import { blendColorProfile, colorProfileDist, type ColorProfile } from '@/lib/appearance'
@@ -61,9 +70,9 @@ const IDENTITY_POSE_WEIGHT = 0.18
 const IDENTITY_VELOCITY_ALPHA = 0.28
 const IDENTITY_COLOR_SMOOTHING = 0.15
 const IDENTITY_OCCLUSION_HOLD_MS = 1800
-const IDENTITY_PROFILE_COLOR_WEIGHT = 0.82
+const IDENTITY_PROFILE_COLOR_WEIGHT = 0.90
 const IDENTITY_PROFILE_SCALE_WEIGHT = 0.1
-const IDENTITY_PROFILE_CLEAR_MARGIN = 0.065
+const IDENTITY_PROFILE_CLEAR_MARGIN = 0.055
 
 const TRACKING_POINTS: Array<[number, number]> = [
   [11, 1.2], [12, 1.2], [23, 1.2], [24, 1.2],
@@ -151,6 +160,9 @@ class IdentityReplayer {
   private crossingPhase: CrossingPhase = 'tracking'
   private recoveryStable = 0
   private lockKey: FighterKey | null = null
+  private pairLock: PairLock | null = null
+  private lockReleaseFrames = 0
+  private identitySeeded = false
   private occlusionUntil = 0
   private lastSeen: Record<FighterKey, number | null> = { A: null, B: null }
   private lastRaw: Record<FighterKey, NormalizedLandmark[] | null> = { A: null, B: null }
@@ -220,6 +232,8 @@ class IdentityReplayer {
         learnAppearance || phase === 'tracking'
           ? updateIdentitySlotColor(prev, candidate, phase, IDENTITY_COLOR_SMOOTHING)
           : prev?.color ?? candidate.color
+      const prevWall = prev?.wallMs
+      const dtMs = prevWall != null ? Math.max(1, wallNow - prevWall) : 33
       this.slots[key] = {
         pose: candidate.pose,
         anchor: candidate.anchor,
@@ -229,22 +243,94 @@ class IdentityReplayer {
         velocity: vel,
         wallMs: wallNow,
         confidence: Math.min(1, (prev?.confidence ?? 0.6) + 0.08),
+        kalman: prev?.kalman,
       }
+      updateSlotKalman(this.slots[key]!, candidate.anchor, vel, dtMs)
       updateProfile(key, candidate, learnAppearance && phase === 'tracking')
     }
 
-    let { A: assignA, B: assignB } = assignFighterTracks(
-      candidates,
-      this.slots.A,
-      this.slots.B,
-      wallNow,
-      phaseIn,
-      (candidate, slot) => ({
-        poseShape: poseShapeDistance(candidate.pose, slot.pose),
-        scaleWeight: IDENTITY_SCALE_WEIGHT,
-        poseWeight: IDENTITY_POSE_WEIGHT,
-      })
-    )
+    let assignA: CornerCandidate | undefined
+    let assignB: CornerCandidate | undefined
+    let pairLocked = false
+
+    const distAnchors = (a: PoseAnchor, b: PoseAnchor) => Math.hypot(a.x - b.x, a.y - b.y)
+
+    if (candidates.length >= 2 && this.slots.A && this.slots.B) {
+      const ba = poseVisBounds(candidates[0]!.pose)
+      const bb = poseVisBounds(candidates[1]!.pose)
+      const inLockZone = ba && bb && boxesInProximityLock(ba, bb)
+      const centerDist = distAnchors(
+        predictAnchor(this.slots.A, wallNow),
+        predictAnchor(this.slots.B, wallNow)
+      )
+
+      if (inLockZone || (this.pairLock && centerDist < LOCK_SEPARATION_DIST)) {
+        this.occlusionUntil = wallNow + IDENTITY_OCCLUSION_HOLD_MS
+        const useAnchor = phaseIn === 'merged' || phaseIn === 'recovering'
+        if (!this.pairLock) {
+          this.pairLock = seedPairLockByTrajectory(
+            candidates[0]!,
+            candidates[1]!,
+            this.slots.A,
+            this.slots.B,
+            wallNow,
+            useAnchor
+          )
+          this.lockReleaseFrames = 0
+        }
+        if (inLockZone || centerDist < LOCK_SEPARATION_DIST) {
+          this.lockReleaseFrames = 0
+        }
+        const lock = this.pairLock
+        assignA = candidates[lock.aCandIdx]
+        assignB = candidates[lock.bCandIdx]
+        pairLocked = true
+        this.lockKey = null
+      } else if (this.pairLock) {
+        if (ba && bb && !boxesOverlap(ba, bb) && centerDist >= LOCK_SEPARATION_DIST) {
+          this.lockReleaseFrames += 1
+        } else {
+          this.lockReleaseFrames = 0
+        }
+        if (this.lockReleaseFrames < LOCK_RELEASE_FRAMES) {
+          const lock = this.pairLock
+          assignA = candidates[lock.aCandIdx]
+          assignB = candidates[lock.bCandIdx]
+          pairLocked = true
+          this.lockKey = null
+        } else {
+          this.pairLock = null
+          this.lockReleaseFrames = 0
+        }
+      }
+    }
+
+    if (!pairLocked) {
+      if (candidates.length >= 2 && !isCrossingPhase(phaseIn) && !this.pairLock) {
+        this.pairLock = null
+        this.lockReleaseFrames = 0
+      }
+      const tracked = assignFighterTracks(
+        candidates,
+        this.slots.A,
+        this.slots.B,
+        wallNow,
+        phaseIn,
+        (candidate, slot) => ({
+          poseShape: poseShapeDistance(candidate.pose, slot.pose),
+          scaleWeight: IDENTITY_SCALE_WEIGHT,
+          poseWeight: IDENTITY_POSE_WEIGHT,
+        }),
+        {
+          allowSpatialSeed: !this.identitySeeded,
+          blockSwap: Boolean(this.pairLock) ||
+            (isCrossingPhase(phaseIn) && phaseIn !== 'recovering'),
+        }
+      )
+      assignA = tracked.A
+      assignB = tracked.B
+      if (assignA && assignB) this.identitySeeded = true
+    }
 
     if (candidates.length === 1 && this.slots.A && this.slots.B && isCrossingPhase(phaseIn)) {
       this.occlusionUntil = wallNow + IDENTITY_OCCLUSION_HOLD_MS
@@ -265,7 +351,7 @@ class IdentityReplayer {
       this.lockKey = lk
       assignA = lk === 'A' ? candidates[0] : undefined
       assignB = lk === 'B' ? candidates[0] : undefined
-    } else if (candidates.length >= 2) {
+    } else if (candidates.length >= 2 && !pairLocked) {
       this.lockKey = null
     }
 
@@ -278,7 +364,11 @@ class IdentityReplayer {
     )
     this.crossingPhase = phaseResult.phase
     this.recoveryStable = phaseResult.stableFrames
-    if (phaseResult.phase === 'tracking') this.lockKey = null
+    if (phaseResult.phase === 'tracking') {
+      this.lockKey = null
+      this.pairLock = null
+      this.lockReleaseFrames = 0
+    }
 
     return { A: assignA?.pose ?? null, B: assignB?.pose ?? null }
   }

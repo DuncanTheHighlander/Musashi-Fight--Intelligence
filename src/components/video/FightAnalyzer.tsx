@@ -52,22 +52,31 @@ import { createAppearanceTracker, sampleColorProfile, blendColorProfile, colorPr
 import {
   advanceCrossingPhase,
   assignFighterTracks,
+  boxesInProximityLock,
+  boxesOverlap,
   clampVelocity,
   crossingHoldMs,
   crossingSmoothAlpha,
   dedupePoseCandidates,
   IDENTITY_STALE_MS,
   isCrossingPhase,
+  LOCK_RELEASE_FRAMES,
+  LOCK_SEPARATION_DIST,
+  poseVisBounds,
+  predictAnchor,
+  seedPairLockByTrajectory,
   updateIdentitySlotColor,
+  updateSlotKalman,
   type CrossingPhase,
   type IdentityCandidate,
   type IdentitySlot,
+  type PairLock,
 } from '@/lib/identityTracking'
 import { buildFightLangFrameEvidence } from '@/lib/compiler/evidenceCompiler'
 import type { FightLangFrameEvidence } from '@/lib/fightlang/ledger'
 import { getPerformanceProfile, FrameBudget } from '@/lib/performanceProfile'
 import { denseTrackKey, loadDenseTrack, pruneGhostRuns, saveDenseTrack } from '@/lib/denseTrackCache'
-import { cloudPoseConfigured, cloudPoseRequested, fetchCloudDenseTrack, getCloudPoseOptions } from '@/lib/cloudPose'
+import { cloudPoseConfigured, cloudPoseRequested, denseTrackToPoseFrames, fetchCloudDenseTrack, getCloudPoseOptions } from '@/lib/cloudPose'
 import { assessDenseTrackQuality, cloudTrackUsable, type PoseEngineInfo } from '@/lib/pose/poseQuality'
 import { syncPoseDetectionSurface } from '@/lib/videoCanvas'
 
@@ -113,6 +122,8 @@ export type FightAnalyzerProps = {
    * cloud primary was attempted and failed) plus the track's quality grade.
    */
   onDenseTrackReady?: (frameCount: number, info?: PoseEngineInfo) => void
+  /** Optional: fires when cloud 3D lifting produced a usable A/B track. */
+  onPose3DTrackReady?: (frames: import('@/lib/fightlang/fightlang.types').PoseFrame[]) => void
 }
 
 const TASKS_VISION_WASM = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/wasm'
@@ -167,9 +178,9 @@ const IDENTITY_POSE_WEIGHT = 0.18
 const IDENTITY_VELOCITY_ALPHA = 0.28
 const IDENTITY_COLOR_SMOOTHING = 0.15
 const IDENTITY_OCCLUSION_HOLD_MS = 1800
-const IDENTITY_PROFILE_COLOR_WEIGHT = 0.82
+const IDENTITY_PROFILE_COLOR_WEIGHT = 0.90
 const IDENTITY_PROFILE_SCALE_WEIGHT = 0.10
-const IDENTITY_PROFILE_CLEAR_MARGIN = 0.065
+const IDENTITY_PROFILE_CLEAR_MARGIN = 0.055
 const PRESCAN_HINT_MAX_DISTANCE = 0.36
 const PRESCAN_HINT_STRONG_MARGIN = 0.045
 
@@ -332,6 +343,7 @@ export function FightAnalyzer({
   onPoseDetected,
   onFrameEvidence,
   onDenseTrackReady,
+  onPose3DTrackReady,
 }: FightAnalyzerProps) {
   const poseLandmarkerRef = useRef<PoseLandmarker | null>(null)
   const retryLandmarkerRef = useRef<PoseLandmarker | null>(null)
@@ -410,6 +422,12 @@ export function FightAnalyzer({
    *  visible fighter keeps being tracked without flip-flopping; identity is
    *  re-evaluated with accumulated evidence at separation. */
   const crossingLockKeyRef = useRef<FighterKey | null>(null)
+  /** Frozen candidate-index → slot mapping while both bodies' boxes overlap. */
+  const crossingPairLockRef = useRef<PairLock | null>(null)
+  /** Consecutive frames with boxes separated while a PairLock is held. */
+  const lockReleaseFramesRef = useRef(0)
+  /** After first 2-fighter assignment, disable left/right spatial cold-start seed. */
+  const identitySeededRef = useRef(false)
   const preScanTrackRef = useRef<PreScanTrackSample[]>([])
   const lastPoseSeenRef = useRef<{ A: number | null; B: number | null }>({ A: null, B: null })
   /** Appearance-based identity tracker. Captures HSV histogram of each fighter's
@@ -438,6 +456,7 @@ export function FightAnalyzer({
   const onPreScanFrameRef = useRef(onPreScanFrame)
   const onPreScanPoseDetectedRef = useRef(onPreScanPoseDetected)
   const onDenseTrackReadyRef = useRef(onDenseTrackReady)
+  const onPose3DTrackReadyRef = useRef(onPose3DTrackReady)
 
   // Keep callback refs fresh without triggering re-renders.
   // Previously these were assigned at render-time (outside useEffect) which
@@ -447,6 +466,7 @@ export function FightAnalyzer({
   useEffect(() => { onPreScanFrameRef.current = onPreScanFrame }, [onPreScanFrame])
   useEffect(() => { onPreScanPoseDetectedRef.current = onPreScanPoseDetected }, [onPreScanPoseDetected])
   useEffect(() => { onDenseTrackReadyRef.current = onDenseTrackReady }, [onDenseTrackReady])
+  useEffect(() => { onPose3DTrackReadyRef.current = onPose3DTrackReady }, [onPose3DTrackReady])
 
   // New clip / blob URL: reset MediaPipe time cursors and tracks — stale state
   // from the previous file causes empty detections or “frozen” tracking.
@@ -471,6 +491,9 @@ export function FightAnalyzer({
     crossingPhaseRef.current = 'tracking'
     crossingRecoveryStableRef.current = 0
     crossingLockKeyRef.current = null
+    crossingPairLockRef.current = null
+    lockReleaseFramesRef.current = 0
+    identitySeededRef.current = false
     preScanTrackRef.current = []
     poseHistoryRef.current = { A: [], B: [] }
     lastPoseSeenRef.current = { A: null, B: null }
@@ -703,6 +726,23 @@ export function FightAnalyzer({
       const slots = identitySlotsRef.current
       const phaseIn = crossingPhaseRef.current
 
+      // Attach HSV fingerprint distances when the appearance tracker is ready.
+      try {
+        const tracker = getAppearanceTracker()
+        if (tracker.isReady() && candidates.length > 0) {
+          const hists = tracker.sample(null as unknown as HTMLCanvasElement, video, poses)
+          const scores = tracker.score(hists)
+          for (const cand of candidates) {
+            const poseIdx = poses.indexOf(cand.pose)
+            if (poseIdx < 0) continue
+            cand.hsvDistToA = scores.candidateToA[poseIdx] ?? null
+            cand.hsvDistToB = scores.candidateToB[poseIdx] ?? null
+          }
+        }
+      } catch {
+        // non-fatal — RGB ColorProfile still contributes to match cost
+      }
+
       if (candidates.length === 0) {
         if (wallNow < identityOcclusionUntilRef.current || isCrossingPhase(phaseIn)) {
           return { A: slots.A?.pose ?? null, B: slots.B?.pose ?? null }
@@ -755,6 +795,8 @@ export function FightAnalyzer({
           learnAppearance || phase === 'tracking'
             ? updateIdentitySlotColor(prev, candidate, phase, IDENTITY_COLOR_SMOOTHING)
             : prev?.color ?? candidate.color
+        const prevWall = prev?.wallMs
+        const dtMs = prevWall != null ? Math.max(1, wallNow - prevWall) : 33
         slots[key] = {
           pose: candidate.pose,
           anchor: candidate.anchor,
@@ -764,22 +806,107 @@ export function FightAnalyzer({
           velocity,
           wallMs: wallNow,
           confidence: Math.min(1, (prev?.confidence ?? 0.6) + 0.08),
+          kalman: prev?.kalman,
         }
+        updateSlotKalman(slots[key]!, candidate.anchor, velocity, dtMs)
         updateProfile(key, candidate, learnAppearance && phase === 'tracking')
       }
 
-      let { A: assignA, B: assignB } = assignFighterTracks(
-        candidates,
-        slots.A,
-        slots.B,
-        wallNow,
-        phaseIn,
-        (candidate, slot) => ({
-          poseShape: poseShapeDistance(candidate.pose, slot.pose),
-          scaleWeight: IDENTITY_SCALE_WEIGHT,
-          poseWeight: IDENTITY_POSE_WEIGHT,
-        })
-      )
+      let assignA: CornerCandidate | undefined
+      let assignB: CornerCandidate | undefined
+      let pairLocked = false
+
+      const distAnchors = (
+        a: { x: number; y: number },
+        b: { x: number; y: number }
+      ) => Math.hypot(a.x - b.x, a.y - b.y)
+
+      // Proximity LOCK: freeze pairing while boxes heavily overlap (containment > 0.40).
+      // Seed once by Kalman trajectory; appearance only on traj tie. Hold until
+      // centers separate AND N consecutive non-overlap frames.
+      if (candidates.length >= 2 && slots.A && slots.B) {
+        const ba = poseVisBounds(candidates[0]!.pose)
+        const bb = poseVisBounds(candidates[1]!.pose)
+        const inLockZone = ba && bb && boxesInProximityLock(ba, bb)
+        const centerDist = distAnchors(
+          predictAnchor(slots.A, wallNow),
+          predictAnchor(slots.B, wallNow)
+        )
+
+        if (inLockZone || (crossingPairLockRef.current && centerDist < LOCK_SEPARATION_DIST)) {
+          identityOcclusionUntilRef.current = wallNow + IDENTITY_OCCLUSION_HOLD_MS
+          const useAnchor = phaseIn === 'merged' || phaseIn === 'recovering'
+          if (!crossingPairLockRef.current) {
+            crossingPairLockRef.current = seedPairLockByTrajectory(
+              candidates[0]!,
+              candidates[1]!,
+              slots.A,
+              slots.B,
+              wallNow,
+              useAnchor
+            )
+            lockReleaseFramesRef.current = 0
+          }
+          if (inLockZone || centerDist < LOCK_SEPARATION_DIST) {
+            lockReleaseFramesRef.current = 0
+          }
+          const lock = crossingPairLockRef.current
+          assignA = candidates[lock.aCandIdx]
+          assignB = candidates[lock.bCandIdx]
+          pairLocked = true
+          crossingLockKeyRef.current = null
+        } else if (crossingPairLockRef.current) {
+          // Boxes no longer heavily overlapping and centers far enough —
+          // count release frames before clearing the lock.
+          if (ba && bb && !boxesOverlap(ba, bb) && centerDist >= LOCK_SEPARATION_DIST) {
+            lockReleaseFramesRef.current += 1
+          } else {
+            lockReleaseFramesRef.current = 0
+          }
+          if (lockReleaseFramesRef.current < LOCK_RELEASE_FRAMES) {
+            const lock = crossingPairLockRef.current
+            assignA = candidates[lock.aCandIdx]
+            assignB = candidates[lock.bCandIdx]
+            pairLocked = true
+            crossingLockKeyRef.current = null
+          } else {
+            crossingPairLockRef.current = null
+            lockReleaseFramesRef.current = 0
+          }
+        }
+      }
+
+      if (!pairLocked) {
+        if (candidates.length >= 2 && !isCrossingPhase(phaseIn) && !crossingPairLockRef.current) {
+          crossingPairLockRef.current = null
+          lockReleaseFramesRef.current = 0
+        }
+
+        const tracked = assignFighterTracks(
+          candidates,
+          slots.A,
+          slots.B,
+          wallNow,
+          phaseIn,
+          (candidate, slot) => ({
+            poseShape: poseShapeDistance(candidate.pose, slot.pose),
+            scaleWeight: IDENTITY_SCALE_WEIGHT,
+            poseWeight: IDENTITY_POSE_WEIGHT,
+            hsvDist:
+              slot === slots.A
+                ? candidate.hsvDistToA ?? null
+                : candidate.hsvDistToB ?? null,
+          }),
+          {
+            allowSpatialSeed: !identitySeededRef.current,
+            blockSwap: Boolean(crossingPairLockRef.current) ||
+              (isCrossingPhase(phaseIn) && phaseIn !== 'recovering'),
+          }
+        )
+        assignA = tracked.A
+        assignB = tracked.B
+        if (assignA && assignB) identitySeededRef.current = true
+      }
 
       // During crossing with a single visible body: lock that body to ONE label
       // for the whole overlap window. The long-term appearance profile can
@@ -810,14 +937,18 @@ export function FightAnalyzer({
         crossingLockKeyRef.current = lockKey
         assignA = lockKey === 'A' ? candidates[0] : undefined
         assignB = lockKey === 'B' ? candidates[0] : undefined
-      } else if (candidates.length >= 2) {
+      } else if (candidates.length >= 2 && !pairLocked) {
         crossingLockKeyRef.current = null
       }
 
-      // Strong pre-scan hint can override bipartite assignment during merged/recovering.
-      // Skipped in the dense pass — the verified offline replay excludes hints, and
-      // sparse-pass hints use positional labels that can be swapped.
-      if (!densePassActiveRef.current && candidates.length >= 2 && (phaseIn === 'merged' || phaseIn === 'recovering')) {
+      // Pre-scan hints are positional — never override identity during crossing or LOCK.
+      if (
+        !densePassActiveRef.current &&
+        !pairLocked &&
+        !isCrossingPhase(phaseIn) &&
+        candidates.length >= 2 &&
+        phaseIn === 'tracking'
+      ) {
         const [c0, c1] = candidates
         const preScanHint = getPreScanTrackHint(videoTimeMs)
         if (preScanHint?.A && preScanHint.B) {
@@ -854,6 +985,8 @@ export function FightAnalyzer({
       crossingRecoveryStableRef.current = phaseResult.stableFrames
       if (phaseResult.phase === 'tracking') {
         crossingLockKeyRef.current = null
+        crossingPairLockRef.current = null
+        lockReleaseFramesRef.current = 0
       }
 
       // Return only REAL assignments. The old code also returned the slot's
@@ -904,6 +1037,8 @@ export function FightAnalyzer({
       }
 
       const phase = crossingPhaseRef.current
+      const prevWall = prev?.wallMs
+      const dtMs = prevWall != null ? Math.max(1, wallNow - prevWall) : 33
       slots[key] = {
         pose,
         anchor,
@@ -913,7 +1048,9 @@ export function FightAnalyzer({
         velocity,
         wallMs: wallNow,
         confidence: 1,
+        kalman: prev?.kalman,
       }
+      updateSlotKalman(slots[key]!, anchor, velocity, dtMs)
 
       if (color && phase === 'tracking') {
         const profile = identityProfilesRef.current[key]
@@ -1783,6 +1920,9 @@ export function FightAnalyzer({
                 track = result.track
                 quality = result.quality
                 void saveDenseTrack(cloudKey, stepMs, track)
+                if (result.pose3DTrack?.length) {
+                  onPose3DTrackReadyRef.current?.(denseTrackToPoseFrames(result.pose3DTrack))
+                }
               }
             }
             if (!track || track.length === 0 || cancelled) return false
@@ -1860,6 +2000,9 @@ export function FightAnalyzer({
           crossingPhaseRef.current = 'tracking'
           crossingRecoveryStableRef.current = 0
           crossingLockKeyRef.current = null
+    crossingPairLockRef.current = null
+    lockReleaseFramesRef.current = 0
+    identitySeededRef.current = false
           for (let i = 0; i < denseSteps; i++) {
             if (cancelled) break
             const tMs = Math.min(Math.max(0, durMs - 1), i * stepMs)
@@ -1934,6 +2077,9 @@ export function FightAnalyzer({
           crossingPhaseRef.current = 'tracking'
           crossingRecoveryStableRef.current = 0
           crossingLockKeyRef.current = null
+    crossingPairLockRef.current = null
+    lockReleaseFramesRef.current = 0
+    identitySeededRef.current = false
           lastPoseSeenRef.current = { A: null, B: null }
           onPreScanActiveChangeRef.current?.(false)
           signalComplete()

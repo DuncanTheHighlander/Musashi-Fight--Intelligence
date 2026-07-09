@@ -213,7 +213,7 @@ export default function Navigation() {
                   className="text-destructive cursor-pointer"
                   onClick={async () => {
                     await logout()
-                    router.push('/login')
+                    router.push('/welcome')
                   }}
                 >
                   <LogOut className="h-4 w-4 mr-2" />
@@ -225,7 +225,7 @@ export default function Navigation() {
             <Button
               variant="default"
               size="sm"
-              onClick={() => router.push('/login')}
+              onClick={() => router.push('/welcome')}
             >
               Log In
             </Button>

@@ -240,6 +240,27 @@ export const requireUser = async (req: Request, opts?: { role?: MusashiRole }) =
   return user
 }
 
+/**
+ * Whether AI / paid features should require a verified email.
+ * - Off when auth bypass is on (local demos)
+ * - Off when MUSASHI_REQUIRE_EMAIL_VERIFIED=0
+ * - On in production by default; on in any env when MUSASHI_REQUIRE_EMAIL_VERIFIED=1
+ * Shogun accounts are never blocked.
+ */
+export const isEmailVerificationRequired = (): boolean => {
+  if (process.env.MUSASHI_DISABLE_AUTH === '1' && process.env.NODE_ENV !== 'production') return false
+  if (process.env.MUSASHI_REQUIRE_EMAIL_VERIFIED === '0') return false
+  if (process.env.MUSASHI_REQUIRE_EMAIL_VERIFIED === '1') return true
+  return process.env.NODE_ENV === 'production'
+}
+
+export const assertEmailVerified = (user: MusashiUser): void => {
+  if (!isEmailVerificationRequired()) return
+  if (user.role === 'shogun') return
+  if (user.emailVerifiedAt) return
+  throw new Error('EMAIL_NOT_VERIFIED')
+}
+
 export const revokeAllUserSessions = async (userId: string): Promise<void> => {
   const db = getDb()
   await db
@@ -317,11 +338,18 @@ export const createUser = async (params: { email: string; password: string; role
   const now = new Date().toISOString()
   const passwordHash = await hashPassword(params.password)
 
+  // Local/dev without an email provider: auto-verify so AI flows still work.
+  // Production always leaves email_verified_at null until the user confirms.
+  const emailKey = String(process.env.EMAIL_API_KEY || '').trim()
+  const emailConfigured = Boolean(emailKey) && !/your-|placeholder|re_your/i.test(emailKey)
+  const autoVerify = !emailConfigured && process.env.NODE_ENV !== 'production'
+  const verifiedAt = autoVerify ? now : null
+
   await db
     .prepare(
-      'INSERT INTO musashi_users (id, email, password_hash, role, display_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
+      'INSERT INTO musashi_users (id, email, password_hash, role, display_name, email_verified_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
     )
-    .bind(id, email, passwordHash, params.role, displayName, now, now)
+    .bind(id, email, passwordHash, params.role, displayName, verifiedAt, now, now)
     .run()
 
   const user: MusashiUser = {
@@ -329,7 +357,7 @@ export const createUser = async (params: { email: string; password: string; role
     email,
     display_name: displayName,
     role: params.role,
-    emailVerifiedAt: null,
+    emailVerifiedAt: verifiedAt,
     passwordUpdatedAt: null,
     createdAt: now,
     updatedAt: now,

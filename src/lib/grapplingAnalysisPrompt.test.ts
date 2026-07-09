@@ -74,6 +74,9 @@ describe('buildGrapplingEvidenceLedgerPrompt', () => {
     expect(prompt).toContain('scramble_unresolved')
     expect(prompt).toContain('camera_occluded')
     expect(prompt).toContain('Fighter A')
+    expect(prompt).toContain('WRIST_RIDE')
+    expect(prompt).toContain('UNKNOWN')
+    expect(prompt).toContain('techniques_identified')
     // Full position enum must ride in the prompt so the model has the off-ramps.
     expect(prompt).toContain('back_control')
     expect(prompt).toContain('guard_pass_completed')

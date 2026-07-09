@@ -8,7 +8,7 @@ export const FREE_MAX_VIDEO_SEC = 10
 /** Max clip length for Pro AI video analysis (seconds). */
 export const PRO_MAX_VIDEO_SEC = 30
 /** Lifetime free AI video analyses before upgrade required. */
-export const FREE_LIFETIME_VIDEOS = 3
+export const FREE_LIFETIME_VIDEOS = 2
 /**
  * Pro weekly AI video analyses.
  * Rationale: at ~$0.08–0.12 per 30s multimodal pipeline (Gemini + optional cloud pose),

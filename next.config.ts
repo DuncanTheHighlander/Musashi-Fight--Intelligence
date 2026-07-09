@@ -42,6 +42,10 @@ const nextConfig: NextConfig = {
     ]
   },
   webpack: (config, { dev, isServer, nextRuntime }) => {
+    if (isServer && config.output) {
+      config.output.chunkFilename = '[name].js'
+    }
+
     if (dev) {
       config.cache = {
         type: 'filesystem',
