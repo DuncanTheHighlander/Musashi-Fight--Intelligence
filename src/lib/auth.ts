@@ -6,6 +6,7 @@ export interface User {
   display_name: string
   role?: string
   emailVerifiedAt?: string | null
+  emailVerificationRequired?: boolean
 }
 
 interface AuthResponse {
@@ -15,6 +16,7 @@ interface AuthResponse {
     display_name?: string
     role?: string
     emailVerifiedAt?: string | null
+    emailVerificationRequired?: boolean
   }
   error?: string
   code?: string
@@ -38,6 +40,7 @@ export async function checkSession(): Promise<User | null> {
       display_name: data.user.display_name || data.user.email.split('@')[0],
       role: data.user.role,
       emailVerifiedAt: data.user.emailVerifiedAt ?? null,
+      emailVerificationRequired: data.user.emailVerificationRequired ?? false,
     }
   } catch (err) {
     console.error('Session check failed:', err)
@@ -69,6 +72,7 @@ export async function login(email: string, password: string): Promise<User> {
     display_name: data.user.display_name || data.user.email.split('@')[0],
     role: data.user.role,
     emailVerifiedAt: data.user.emailVerifiedAt ?? null,
+    emailVerificationRequired: data.user.emailVerificationRequired ?? false,
   }
 }
 
@@ -111,6 +115,7 @@ export async function register(params: {
     display_name: data.user.display_name || data.user.email.split('@')[0],
     role: data.user.role,
     emailVerifiedAt: data.user.emailVerifiedAt ?? null,
+    emailVerificationRequired: data.user.emailVerificationRequired ?? false,
   }
 }
 

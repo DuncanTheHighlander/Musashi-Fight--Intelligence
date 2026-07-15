@@ -8,7 +8,7 @@
  *   ?sort=belt|reviews|recent
  */
 import { NextResponse } from 'next/server'
-import { enforceUsage } from '@/lib/musashiUsage'
+import { requireUser } from '@/lib/musashiAuth'
 import { getDb } from '@/lib/marketplace/types'
 import type { AnalystProfileRow } from '@/lib/marketplace/types'
 import { BELT_ORDER } from '@/lib/marketplace/beltTier'
@@ -16,7 +16,7 @@ import type { BeltTier } from '@/lib/marketplace/beltTier'
 
 export async function GET(req: Request) {
   try {
-    await enforceUsage(req, 'chat')
+    await requireUser(req)
     const { searchParams } = new URL(req.url)
     const beltTier = searchParams.get('beltTier') as BeltTier | null
     const directHire = searchParams.get('directHire') === '1'

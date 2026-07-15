@@ -1,4 +1,5 @@
 import { safeParseResponse } from '@/lib/safeJson'
+import { getServerSecret } from '@/lib/cloudflare/secrets'
 
 import { GEMINI_MODEL_DEFAULT } from '@/lib/gemini/models'
 
@@ -21,8 +22,8 @@ const defaultModel = (): GeminiReasonModel =>
   (process.env.GEMINI_MODEL as GeminiReasonModel | undefined) ||
   GEMINI_MODEL_DEFAULT
 
-const getKey = (explicit?: string): string => {
-  const key = explicit || process.env.GEMINI_API_KEY
+const getKey = async (explicit?: string): Promise<string> => {
+  const key = explicit || await getServerSecret('GEMINI_API_KEY')
   if (!key) throw new Error('GEMINI_API_KEY not configured')
   return key
 }
@@ -42,7 +43,7 @@ export async function streamReasoning(args: StreamReasonArgs): Promise<{
   model: string
   stream: GeminiSseStream
 }> {
-  const apiKey = getKey(args.apiKey)
+  const apiKey = await getKey(args.apiKey)
   const modelId = args.model || defaultModel()
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelId)}:streamGenerateContent?alt=sse&key=${encodeURIComponent(apiKey)}`
 

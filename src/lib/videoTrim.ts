@@ -66,6 +66,16 @@ export function probeVideoDuration(file: File): Promise<number> {
     const cleanup = () => URL.revokeObjectURL(url)
     video.onloadedmetadata = () => {
       const d = video.duration
+      if (d === Infinity) {
+        // Recorded WebM (e.g. phone screen/camera capture) reports Infinity
+        // until seeked — resolve the real length instead of returning 0,
+        // which would silently skip the tier-limit trimmer.
+        void resolveVideoDuration(video).then((fixed) => {
+          cleanup()
+          resolve(fixed)
+        })
+        return
+      }
       cleanup()
       resolve(Number.isFinite(d) && d > 0 ? d : 0)
     }
@@ -77,16 +87,19 @@ export function probeVideoDuration(file: File): Promise<number> {
   })
 }
 
-const pickMimeType = (): string | undefined => {
-  if (typeof MediaRecorder === 'undefined') return undefined
-  const candidates = [
-    'video/mp4;codecs=avc1',
-    'video/mp4',
-    'video/webm;codecs=vp9',
-    'video/webm;codecs=vp8',
-    'video/webm',
-  ]
-  return candidates.find((t) => MediaRecorder.isTypeSupported(t))
+/**
+ * Recording formats to attempt, best first: preferred container, then the
+ * other family as a retry when the first output fails playability validation
+ * (e.g. Chrome producing a WebM the decoder then refuses).
+ */
+const trimMimeCandidates = (): Array<string | undefined> => {
+  if (typeof MediaRecorder === 'undefined') return [undefined]
+  const mp4 = ['video/mp4;codecs=avc1', 'video/mp4'].find((t) => MediaRecorder.isTypeSupported(t))
+  const webm = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'].find((t) =>
+    MediaRecorder.isTypeSupported(t),
+  )
+  const list = [mp4, webm].filter((t): t is string => Boolean(t))
+  return list.length > 0 ? list : [undefined]
 }
 
 const once = (el: HTMLMediaElement, event: string): Promise<void> =>
@@ -102,25 +115,136 @@ const once = (el: HTMLMediaElement, event: string): Promise<void> =>
   })
 
 /**
- * Re-encode [startSec, endSec] of `file` to a new File by playing that segment
- * and capturing it via MediaRecorder. Runs at ~real time. Rejects if the
- * browser can't capture the stream.
+ * Seek that survives mobile quirks: some phone browsers never fire 'seeked'
+ * on blob sources, or fire 'error' when the hardware decoder is briefly
+ * contended. Falls back to polling the position before giving up.
  */
-export async function trimVideoFile(
+const seekTo = (video: HTMLVideoElement, t: number, timeoutMs = 6000): Promise<void> =>
+  new Promise((resolve, reject) => {
+    let done = false
+    const finish = (err?: Error) => {
+      if (done) return
+      done = true
+      video.removeEventListener('seeked', onSeeked)
+      video.removeEventListener('error', onError)
+      clearInterval(poll)
+      clearTimeout(timer)
+      if (err) reject(err)
+      else resolve()
+    }
+    const onSeeked = () => finish()
+    const onError = () => {
+      const code = video.error?.code
+      finish(new Error(`the phone could not decode this clip while seeking (media error ${code ?? 'unknown'}). Close other video apps/tabs and retry, or use MP4 (H.264).`))
+    }
+    // Fallback: if the element reports it's at the target with decodable data,
+    // treat the seek as done even without a 'seeked' event.
+    const poll = setInterval(() => {
+      if (!video.seeking && video.readyState >= 2 && Math.abs(video.currentTime - t) < 0.5) finish()
+    }, 200)
+    const timer = setTimeout(() => {
+      finish(new Error('seeking this clip timed out — try MP4 (H.264) or a shorter clip.'))
+    }, timeoutMs)
+    video.addEventListener('seeked', onSeeked)
+    video.addEventListener('error', onError)
+    try {
+      video.currentTime = t
+    } catch {
+      // Setting currentTime threw — let the poll/timeout decide.
+    }
+  })
+
+/**
+ * Resolve an element's duration, working around the Chrome MediaRecorder bug
+ * where recorded WebM reports duration=Infinity until seeked far forward.
+ * Resolves the real duration (element is seeked back to 0), or 0 on failure.
+ */
+export function resolveVideoDuration(video: HTMLVideoElement, timeoutMs = 4000): Promise<number> {
+  if (Number.isFinite(video.duration) && video.duration > 0) return Promise.resolve(video.duration)
+  if (video.duration !== Infinity) return Promise.resolve(0)
+  return new Promise((resolve) => {
+    let settled = false
+    const finish = () => {
+      if (settled) return
+      settled = true
+      video.removeEventListener('durationchange', onChange)
+      clearTimeout(timer)
+      try { video.currentTime = 0 } catch { void 0 }
+      resolve(Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0)
+    }
+    const onChange = () => {
+      if (Number.isFinite(video.duration)) finish()
+    }
+    const timer = setTimeout(finish, timeoutMs)
+    video.addEventListener('durationchange', onChange)
+    try {
+      video.currentTime = Number.MAX_SAFE_INTEGER
+    } catch {
+      finish()
+    }
+  })
+}
+
+/** Below this the recorder produced no real frames (empty-chunk output). */
+const MIN_TRIM_OUTPUT_BYTES = 8 * 1024
+
+export type TrimValidation = {
+  ok: boolean
+  width: number
+  height: number
+  durationSec: number
+  reason?: string
+}
+
+/**
+ * Prove a trimmed File is actually playable before anyone treats it as Ready:
+ * metadata loads, picture dimensions are non-zero, and duration resolves.
+ */
+export async function validateTrimmedVideo(file: File): Promise<TrimValidation> {
+  if (typeof document === 'undefined') return { ok: true, width: 0, height: 0, durationSec: 0 }
+  if (file.size < MIN_TRIM_OUTPUT_BYTES) {
+    return { ok: false, width: 0, height: 0, durationSec: 0, reason: 'the trimmed file came out empty' }
+  }
+  const url = URL.createObjectURL(file)
+  const video = document.createElement('video')
+  video.preload = 'metadata'
+  video.muted = true
+  try {
+    video.src = url
+    await once(video, 'loadedmetadata')
+    const durationSec = await resolveVideoDuration(video)
+    const width = video.videoWidth
+    const height = video.videoHeight
+    if (width <= 0 || height <= 0) {
+      return { ok: false, width, height, durationSec, reason: 'the trimmed video has no picture' }
+    }
+    if (durationSec <= 0.5) {
+      return { ok: false, width, height, durationSec, reason: 'the trimmed video has no readable duration' }
+    }
+    return { ok: true, width, height, durationSec }
+  } catch {
+    return { ok: false, width: 0, height: 0, durationSec: 0, reason: 'the browser could not decode the trimmed file' }
+  } finally {
+    video.removeAttribute('src')
+    try { video.load() } catch { void 0 }
+    URL.revokeObjectURL(url)
+  }
+}
+
+/** One MediaRecorder capture pass of [startSec, endSec] in the given format. */
+async function recordSegment(
   file: File,
   startSec: number,
   endSec: number,
+  mimeType: string | undefined,
   onProgress?: (fraction: number) => void,
 ): Promise<File> {
-  if (typeof window === 'undefined' || typeof MediaRecorder === 'undefined') {
-    throw new Error('Video trimming is not supported in this browser.')
-  }
-
   const url = URL.createObjectURL(file)
   const video = document.createElement('video')
   video.src = url
   video.muted = true
   video.playsInline = true
+  video.preload = 'auto'
 
   try {
     await once(video, 'loadedmetadata')
@@ -136,14 +260,12 @@ export async function trimVideoFile(
         : null
     if (!stream) throw new Error('This browser cannot capture video for trimming.')
 
-    const mimeType = pickMimeType()
     const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined)
     const chunks: BlobPart[] = []
     recorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data) }
     const stopped = new Promise<void>((resolve) => { recorder.onstop = () => resolve() })
 
-    video.currentTime = Math.max(0, startSec)
-    await once(video, 'seeked')
+    await seekTo(video, Math.max(0, startSec))
 
     recorder.start(100)
     await video.play()
@@ -160,7 +282,6 @@ export async function trimVideoFile(
     video.pause()
     recorder.stop()
     await stopped
-    onProgress?.(1)
 
     const outType = mimeType || 'video/webm'
     const ext = outType.includes('mp4') ? 'mp4' : 'webm'
@@ -170,4 +291,172 @@ export async function trimVideoFile(
   } finally {
     URL.revokeObjectURL(url)
   }
+}
+
+/**
+ * Record [startSec, endSec] by playing it on the caller's VISIBLE video
+ * element and painting each frame to a canvas that MediaRecorder captures.
+ *
+ * Why not a hidden element + element captureStream (recordSegment above)?
+ * Android Chrome stops decoding video that isn't composited on screen (the
+ * recorder then gets ZERO frames → empty file), and phones refuse a second
+ * hardware-decoder session on the same source (→ MEDIA_ERR_DECODE). Reusing
+ * the on-screen preview keeps the one decoder that already works, and canvas
+ * capture doesn't depend on element compositing.
+ */
+async function recordSegmentFromHost(
+  video: HTMLVideoElement,
+  file: File,
+  startSec: number,
+  endSec: number,
+  mimeType: string | undefined,
+  onProgress?: (fraction: number) => void,
+): Promise<File> {
+  // Fail fast on an already-dead element: its 'error' event fired in the past,
+  // so waiting for 'loadedmetadata' would hang forever.
+  if (video.error) {
+    throw new Error(`the preview failed to load (media error ${video.error.code}) — reopen the trimmer and retry`)
+  }
+  if (video.readyState < HTMLMediaElement.HAVE_METADATA) await once(video, 'loadedmetadata')
+  const vw = video.videoWidth
+  const vh = video.videoHeight
+  if (!vw || !vh) throw new Error('the preview has no picture to record')
+
+  // Cap the encode resolution: phone encoders handle 720p-class output far
+  // more reliably than 4K, and pose tracking / AI analysis don't need more.
+  const MAX_DIM = 1280
+  const scale = Math.min(1, MAX_DIM / Math.max(vw, vh))
+  const cw = Math.max(2, Math.round((vw * scale) / 2) * 2)
+  const ch = Math.max(2, Math.round((vh * scale) / 2) * 2)
+
+  const canvas = document.createElement('canvas')
+  canvas.width = cw
+  canvas.height = ch
+  const ctx = canvas.getContext('2d')
+  if (!ctx) throw new Error('canvas rendering is unavailable in this browser')
+
+  const stream = canvas.captureStream(30)
+  const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined)
+  const chunks: BlobPart[] = []
+  recorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data) }
+  const stopped = new Promise<void>((resolve) => { recorder.onstop = () => resolve() })
+
+  await seekTo(video, Math.max(0, startSec))
+  // Paint the first frame before start() so no chunk is ever empty.
+  try { ctx.drawImage(video, 0, 0, cw, ch) } catch { void 0 }
+
+  const vfcVideo = video as HTMLVideoElement & {
+    requestVideoFrameCallback?: (cb: () => void) => number
+    cancelVideoFrameCallback?: (id: number) => void
+  }
+  const useVfc = typeof vfcVideo.requestVideoFrameCallback === 'function'
+  let frameCbId: number | null = null
+
+  recorder.start(100)
+  try {
+    await video.play()
+  } catch {
+    recorder.stop()
+    await stopped
+    throw new Error('the browser blocked playback during trimming — tap the video once, then retry')
+  }
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      // Watchdog: if playback stalls (decode starvation, app backgrounded)
+      // fail loudly instead of hanging on a silent recorder forever.
+      let lastT = video.currentTime
+      let stalledChecks = 0
+      const watchdog = setInterval(() => {
+        // Also the completion backstop: frame callbacks can starve while the
+        // video keeps playing (headless, decoder hiccups) — finish here too.
+        if (video.ended || video.currentTime >= endSec) {
+          cleanup()
+          return resolve()
+        }
+        if (video.currentTime <= lastT + 0.05) {
+          stalledChecks++
+          if (stalledChecks >= 5) {
+            cleanup()
+            reject(new Error('playback stalled while trimming — keep the app in the foreground and retry'))
+          }
+        } else {
+          stalledChecks = 0
+        }
+        lastT = video.currentTime
+      }, 2000)
+      const cleanup = () => {
+        clearInterval(watchdog)
+        if (frameCbId != null && useVfc && vfcVideo.cancelVideoFrameCallback) {
+          vfcVideo.cancelVideoFrameCallback(frameCbId)
+        }
+      }
+      const step = () => {
+        if (video.currentTime >= endSec || video.ended) {
+          cleanup()
+          return resolve()
+        }
+        try { ctx.drawImage(video, 0, 0, cw, ch) } catch { void 0 }
+        onProgress?.(Math.min(1, (video.currentTime - startSec) / Math.max(0.001, endSec - startSec)))
+        schedule()
+      }
+      const schedule = () => {
+        if (useVfc && vfcVideo.requestVideoFrameCallback) frameCbId = vfcVideo.requestVideoFrameCallback(step)
+        else requestAnimationFrame(step)
+      }
+      schedule()
+    })
+  } finally {
+    try { video.pause() } catch { void 0 }
+  }
+
+  recorder.stop()
+  await stopped
+
+  const outType = mimeType || 'video/webm'
+  const ext = outType.includes('mp4') ? 'mp4' : 'webm'
+  const base = file.name.replace(/\.[^.]+$/, '') || 'clip'
+  const blob = new Blob(chunks, { type: outType })
+  return new File([blob], `${base}-trim.${ext}`, { type: outType })
+}
+
+/**
+ * Re-encode [startSec, endSec] of `file` to a new File by playing that segment
+ * and capturing it via MediaRecorder. Runs at ~real time. Every output is
+ * validated for playability; on an unplayable result the other container
+ * family is tried once before rejecting, so a broken file can never be
+ * confirmed as the clip to analyze.
+ *
+ * Pass `opts.hostVideo` (the trimmer dialog's on-screen player, already loaded
+ * with this file) — required for phones, where hidden-element capture yields
+ * empty output. Without it, the legacy hidden-element path is used.
+ */
+export async function trimVideoFile(
+  file: File,
+  startSec: number,
+  endSec: number,
+  onProgress?: (fraction: number) => void,
+  opts?: { hostVideo?: HTMLVideoElement | null },
+): Promise<File> {
+  if (typeof window === 'undefined' || typeof MediaRecorder === 'undefined') {
+    throw new Error('Video trimming is not supported in this browser.')
+  }
+
+  const host = opts?.hostVideo ?? null
+  let lastReason = ''
+  for (const mimeType of trimMimeCandidates()) {
+    const out = host
+      ? await recordSegmentFromHost(host, file, startSec, endSec, mimeType, onProgress)
+      : await recordSegment(file, startSec, endSec, mimeType, onProgress)
+    const check = await validateTrimmedVideo(out)
+    if (check.ok) {
+      onProgress?.(1)
+      return out
+    }
+    lastReason = check.reason ?? 'unplayable output'
+    console.warn(`[trim] ${mimeType || 'default'} output failed validation (${lastReason}) — retrying alternate format`)
+  }
+  throw new Error(
+    `Trim failed — ${lastReason || 'the re-encoded clip was unplayable'}. Try a shorter selection or a different source format (MP4/H.264 works best).`,
+  )
 }

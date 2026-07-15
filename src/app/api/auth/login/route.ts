@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { buildSessionCookieHeader, createSession, ensureShogunUserExists, verifyLogin } from '@/lib/musashiAuth'
+import { buildSessionCookieHeader, createSession, ensureShogunUserExists, isEmailVerificationRequired, verifyLogin } from '@/lib/musashiAuth'
 
 export async function POST(req: Request) {
   try {
@@ -16,7 +16,7 @@ export async function POST(req: Request) {
       const { cookieValue } = await createSession(req, user.id)
 
       return NextResponse.json(
-        { user },
+        { user: { ...user, emailVerificationRequired: isEmailVerificationRequired() } },
         {
           status: 200,
           headers: {
@@ -31,7 +31,7 @@ export async function POST(req: Request) {
     const { cookieValue } = await createSession(req, user.id)
 
     return NextResponse.json(
-      { user },
+      { user: { ...user, emailVerificationRequired: isEmailVerificationRequired() } },
       {
         status: 200,
         headers: {

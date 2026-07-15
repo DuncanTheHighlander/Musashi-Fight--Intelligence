@@ -5,6 +5,7 @@ import {
   coachingPayloadToProse,
   describeMoment,
   extractConfidenceNote,
+  formatHumanTimes,
   looksLikeCoachingJson,
   sanitizeCoachText,
 } from './coachFeedback'
@@ -156,5 +157,23 @@ describe('looksLikeCoachingJson', () => {
     expect(looksLikeCoachingJson('{"foo": 1}')).toBe(false)
     expect(looksLikeCoachingJson('{"mainDiagnosis": "x"}')).toBe(true)
     expect(looksLikeCoachingJson('keep your mainDiagnosis private')).toBe(false)
+  })
+})
+
+describe('formatHumanTimes', () => {
+  it('converts millisecond tokens to seconds', () => {
+    expect(formatHumanTimes('The trap lands at 2135ms into the clip.')).toBe(
+      'The trap lands at 2.1s into the clip.'
+    )
+    expect(formatHumanTimes('Fault at 4000ms.')).toBe('Fault at 4s.')
+    expect(formatHumanTimes('t=1500ms and 800 ms later')).toBe('1.5s and 0.8s later')
+  })
+
+  it('leaves already-human times alone', () => {
+    expect(formatHumanTimes('at 0:04 and 4.2s in')).toBe('at 0:04 and 4.2s in')
+  })
+
+  it('sanitizes ms tokens even in plain (non-JSON) coach text', () => {
+    expect(sanitizeCoachText('Recover at 2135ms.')).toBe('Recover at 2.1s.')
   })
 })

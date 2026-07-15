@@ -10,7 +10,7 @@
  *   }
  */
 import { NextResponse } from 'next/server'
-import { enforceUsage } from '@/lib/musashiUsage'
+import { requireUser } from '@/lib/musashiAuth'
 import { getDb } from '@/lib/marketplace/types'
 import type { MarketplaceDisputeRow, MarketplaceJobRow } from '@/lib/marketplace/types'
 import { assertUploadedAssetsOwned } from '@/lib/storage/assets'
@@ -27,7 +27,7 @@ const uniqMerge = (a: string[], b: string[]): string[] => {
 
 export async function POST(req: Request, context: { params: Promise<Params> }) {
   try {
-    const user = await enforceUsage(req, 'chat')
+    const user = await requireUser(req)
     const { id } = await context.params
     const body = (await req.json()) as Record<string, unknown>
 

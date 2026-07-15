@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server'
 import { aiGuard, aiErrorResponse } from '@/lib/ai/aiGuard'
+import { isNoClipChatRequest } from '@/lib/noClipChatUsage'
 import {
   enforceVideoAnalysis,
   extractFightVideoQuotaContext,
@@ -8,6 +9,11 @@ import {
   extractChatClipKey,
   enforceClipQuestionLimit,
 } from '@/lib/musashiUsage'
+import {
+  commitVideoAnalysisCredit,
+  releaseVideoAnalysisCredit,
+  reserveVideoAnalysisCredit,
+} from '@/lib/videoAnalysisSessions'
 import { requireUser, type MusashiUser } from '@/lib/musashiAuth'
 import { composeSystemPrompt, DEFAULT_PROMPTS } from '@/lib/aiClient'
 import { getDisciplinePrompt } from '@/lib/disciplinePrompts'
@@ -41,6 +47,7 @@ import {
 } from '@/lib/fightAnalysisPrompt'
 import { logger } from '@/lib/logger'
 import { readSecretEnv } from '@/lib/env'
+import { getServerSecret } from '@/lib/cloudflare/secrets'
 import { getKnowledgeContext, logActivity } from '@/lib/musashiLibrary'
 
 const debugLog = (msg: string, ctx?: Record<string, unknown>) => {
@@ -1000,7 +1007,7 @@ const handleAnalyzeFrame = async (formData: FormData, user: any) => {
   }
 
   const openaiKey = readSecretEnv('OPENAI_API_KEY')
-  const geminiKey = readSecretEnv('GEMINI_API_KEY')
+  const geminiKey = await getServerSecret('GEMINI_API_KEY')
   const provider = (process.env.FIGHT_LLM_PROVIDER || '').toLowerCase()
 
   if (!openaiKey && !geminiKey) {
@@ -1156,7 +1163,7 @@ const handleChat = async (body: any, user: any) => {
     userMessages[0]?.role === 'user'
 
   const openaiKey = readSecretEnv('OPENAI_API_KEY')
-  const geminiKey = readSecretEnv('GEMINI_API_KEY')
+  const geminiKey = await getServerSecret('GEMINI_API_KEY')
   const provider = (process.env.FIGHT_LLM_PROVIDER || '').toLowerCase()
 
   logger.debug('API configuration', { hasOpenAI: !!openaiKey, hasGemini: !!geminiKey, provider })
@@ -1294,7 +1301,10 @@ const handleChat = async (body: any, user: any) => {
     '- Use second person ("you") when coaching the focused fighter, third person for the opponent.\n' +
     '- Use commands: "do X", "stop Y", "when Z happens, hit W" — not "consider", "perhaps", "you might want to".\n' +
     '- No motivational filler: no "great work", "keep it up" — only corrections and tactics.\n' +
-    '- Reference what you SEE, not abstractions.\n'
+    '- Reference what you SEE, not abstractions.\n' +
+    '- LENGTH (HARD): Default replies ≤120 words — a reporter\'s lead line, then max 4 short lines (cues/answers). Go longer ONLY if the user explicitly asks for depth ("explain in detail", "break down everything", "in full detail").\n' +
+    '- Presets (Gameplan / Counters / Corner advice): keep their structure, but each section max 2 lines.\n' +
+    '- TIME FORMAT (HARD): Write times as seconds into the clip — "at 0:04" or "4.2s in". NEVER raw milliseconds (no "2135ms").\n'
 
   const focusAwareSystem = focusAwareSystemBase + disciplineSection + coachBrainSection + CONDENSED_FRAMEWORKS
 
@@ -1373,7 +1383,32 @@ const handleChat = async (body: any, user: any) => {
     }
   }
 
-  const focusSystem = focusAwareSystem + '\n' + kinematicsBlock + factualLedgerBlock + analysisBlock + strategyBlock + knowledgeBlock + taxonomyBlock + patternBlock + personalizedBlock
+  // Empty-evidence honesty gate: when a clip is loaded in the app but was
+  // never attached as native video, the model cannot see the footage. With no
+  // pose frames and an empty ledger either, anything it says about the clip
+  // is invented — force it to say it can't see the clip instead.
+  let evidenceStatusBlock = ''
+  const clientEvidence = context?.evidence
+  const hasVideoAttachment = Boolean(context?.nativeVideo && (context?.videoFileUri || context?.videoData))
+  if (clientEvidence?.clipLoaded && !hasVideoAttachment) {
+    const evidencePoseFrames = Number(clientEvidence.poseFrames) || 0
+    const evidenceLedgerEvents = Number(clientEvidence.ledgerEvents) || 0
+    if (evidencePoseFrames < 4 && evidenceLedgerEvents === 0) {
+      evidenceStatusBlock =
+        '\n\nEVIDENCE STATUS: NO CLIP EVIDENCE AVAILABLE (CRITICAL — OVERRIDES ALL COACHING INSTRUCTIONS ABOVE):\n' +
+        '- The user has a clip loaded in the app, but you have NO access to it: the video is not attached to this request, pose tracking produced no usable frames, and the evidence ledger is empty.\n' +
+        '- You MUST NOT describe, summarize, or coach the content of this clip. Do not name positions, submissions, strikes, exchanges, techniques, or timestamps from it — anything you say about the clip would be invented.\n' +
+        '- If asked what is happening in the clip (or for coaching on it), say plainly that you cannot see the clip yet, then tell them how to fix it: press Play so tracking can run, wait for Ready with real frames, or run "Full Clip Analysis" to attach the video. If the player shows a black screen, the trim/upload likely failed — re-upload the clip.\n' +
+        '- You MAY still answer general fight questions that do not depend on this clip.\n'
+    } else {
+      evidenceStatusBlock =
+        '\n\nEVIDENCE STATUS: POSE/LEDGER DATA ONLY (no video attached to this request):\n' +
+        '- You cannot see the actual footage. Your ONLY clip evidence is the pose/kinematics/ledger data in this prompt.\n' +
+        '- Never invent visual details (colors, gear, environment, expressions). Coach strictly from the provided data, and state uncertainty when it is thin or occluded (common in grappling).\n'
+    }
+  }
+
+  const focusSystem = focusAwareSystem + evidenceStatusBlock + '\n' + kinematicsBlock + factualLedgerBlock + analysisBlock + strategyBlock + knowledgeBlock + taxonomyBlock + patternBlock + personalizedBlock
   const system = focusSystem
 
   try {
@@ -1904,7 +1939,7 @@ const handleReflex = async (formData: FormData, user: any) => {
   }
 
   const openaiKey = readSecretEnv('OPENAI_API_KEY')
-  const geminiKey = readSecretEnv('GEMINI_API_KEY')
+  const geminiKey = await getServerSecret('GEMINI_API_KEY')
   const provider = (process.env.FIGHT_LLM_PROVIDER || '').toLowerCase()
 
   if (!openaiKey && !geminiKey) {
@@ -2059,7 +2094,7 @@ const handleTrack = async (formData: FormData, user: any) => {
   }
 
   const openaiKey = readSecretEnv('OPENAI_API_KEY')
-  const geminiKey = readSecretEnv('GEMINI_API_KEY')
+  const geminiKey = await getServerSecret('GEMINI_API_KEY')
   const provider = (process.env.FIGHT_LLM_PROVIDER || '').toLowerCase()
 
   if (!openaiKey && !geminiKey) {
@@ -2226,7 +2261,7 @@ const handleStrategy = async (body: any, user: any) => {
     throw new Error('Missing messages')
   }
 
-  const geminiKey = readSecretEnv('GEMINI_API_KEY')
+  const geminiKey = await getServerSecret('GEMINI_API_KEY')
   if (!geminiKey) {
     throw new Error('GEMINI_API_KEY not set')
   }
@@ -2438,7 +2473,7 @@ const handleAnalyzeFrames = async (formData: FormData, user: any) => {
   }
 
   const openaiKey = readSecretEnv('OPENAI_API_KEY')
-  const geminiKey = readSecretEnv('GEMINI_API_KEY')
+  const geminiKey = await getServerSecret('GEMINI_API_KEY')
   const provider = (process.env.FIGHT_LLM_PROVIDER || '').toLowerCase()
 
   if (!openaiKey && !geminiKey) {
@@ -2619,7 +2654,7 @@ const handlePresets = async (user: any) => {
 // Option B: Handle video file upload to Gemini Files API
 const handleVideoUpload = async (formData: FormData, user: any) => {
   const videoFile = formData.get('video') as File
-  const geminiKey = readSecretEnv('GEMINI_API_KEY')
+  const geminiKey = await getServerSecret('GEMINI_API_KEY')
   
   logger.info('Video upload request', { fileName: videoFile?.name, fileSize: videoFile?.size, hasGeminiKey: !!geminiKey })
   
@@ -2749,9 +2784,9 @@ const handleVideoUpload = async (formData: FormData, user: any) => {
  * Runs Flash scan → deep analysis, emitting SSE events throughout.
  * Returns a streaming Response (bypasses NextResponse.json wrapper).
  */
-const handleAnalyzeVideoStream = (body: any): Response => {
+const handleAnalyzeVideoStream = async (body: any): Promise<Response> => {
   const { videoFileUri, videoMimeType, clipDuration, focusTarget, poseEvidence, discipline, clipType, poseEngine } = body
-  const geminiKey = readSecretEnv('GEMINI_API_KEY')
+  const geminiKey = await getServerSecret('GEMINI_API_KEY')
 
   const encoder = new TextEncoder()
   const sse = (event: string, data: object) =>
@@ -3248,7 +3283,9 @@ export async function POST(req: Request) {
     }
 
     const quotaBucket = fightActionToQuotaBucket(action)
-    const guard = await aiGuard(req, quotaBucket)
+    const guard = await aiGuard(req, quotaBucket, {
+      noClipChat: isNoClipChatRequest(action, body),
+    })
     if (!guard.ok) return guard.response
 
     let user: MusashiUser | null = guard.user
@@ -3301,7 +3338,30 @@ export async function POST(req: Request) {
     switch (action) {
       case 'upload_video':
         if (!formData) throw new Error('FormData required for upload_video')
-        result = await handleVideoUpload(formData, user)
+        {
+          const sessionId = String(formData.get('videoAnalysisSessionId') || '').trim()
+          const clipDurationSec = Number(formData.get('clipDurationSec') || formData.get('clipDuration') || 0)
+          let reserved = false
+          try {
+            await reserveVideoAnalysisCredit(user.id, user.role, { sessionId, clipDurationSec })
+            reserved = true
+            const upload = await handleVideoUpload(formData, user)
+            const credits = await commitVideoAnalysisCredit(user.id, user.role, {
+              sessionId,
+              clipKey: String(upload.fileUri || ''),
+            })
+            result = { ...upload, credits, videoAnalysisSessionId: sessionId }
+          } catch (error) {
+            if (reserved) {
+              await releaseVideoAnalysisCredit(
+                user.id,
+                sessionId,
+                error instanceof Error ? error.message : 'VIDEO_ANALYSIS_FAILED',
+              )
+            }
+            return aiErrorResponse(error)
+          }
+        }
         break
 
       case 'analyze_frame':

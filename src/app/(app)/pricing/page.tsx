@@ -24,7 +24,7 @@ const PLAN_OPTIONS = [
 ] as const
 
 const FREE_FEATURES = [
-  '2 free AI video analyses (10 seconds max) — no card required',
+  '3 free AI video analyses (10 seconds max) — no card required',
   'Marketplace access (browse, post jobs, hire analysts)',
   'Fight Lab skeleton tracking on uploaded clips',
   'Daily chat & coaching limits',

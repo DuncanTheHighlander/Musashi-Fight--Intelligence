@@ -2,7 +2,7 @@
  * GET /api/social/analysts/[id] — public analyst profile (aggregates + bio).
  */
 import { NextResponse } from 'next/server'
-import { enforceUsage } from '@/lib/musashiUsage'
+import { requireUser } from '@/lib/musashiAuth'
 import { currentActiveJobCount } from '@/lib/marketplace/jobs'
 import { maxCapacity } from '@/lib/marketplace/beltTier'
 import { getDb } from '@/lib/marketplace/types'
@@ -12,7 +12,7 @@ type Params = { id: string }
 
 export async function GET(req: Request, context: { params: Promise<Params> }) {
   try {
-    await enforceUsage(req, 'chat')
+    await requireUser(req)
     const { id } = await context.params
     const db = getDb()
 

@@ -4,11 +4,12 @@ export type MarketplaceFundResult = {
   redirected: boolean
   jobId: string
   status: string
+  fundedInline?: boolean
 }
 
 export async function fundMarketplaceJob(
   jobId: string,
-  urls?: { successUrl?: string; cancelUrl?: string },
+  urls?: { successUrl?: string; cancelUrl?: string; preferCheckout?: boolean },
 ): Promise<MarketplaceFundResult> {
   const origin = typeof window !== 'undefined' ? window.location.origin : ''
   const successUrl =
@@ -20,7 +21,11 @@ export async function fundMarketplaceJob(
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     credentials: 'include',
-    body: JSON.stringify({ successUrl, cancelUrl }),
+    body: JSON.stringify({
+      successUrl,
+      cancelUrl,
+      preferCheckout: urls?.preferCheckout === true,
+    }),
   })
 
   const funded = await parseApiResponse<{
@@ -29,8 +34,18 @@ export async function fundMarketplaceJob(
     payment?: {
       requiresRedirect?: boolean
       checkoutUrl?: string | null
+      fundedInline?: boolean
     }
   }>(fundRes)
+
+  if (funded.payment?.fundedInline) {
+    return {
+      redirected: false,
+      jobId: funded.jobId,
+      status: funded.status,
+      fundedInline: true,
+    }
+  }
 
   if (funded.payment?.requiresRedirect && funded.payment.checkoutUrl) {
     window.location.assign(funded.payment.checkoutUrl)

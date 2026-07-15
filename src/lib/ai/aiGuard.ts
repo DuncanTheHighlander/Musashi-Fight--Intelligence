@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 import { enforceUsage, type MusashiAction } from '@/lib/musashiUsage'
 import type { MusashiUser } from '@/lib/musashiAuth'
 import { assertEmailVerified, requireUser } from '@/lib/musashiAuth'
+import { consumeNoClipChatQuestion } from '@/lib/noClipChatUsage'
 
 /**
  * Shared "wallet gate" for every AI-spending route.
@@ -27,6 +28,7 @@ import { assertEmailVerified, requireUser } from '@/lib/musashiAuth'
 export type AiGuardOk = { ok: true; user: MusashiUser | null }
 export type AiGuardErr = { ok: false; response: NextResponse }
 export type AiGuardResult = AiGuardOk | AiGuardErr
+export type AiGuardOptions = { noClipChat?: boolean }
 
 const KILL_SWITCH = (): boolean => process.env.MUSASHI_AI_KILL_SWITCH === '1'
 
@@ -96,7 +98,8 @@ const errorResponse = (
  */
 export const aiGuard = async (
   req: Request,
-  action: MusashiAction
+  action: MusashiAction,
+  options: AiGuardOptions = {},
 ): Promise<AiGuardResult> => {
   // 1. Global kill switch beats everything else.
   if (KILL_SWITCH()) {
@@ -120,6 +123,9 @@ export const aiGuard = async (
   if (hasDbBinding()) {
     try {
       const user = await enforceUsage(req, action)
+      if (options.noClipChat) {
+        await consumeNoClipChatQuestion(user.id, user.role)
+      }
       return { ok: true, user: user as MusashiUser }
     } catch (err) {
       return { ok: false, response: aiErrorResponse(err) }
@@ -133,6 +139,7 @@ export const aiGuard = async (
   if (!isAuthDisabled()) {
     try {
       user = (await requireUser(req)) as MusashiUser
+      assertEmailVerified(user)
     } catch (err) {
       return { ok: false, response: aiErrorResponse(err) }
     }
@@ -199,7 +206,7 @@ export const aiErrorResponse = (err: unknown): NextResponse => {
       {
         error: 'Free video analysis limit reached.',
         code: 'FREE_VIDEO_QUOTA',
-        hint: 'Free includes 2 AI videos (10s max). Upgrade to Pro for weekly 30s clips. Marketplace stays available.',
+        hint: 'Free includes 3 successful AI video analyses (10s max). Failed uploads do not use a credit. Upgrade to Pro for weekly 30s clips. Marketplace stays available.',
       },
       402
     )
@@ -227,6 +234,17 @@ export const aiErrorResponse = (err: unknown): NextResponse => {
     )
   }
 
+  if (message === 'NO_CLIP_CHAT_QUOTA') {
+    return errorResponse(
+      {
+        error: 'Free no-video coaching limit reached for today.',
+        code: 'NO_CLIP_CHAT_QUOTA',
+        hint: 'Upload a clip, upgrade to Pro, or return after the daily reset.',
+      },
+      402
+    )
+  }
+
   if (message === 'VIDEO_CONTEXT_REQUIRED') {
     return errorResponse(
       {
@@ -234,6 +252,33 @@ export const aiErrorResponse = (err: unknown): NextResponse => {
         code: 'VIDEO_CONTEXT_REQUIRED',
       },
       400
+    )
+  }
+
+  if (
+    message === 'VIDEO_SESSION_REQUIRED' ||
+    message === 'VIDEO_ANALYSIS_SESSION_EXPIRED' ||
+    message === 'VIDEO_ANALYSIS_SESSION_BUSY'
+  ) {
+    return errorResponse(
+      {
+        error: message === 'VIDEO_ANALYSIS_SESSION_BUSY'
+          ? 'This clip is already being finalized. Please retry in a moment.'
+          : 'Your analysis request expired before the video could be prepared. Please try again.',
+        code: message,
+      },
+      message === 'VIDEO_SESSION_REQUIRED' ? 400 : 409,
+    )
+  }
+
+  if (message === 'EMAIL_NOT_VERIFIED') {
+    return errorResponse(
+      {
+        error: 'Verify your email before using AI coaching.',
+        code: 'EMAIL_NOT_VERIFIED',
+        hint: 'Open Profile and resend the verification email if you need a new link.',
+      },
+      403,
     )
   }
 

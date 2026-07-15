@@ -1,5 +1,6 @@
 import { safeParseResponse } from '@/lib/safeJson'
 import { resolvedModels } from '@/lib/gemini/models'
+import { getServerSecret } from '@/lib/cloudflare/secrets'
 
 export type ParsedClipQuery = {
   includeTags: string[]
@@ -76,7 +77,7 @@ const fallbackParse = (query: string): ParsedClipQuery => {
  * step rather than a vector search.
  */
 export async function parseClipQuery(query: string): Promise<ParsedClipQuery> {
-  const apiKey = process.env.GEMINI_API_KEY
+  const apiKey = await getServerSecret('GEMINI_API_KEY')
   if (!apiKey) return fallbackParse(query)
 
   try {

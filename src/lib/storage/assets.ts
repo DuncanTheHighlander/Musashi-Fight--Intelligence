@@ -13,9 +13,11 @@ import {
   assertStorageConfigured,
   createSignedReadUrl,
   createSignedUploadUrl,
+  isR2SigningConfigured,
   resolveStorageMode,
   type SignedR2Url,
 } from './r2'
+import { getWorkerUploadsBucket } from './workerR2'
 
 export type CreateUploadTicketInput = {
   userId: string
@@ -31,7 +33,7 @@ export type CreateUploadTicketInput = {
 export type UploadTicket = {
   asset: Pick<MarketplaceAssetRow, 'id' | 'object_key' | 'status' | 'purpose' | 'content_type'>
   upload: {
-    provider: 'mock' | 'r2'
+    provider: 'mock' | 'r2' | 'worker'
     method: 'PUT'
     url: string
     headers: Record<string, string>
@@ -139,7 +141,10 @@ export async function createUploadTicket(
   const id = newId('asset')
   const now = new Date().toISOString()
   const objectKey = buildObjectKey(input.userId, input.purpose, input.originalName)
-  const bucket = mode === 'r2' ? assertStorageConfigured().bucket : mockBucketName()
+  const canPresign = mode === 'r2' && isR2SigningConfigured()
+  const workerBucket = mode === 'r2' && !canPresign ? await getWorkerUploadsBucket() : null
+  if (mode === 'r2' && !canPresign && !workerBucket) assertStorageConfigured()
+  const bucket = mode === 'r2' && canPresign ? assertStorageConfigured().bucket : mode === 'r2' ? 'musashi-uploads' : mockBucketName()
 
   await db
     .prepare(
@@ -165,8 +170,15 @@ export async function createUploadTicket(
     .run()
 
   let signed: SignedR2Url
-  if (mode === 'r2') {
+  if (mode === 'r2' && canPresign) {
     signed = await createSignedUploadUrl({ key: objectKey, contentType })
+  } else if (mode === 'r2') {
+    signed = {
+      url: `${String(input.origin || '').replace(/\/$/, '')}/api/uploads/${id}/content`,
+      method: 'PUT',
+      headers: { 'Content-Type': contentType },
+      expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+    }
   } else {
     const origin = String(input.origin || 'http://localhost:3000').replace(/\/$/, '')
     signed = {
@@ -186,7 +198,7 @@ export async function createUploadTicket(
       content_type: contentType,
     },
     upload: {
-      provider: mode,
+      provider: mode === 'r2' && !canPresign ? 'worker' : mode,
       method: 'PUT',
       url: signed.url,
       headers: signed.headers,
@@ -256,6 +268,10 @@ export async function completeUpload(
   if (mode === 'mock') {
     if (!mockObjectExists(asset.object_key)) throw new Error('UPLOAD_INCOMPLETE')
     sizeBytes = mockObjectSize(asset.object_key) || sizeBytes
+  } else if (!isR2SigningConfigured()) {
+    const object = await getWorkerUploadsBucket().then((bucket) => bucket?.head(asset.object_key))
+    if (!object) throw new Error('UPLOAD_INCOMPLETE')
+    sizeBytes = object.size || sizeBytes
   }
 
   const now = new Date().toISOString()
@@ -289,6 +305,11 @@ export async function getReadableAsset(
 
   const mode = resolveStorageMode()
   if (mode === 'r2') {
+    if (!isR2SigningConfigured()) {
+      const object = await getWorkerUploadsBucket().then((bucket) => bucket?.head(asset.object_key))
+      if (!object) throw new Error('OBJECT_NOT_FOUND')
+      return { asset, readUrl: `/api/uploads/${asset.id}/content` }
+    }
     const readUrl = await createSignedReadUrl({ key: asset.object_key })
     return { asset, readUrl }
   }

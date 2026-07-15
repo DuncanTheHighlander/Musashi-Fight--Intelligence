@@ -196,7 +196,7 @@ export const geminiClient = new SecureApiClient(
 
 // Custom Gemini method with API key in query
 export const geminiGenerate = async (model: string, content: any): Promise<ApiResponse> => {
-  const apiKey = process.env.GEMINI_API_KEY
+  const apiKey = await getServerSecret('GEMINI_API_KEY')
   if (!apiKey) {
     return { error: 'GEMINI_API_KEY not configured', status: 500 }
   }

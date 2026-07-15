@@ -91,6 +91,9 @@ export function middleware(request: NextRequest) {
 export const config = {
   matcher: [
     // Match all routes except static files
-    '/((?!_next/static|_next/image|favicon.ico).*)',
+    // R2 Worker fallback streams this authenticated route directly to the
+    // bucket. Excluding it avoids Next middleware's 10 MB request-body clone;
+    // the route itself still requires the owner session before accepting bytes.
+    '/((?!_next/static|_next/image|favicon.ico|api/uploads/[^/]+/content$).*)',
   ],
 }

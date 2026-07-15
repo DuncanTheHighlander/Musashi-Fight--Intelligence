@@ -240,7 +240,7 @@ export default function OnboardingPage() {
       )}
 
       {step === 'path' && (
-        <div className="grid gap-4 sm:grid-cols-3">
+        <div className="grid gap-4">
           <PathCard
             icon={Dumbbell}
             title="I'm here to train"
@@ -269,7 +269,7 @@ export default function OnboardingPage() {
             <Field label="Display name">
               <Input value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="Fighter name" />
             </Field>
-            <div className="grid gap-4 sm:grid-cols-2">
+            <div className="grid gap-4">
               <Field label="Discipline">
                 <select className={selectClass} value={discipline} onChange={(e) => setDiscipline(e.target.value)}>
                   {DISCIPLINES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
@@ -326,7 +326,7 @@ export default function OnboardingPage() {
                 ))}
               </div>
             </Field>
-            <div className="grid gap-4 sm:grid-cols-2">
+            <div className="grid gap-4">
               <Field label="Turnaround (hours)">
                 <Input type="number" min={1} value={turnaroundHours} onChange={(e) => setTurnaroundHours(Number(e.target.value))} />
               </Field>

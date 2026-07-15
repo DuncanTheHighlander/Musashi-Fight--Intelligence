@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { getCurrentUser } from '@/lib/musashiAuth'
+import { getCurrentUser, isEmailVerificationRequired } from '@/lib/musashiAuth'
 
 export async function GET(req: Request) {
   if (process.env.MUSASHI_DISABLE_AUTH === '1' && process.env.NODE_ENV !== 'production') {
@@ -10,6 +10,7 @@ export async function GET(req: Request) {
           email: 'dev@local',
           display_name: 'Dev',
           role: 'shogun',
+          emailVerificationRequired: false,
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
         },
@@ -27,6 +28,7 @@ export async function GET(req: Request) {
       user: {
         ...user,
         display_name: user.display_name || user.email?.split('@')[0] || 'User',
+        emailVerificationRequired: isEmailVerificationRequired(),
       },
     }, { status: 200 })
   } catch (err) {

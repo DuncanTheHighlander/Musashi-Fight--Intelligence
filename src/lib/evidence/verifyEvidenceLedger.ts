@@ -3,7 +3,7 @@
  * Shared by /api/fight/analyze and mirrors the streaming pipeline in route.ts.
  */
 
-import { readSecretEnv } from '@/lib/env'
+import { getServerSecret } from '@/lib/cloudflare/secrets'
 import {
   buildEvidenceLedgerPrompt,
   buildEvidenceVerificationPrompt,
@@ -52,7 +52,7 @@ async function flashGenerate(args: {
   useGrapplingSchema?: boolean
   timeoutMs?: number
 }): Promise<FactualLedger | null> {
-  const geminiKey = readSecretEnv('GEMINI_API_KEY')
+  const geminiKey = await getServerSecret('GEMINI_API_KEY')
   if (!geminiKey) return null
 
   const model = resolvedModels.flash()

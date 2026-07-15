@@ -1,8 +1,8 @@
 import { NextResponse } from 'next/server'
 import { createEmailToken } from '@/lib/auth/emailTokens'
 import { sendTransactionalEmail } from '@/lib/email/emailClient'
-import { getDb } from '@/lib/db'
-import { buildSessionCookieHeader, createSession, createUser, type MusashiRole } from '@/lib/musashiAuth'
+import { getDbAsync } from '@/lib/db'
+import { buildSessionCookieHeader, createSession, createUser, isEmailVerificationRequired, type MusashiRole } from '@/lib/musashiAuth'
 
 type RegisterBody = {
   email?: string
@@ -24,7 +24,7 @@ const appBaseUrl = (req: Request): string =>
 const trySendVerifyEmail = async (req: Request, user: { id: string; email: string; emailVerifiedAt: string | null }) => {
   if (user.emailVerifiedAt) return
   try {
-    const db = getDb()
+    const db = await getDbAsync()
     const created = await createEmailToken(db, {
       userId: user.id,
       email: user.email,
@@ -62,7 +62,7 @@ export async function POST(req: Request) {
     await trySendVerifyEmail(req, user)
 
     return NextResponse.json(
-      { user },
+      { user: { ...user, emailVerificationRequired: isEmailVerificationRequired() } },
       {
         status: 200,
         headers: {

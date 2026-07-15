@@ -3,7 +3,7 @@
  *   Readable by: admin, the opener, the fighter, or the analyst on the job.
  */
 import { NextResponse } from 'next/server'
-import { enforceUsage } from '@/lib/musashiUsage'
+import { requireUser } from '@/lib/musashiAuth'
 import { getDb } from '@/lib/marketplace/types'
 import type { MarketplaceDisputeRow, MarketplaceJobRow } from '@/lib/marketplace/types'
 
@@ -11,7 +11,7 @@ type Params = { id: string }
 
 export async function GET(req: Request, context: { params: Promise<Params> }) {
   try {
-    const user = await enforceUsage(req, 'chat')
+    const user = await requireUser(req)
     const { id } = await context.params
     const db = getDb()
 

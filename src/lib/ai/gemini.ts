@@ -1,15 +1,16 @@
 /** @deprecated Use gemini-embed.ts + gemini-reason.ts + gemini-client.ts instead. */
 import { GoogleGenerativeAI } from '@google/generative-ai'
 import { GEMINI_MODEL_DEFAULT, GEMINI_EMBED_MODEL_DEFAULT } from '@/lib/gemini/models'
+import { getServerSecret } from '@/lib/cloudflare/secrets'
 
-function getGenAI() {
-  const apiKey = process.env.GEMINI_API_KEY
+async function getGenAI() {
+  const apiKey = await getServerSecret('GEMINI_API_KEY')
   if (!apiKey) throw new Error('GEMINI_API_KEY is not set')
   return new GoogleGenerativeAI(apiKey)
 }
 
 export async function generateEmbedding(text: string): Promise<number[]> {
-  const genAI = getGenAI()
+  const genAI = await getGenAI()
   const model = genAI.getGenerativeModel({ model: process.env.GEMINI_EMBED_MODEL || GEMINI_EMBED_MODEL_DEFAULT })
   const resp = await model.embedContent(text)
   const values = resp?.embedding?.values
@@ -18,7 +19,7 @@ export async function generateEmbedding(text: string): Promise<number[]> {
 }
 
 export async function generateCoachNarrative(prompt: string): Promise<string> {
-  const genAI = getGenAI()
+  const genAI = await getGenAI()
   const modelName = process.env.GEMINI_MODEL || GEMINI_MODEL_DEFAULT
   const model = genAI.getGenerativeModel({ model: modelName })
   const resp = await model.generateContent({

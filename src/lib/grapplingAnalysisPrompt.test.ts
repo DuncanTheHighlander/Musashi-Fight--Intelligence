@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import type { FactualLedger } from '@/lib/fightAnalysisPrompt'
 import {
+  GRAPPLING_ACTION_EVENTS,
+  GRAPPLING_POSITIONS,
   MUSASHI_BJJ_DEEP_ANALYSIS_SYSTEM,
   buildGrapplingCoachingPrompt,
   buildGrapplingDeepAnalysisPrompt,
@@ -66,6 +68,27 @@ describe('isGrapplingClip', () => {
   })
 })
 
+describe('riding / back-attack vocabulary', () => {
+  it('allows wrist ride, handcuff, seatbelt, hooks, body triangle as positions', () => {
+    expect(GRAPPLING_POSITIONS).toContain('wrist_ride')
+    expect(GRAPPLING_POSITIONS).toContain('dagestani_handcuff')
+    expect(GRAPPLING_POSITIONS).toContain('seatbelt_control')
+    expect(GRAPPLING_POSITIONS).toContain('hooks_in')
+    expect(GRAPPLING_POSITIONS).toContain('body_triangle')
+    expect(GRAPPLING_POSITIONS).toContain('flattened_out')
+    expect(GRAPPLING_ACTION_EVENTS).toContain('back_take')
+    expect(GRAPPLING_ACTION_EVENTS).toContain('mat_return')
+  })
+
+  it('embeds ride vocabulary in the flash-scan prompt', () => {
+    const prompt = buildGrapplingEvidenceLedgerPrompt()
+    expect(prompt).toContain('wrist_ride')
+    expect(prompt).toContain('dagestani_handcuff')
+    expect(prompt).toContain('back_take')
+    expect(prompt).toContain('Prefer ride/back vocabulary')
+  })
+})
+
 describe('buildGrapplingEvidenceLedgerPrompt', () => {
   it('asks for the grappling timeline and bans striking events', () => {
     const prompt = buildGrapplingEvidenceLedgerPrompt({ clipDuration: 30000, focusTarget: 'A' })
@@ -93,7 +116,7 @@ describe('BJJ deep pass prompts', () => {
   it('system prompt carries the evidence-contract override', () => {
     expect(MUSASHI_BJJ_DEEP_ANALYSIS_SYSTEM).toContain('ABSOLUTE SOURCE OF TRUTH')
     expect(MUSASHI_BJJ_DEEP_ANALYSIS_SYSTEM).toContain('compiler artifacts')
-    expect(MUSASHI_BJJ_DEEP_ANALYSIS_SYSTEM).toContain('macro trunk geometry')
+    expect(MUSASHI_BJJ_DEEP_ANALYSIS_SYSTEM).toContain('treat it as EMPTY')
     expect(MUSASHI_BJJ_DEEP_ANALYSIS_SYSTEM).toContain('do not hallucinate')
   })
 

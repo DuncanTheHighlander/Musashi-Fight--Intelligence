@@ -1,4 +1,5 @@
-import { getDb } from '@/lib/db'
+import { getDbAsync } from '@/lib/db'
+import { readSecretEnv } from '@/lib/env'
 
 export type MusashiRole = 'user' | 'shogun'
 
@@ -64,8 +65,15 @@ const pbkdf2Hash = async (password: string, salt: Uint8Array, iterations: number
   return new Uint8Array(bits)
 }
 
+/**
+ * Cloudflare Workers Web Crypto rejects PBKDF2 iteration counts above 100_000.
+ * Keep new hashes at the Workers ceiling; verifyPassword still honors the
+ * iteration count stored in the hash string for any older local hashes.
+ */
+export const PBKDF2_ITERATIONS = 100_000
+
 export const hashPassword = async (password: string): Promise<string> => {
-  const iterations = 120_000
+  const iterations = PBKDF2_ITERATIONS
   const salt = crypto.getRandomValues(new Uint8Array(16))
   const hash = await pbkdf2Hash(password, salt, iterations)
   return `pbkdf2$${iterations}$${base64FromBytes(salt)}$${base64FromBytes(hash)}`
@@ -80,11 +88,16 @@ export const verifyPassword = async (password: string, stored: string): Promise<
   if (!Number.isFinite(iterations) || iterations < 50_000) return false
   const salt = bytesFromBase64(saltB64)
   const expected = bytesFromBase64(hashB64)
-  const actual = await pbkdf2Hash(password, salt, iterations)
-  if (actual.length !== expected.length) return false
-  let diff = 0
-  for (let i = 0; i < actual.length; i++) diff |= actual[i] ^ expected[i]
-  return diff === 0
+  try {
+    const actual = await pbkdf2Hash(password, salt, iterations)
+    if (actual.length !== expected.length) return false
+    let diff = 0
+    for (let i = 0; i < actual.length; i++) diff |= actual[i] ^ expected[i]
+    return diff === 0
+  } catch {
+    // e.g. Workers reject iteration counts above 100_000
+    return false
+  }
 }
 
 const SESSION_COOKIE = 'musashi_session'
@@ -131,7 +144,7 @@ export const createSession = async (req: Request, userId: string): Promise<{ ses
   const ua = req.headers.get('user-agent') || null
   const ip = req.headers.get('x-forwarded-for') || req.headers.get('x-real-ip') || null
 
-  const db = getDb()
+  const db = await getDbAsync()
   await db
     .prepare(
       'INSERT INTO musashi_sessions (id, user_id, expires_at, user_agent, ip) VALUES (?, ?, ?, ?, ?)'
@@ -154,7 +167,7 @@ export const verifySessionCookie = async (cookieValue: string): Promise<string |
   const expected = await hmacSign(secret, sessionId)
   if (!timingSafeEqual(expected, sig)) return null
 
-  const db = getDb()
+  const db = await getDbAsync()
   const row = await db
     .prepare(
       `SELECT s.id, s.user_id, s.expires_at, s.revoked_at, s.created_at, u.password_updated_at
@@ -211,7 +224,7 @@ export const getCurrentUser = async (req: Request): Promise<MusashiUser | null> 
   const userId = await verifySessionCookie(cookieValue)
   if (!userId) return null
 
-  const db = getDb()
+  const db = await getDbAsync()
   const row = await db
     .prepare(
       'SELECT id, email, display_name, role, email_verified_at, password_updated_at, created_at, updated_at FROM musashi_users WHERE id = ?',
@@ -244,14 +257,15 @@ export const requireUser = async (req: Request, opts?: { role?: MusashiRole }) =
  * Whether AI / paid features should require a verified email.
  * - Off when auth bypass is on (local demos)
  * - Off when MUSASHI_REQUIRE_EMAIL_VERIFIED=0
- * - On in production by default; on in any env when MUSASHI_REQUIRE_EMAIL_VERIFIED=1
+ * - On in production when the email provider is configured
+ * - On in any env when MUSASHI_REQUIRE_EMAIL_VERIFIED=1
  * Shogun accounts are never blocked.
  */
 export const isEmailVerificationRequired = (): boolean => {
   if (process.env.MUSASHI_DISABLE_AUTH === '1' && process.env.NODE_ENV !== 'production') return false
   if (process.env.MUSASHI_REQUIRE_EMAIL_VERIFIED === '0') return false
   if (process.env.MUSASHI_REQUIRE_EMAIL_VERIFIED === '1') return true
-  return process.env.NODE_ENV === 'production'
+  return process.env.NODE_ENV === 'production' && Boolean(readSecretEnv('EMAIL_API_KEY'))
 }
 
 export const assertEmailVerified = (user: MusashiUser): void => {
@@ -262,7 +276,7 @@ export const assertEmailVerified = (user: MusashiUser): void => {
 }
 
 export const revokeAllUserSessions = async (userId: string): Promise<void> => {
-  const db = getDb()
+  const db = await getDbAsync()
   await db
     .prepare('UPDATE musashi_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL')
     .bind(new Date().toISOString(), userId)
@@ -276,7 +290,7 @@ export const revokeCurrentSession = async (req: Request): Promise<void> => {
   const [sessionId] = String(cookieValue || '').split('.')
   if (!sessionId) return
 
-  const db = getDb()
+  const db = await getDbAsync()
   await db
     .prepare('UPDATE musashi_sessions SET revoked_at = ? WHERE id = ?')
     .bind(new Date().toISOString(), sessionId)
@@ -294,7 +308,7 @@ export const revokeCurrentSession = async (req: Request): Promise<void> => {
  */
 const syncLegacyUserRow = async (user: { id: string; email: string; display_name?: string | null }): Promise<void> => {
   try {
-    const db = getDb()
+    const db = await getDbAsync()
     try {
       // Legacy 0001 schema: role CHECK ('admin','manager','cleaner','client'),
       // NOT NULL password_hash/first_name/last_name.
@@ -330,7 +344,7 @@ export const createUser = async (params: { email: string; password: string; role
 
   const displayName = params.display_name ? String(params.display_name).trim().slice(0, 100) : null
 
-  const db = getDb()
+  const db = await getDbAsync()
   const existing = await db.prepare('SELECT id FROM musashi_users WHERE email = ?').bind(email).first()
   if (existing?.id) throw new Error('Email already in use')
 
@@ -376,7 +390,7 @@ export const ensureShogunUserExists = async (): Promise<MusashiUser> => {
     throw new Error('Shogun password not configured')
   }
 
-  const db = getDb()
+  const db = await getDbAsync()
   const existing = await db
     .prepare(
       'SELECT id, email, display_name, role, email_verified_at, password_updated_at, created_at, updated_at FROM musashi_users WHERE email = ?',
@@ -423,7 +437,7 @@ export const ensureShogunUserExists = async (): Promise<MusashiUser> => {
 
 export const verifyLogin = async (params: { email: string; password: string }): Promise<MusashiUser> => {
   const email = String(params.email || '').trim().toLowerCase()
-  const db = getDb()
+  const db = await getDbAsync()
   const row = await db
     .prepare(
       'SELECT id, email, display_name, role, password_hash, email_verified_at, password_updated_at, created_at, updated_at FROM musashi_users WHERE email = ?',
@@ -462,7 +476,7 @@ export const updateUserPassword = async (userId: string, password: string): Prom
   assertPasswordPolicy(password)
   const passwordHash = await hashPassword(password)
   const now = new Date().toISOString()
-  const db = getDb()
+  const db = await getDbAsync()
   await db
     .prepare('UPDATE musashi_users SET password_hash = ?, password_updated_at = ?, updated_at = ? WHERE id = ?')
     .bind(passwordHash, now, now, userId)

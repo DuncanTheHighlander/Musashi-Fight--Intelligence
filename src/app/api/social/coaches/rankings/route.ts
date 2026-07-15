@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { enforceUsage } from '@/lib/musashiUsage'
+import { requireUser } from '@/lib/musashiAuth'
 import { getDb } from '@/lib/db'
 
 // Coach Ranking Weights (separate from fighter rankings)
@@ -47,7 +47,7 @@ const getCoachTier = (score: number): string => {
 
 export async function GET(req: Request) {
   try {
-    await enforceUsage(req, 'chat')
+    await requireUser(req)
 
     const { searchParams } = new URL(req.url)
     const discipline = searchParams.get('discipline')?.trim() || 'all'

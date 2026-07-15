@@ -60,6 +60,27 @@ function splitSentences(text: string): string[] {
     .filter(Boolean)
 }
 
+/**
+ * Render-time safety net: convert leaked millisecond tokens in AI prose to
+ * human clip time. "2135ms" / "2135 ms" / "t=2135ms" → "2.1s". Never shows
+ * raw milliseconds on screen even when the model slips.
+ */
+export function formatHumanTimes(text: string): string {
+  if (typeof text !== 'string' || !text) return text
+  return text.replace(
+    /\b(?:t\s*=\s*)?(\d{2,})\s*m(?:illi)?s(?:ec(?:ond)?s?)?\b/gi,
+    (_match, digits: string) => {
+      const ms = Number(digits)
+      if (!Number.isFinite(ms) || ms < 0) return _match
+      // Whole seconds when clean; one decimal otherwise (e.g. 2135 → 2.1s).
+      const sec = ms / 1000
+      const rounded = Math.round(sec * 10) / 10
+      const label = Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1)
+      return `${label}s`
+    }
+  )
+}
+
 /** Splits caution sentences out of a diagnosis. */
 export function extractConfidenceNote(text: string): { read: string; note: string | null } {
   const sentences = splitSentences(text)
@@ -187,7 +208,27 @@ export function buildCoachFeedbackView(
     if (evidence.length >= 4) break
   }
 
-  return { coachRead: read, fixes, drill, quickCues, confidenceNote: note, evidence }
+  return {
+    coachRead: formatHumanTimes(read),
+    fixes: fixes.map((f) => ({
+      ...f,
+      title: formatHumanTimes(f.title),
+      body: formatHumanTimes(f.body),
+    })),
+    drill: drill
+      ? {
+          title: drill.title ? formatHumanTimes(drill.title) : null,
+          body: formatHumanTimes(drill.body),
+        }
+      : null,
+    quickCues: quickCues.map(formatHumanTimes),
+    confidenceNote: note ? formatHumanTimes(note) : null,
+    evidence: evidence.map((ev) => ({
+      ...ev,
+      when: formatHumanTimes(ev.when),
+      what: formatHumanTimes(ev.what),
+    })),
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -318,7 +359,8 @@ export function sanitizeCoachText(
   if (typeof text !== 'string' || !text.trim()) return ''
   if (!looksLikeCoachingJson(text)) {
     // Still strip stray code fences so users never see developer formatting.
-    return text.includes('```') ? text.replace(/```[a-z]*\n?/gi, '').trim() : text
+    const cleaned = text.includes('```') ? text.replace(/```[a-z]*\n?/gi, '').trim() : text
+    return formatHumanTimes(cleaned)
   }
 
   // Prefer a fenced block; otherwise take the outermost brace span.
@@ -358,5 +400,5 @@ export function sanitizeCoachText(
   if (/[{}[\]"]{2,}/.test(before) || looksLikeCoachingJson(before)) before = ''
   if (/[{}[\]"]{2,}/.test(after) || looksLikeCoachingJson(after)) after = ''
 
-  return [before, prose, after].filter(Boolean).join('\n\n').trim()
+  return formatHumanTimes([before, prose, after].filter(Boolean).join('\n\n').trim())
 }

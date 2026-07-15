@@ -18,6 +18,13 @@ import { parseApiResponse } from '@/lib/safeJson'
 import { sendVerificationEmail } from '@/lib/auth'
 import Link from 'next/link'
 
+type ProfileActivity = {
+  videosAnalyzed: number
+  aiQuestions: number
+  techniquesTracked: number
+  trainingSessions: number
+}
+
 /** In-app account deletion — required by Apple 5.1.1(v) and Google Play for
  *  apps with account creation. Two-step: reveal, then password + confirm. */
 function DangerZoneCard({ isAdmin }: { isAdmin: boolean }) {
@@ -181,10 +188,12 @@ function AiConsentCard() {
 function EmailVerificationCard({
   email,
   verified,
+  required,
   onVerifiedRefresh,
 }: {
   email: string
   verified: boolean
+  required: boolean
   onVerifiedRefresh: () => Promise<void>
 }) {
   const { toast } = useToast()
@@ -240,7 +249,11 @@ function EmailVerificationCard({
           Verify your email
         </CardTitle>
         <CardDescription>
-          Confirm <strong>{email}</strong> to unlock AI coaching analysis. Marketplace browsing still works.
+          {required ? (
+            <>Confirm <strong>{email}</strong> to unlock AI coaching analysis. Marketplace browsing still works.</>
+          ) : (
+            <>Confirm <strong>{email}</strong> to protect account recovery. AI coaching remains available while verification is not enforced.</>
+          )}
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -257,10 +270,39 @@ export default function ProfileSection() {
   const router = useRouter()
   const { user, loading, checkSession } = useAuth()
   const { setActiveSection } = useSection()
+  const [activity, setActivity] = useState<ProfileActivity | null>(null)
+  const [activityError, setActivityError] = useState(false)
 
   useEffect(() => {
     if (!loading && !user) router.push('/welcome')
   }, [loading, router, user])
+
+  useEffect(() => {
+    if (!user?.id) {
+      setActivity(null)
+      setActivityError(false)
+      return
+    }
+
+    let cancelled = false
+    setActivityError(false)
+    ;(async () => {
+      try {
+        const res = await fetch('/api/profile/activity', {
+          credentials: 'include',
+          cache: 'no-store',
+        })
+        const data = await parseApiResponse<ProfileActivity>(res)
+        if (!cancelled) setActivity(data)
+      } catch {
+        if (!cancelled) setActivityError(true)
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [user?.id])
 
   if (loading) {
     return (
@@ -353,10 +395,10 @@ export default function ProfileSection() {
           </CardHeader>
           <CardContent className="space-y-1">
             {[
-              { label: 'Videos Analyzed', value: 0 },
-              { label: 'AI Conversations', value: 0 },
-              { label: 'Techniques Saved', value: 0 },
-              { label: 'Training Sessions', value: 0 },
+              { label: 'Videos Analyzed', value: activity ? String(activity.videosAnalyzed) : 0 },
+              { label: 'AI Questions', value: activity ? String(activity.aiQuestions) : 0 },
+              { label: 'Techniques Tracked', value: activity ? String(activity.techniquesTracked) : 0 },
+              { label: 'Training Sessions', value: activity ? String(activity.trainingSessions) : 0 },
             ].map((row, i, arr) => (
               <div
                 key={row.label}
@@ -369,7 +411,9 @@ export default function ProfileSection() {
               </div>
             ))}
             <p className="pt-3 text-xs text-muted-foreground/80">
-              Activity totals update after your first analysis, conversation, or saved technique.
+              {activityError
+                ? 'Activity totals are temporarily unavailable. Refresh to try again.'
+                : 'Lifetime totals update after completed coaching and training activity.'}
             </p>
           </CardContent>
         </Card>
@@ -395,11 +439,14 @@ export default function ProfileSection() {
         </CardContent>
       </Card>
 
-      <EmailVerificationCard
-        email={user.email}
-        verified={Boolean(user.emailVerifiedAt)}
-        onVerifiedRefresh={checkSession}
-      />
+      {user.role !== 'shogun' && (
+        <EmailVerificationCard
+          email={user.email}
+          verified={Boolean(user.emailVerifiedAt)}
+          required={Boolean(user.emailVerificationRequired)}
+          onVerifiedRefresh={checkSession}
+        />
+      )}
       <AiConsentCard />
       <DangerZoneCard isAdmin={user.role === 'shogun'} />
     </SectionShell>

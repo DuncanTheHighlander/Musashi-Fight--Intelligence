@@ -6,6 +6,7 @@
  * src/lib/chatMarkdown.ts for the parser.
  */
 import { parseChatMarkdown, splitBoldSegments } from '@/lib/chatMarkdown'
+import { formatHumanTimes } from '@/lib/feedback/coachFeedback'
 
 function InlineText({ text }: { text: string }) {
   const segments = splitBoldSegments(text)
@@ -17,7 +18,7 @@ function InlineText({ text }: { text: string }) {
 }
 
 export default function ChatMarkdown({ text }: { text: string }) {
-  const blocks = parseChatMarkdown(text ?? '')
+  const blocks = parseChatMarkdown(formatHumanTimes(text ?? ''))
   if (blocks.length === 0) return null
 
   return (

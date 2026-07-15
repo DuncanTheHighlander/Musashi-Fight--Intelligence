@@ -228,7 +228,7 @@ export default function NewJobPage() {
               </p>
             </div>
 
-            <div className="grid sm:grid-cols-2 gap-4">
+            <div className="grid gap-4">
               <div>
                 <label className="text-sm font-medium mb-1.5 block">Budget (USD)</label>
                 <Input
@@ -293,7 +293,7 @@ export default function NewJobPage() {
               </div>
             )}
 
-            <div className="flex gap-2 justify-end pt-2">
+            <div className="flex flex-wrap gap-2 justify-end pt-2">
               <Button type="button" variant="outline" onClick={() => router.back()}>
                 Cancel
               </Button>

@@ -32,29 +32,80 @@ const fmt = (s: number) => {
 export default function VideoTrimmer({ file, maxSec, onConfirm, onCancel }: Props) {
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const previewStopRef = useRef<number | null>(null)
-  const [url] = useState(() => URL.createObjectURL(file))
+  const scrubTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Object URL lifecycle tied to `file` via effect (NOT useState initializer):
+  // under StrictMode/remounts the state survives while the cleanup revokes the
+  // URL, leaving the player pointed at a dead blob (media error 4).
+  const [url, setUrl] = useState<string | null>(null)
   const [duration, setDuration] = useState(0)
   const [win, setWin] = useState({ start: 0, end: maxSec })
   const [processing, setProcessing] = useState(false)
   const [progress, setProgress] = useState(0)
   const [error, setError] = useState<string | null>(null)
+  const [scrubHint, setScrubHint] = useState<'start' | 'end' | null>(null)
 
-  useEffect(() => () => URL.revokeObjectURL(url), [url])
+  useEffect(() => {
+    const u = URL.createObjectURL(file)
+    setUrl(u)
+    return () => {
+      URL.revokeObjectURL(u)
+      if (scrubTimerRef.current) clearTimeout(scrubTimerRef.current)
+      if (previewStopRef.current) cancelAnimationFrame(previewStopRef.current)
+    }
+  }, [file])
+
+  const seekPreview = useCallback((timeSec: number) => {
+    const v = videoRef.current
+    if (!v) return
+    if (previewStopRef.current) {
+      cancelAnimationFrame(previewStopRef.current)
+      previewStopRef.current = null
+    }
+    try {
+      v.pause()
+    } catch {
+      void 0
+    }
+    const t = Math.max(0, Math.min(timeSec, Number.isFinite(v.duration) ? v.duration : timeSec))
+    try {
+      v.currentTime = t
+    } catch {
+      void 0
+    }
+  }, [])
+
+  const scheduleScrub = useCallback((timeSec: number, which: 'start' | 'end') => {
+    setScrubHint(which)
+    if (scrubTimerRef.current) clearTimeout(scrubTimerRef.current)
+    scrubTimerRef.current = setTimeout(() => {
+      seekPreview(timeSec)
+    }, 60)
+  }, [seekPreview])
 
   useEffect(() => {
     let cancelled = false
     void probeVideoDuration(file).then((d) => {
       if (cancelled) return
       setDuration(d)
-      setWin(defaultTrimWindow(d, maxSec))
+      const next = defaultTrimWindow(d, maxSec)
+      setWin(next)
+      // Show the first frame of the selection as soon as duration is known.
+      requestAnimationFrame(() => seekPreview(next.start))
     })
     return () => { cancelled = true }
-  }, [file, maxSec])
+  }, [file, maxSec, seekPreview])
+
+  // When metadata loads on the visible player, snap to selection start.
+  const onPreviewLoaded = () => {
+    if (duration > 0) seekPreview(win.start)
+  }
 
   const setHandle = (which: 'start' | 'end', value: number) => {
     setWin((prev) => {
       const next = which === 'start' ? { start: value, end: prev.end } : { start: prev.start, end: value }
-      return clampTrimWindow(next.start, next.end, duration, maxSec, which)
+      const clamped = clampTrimWindow(next.start, next.end, duration, maxSec, which)
+      scheduleScrub(which === 'start' ? clamped.start : clamped.end, which)
+      return clamped
     })
   }
 
@@ -63,7 +114,9 @@ export default function VideoTrimmer({ file, maxSec, onConfirm, onCancel }: Prop
     if (!v) return
     if (previewStopRef.current) cancelAnimationFrame(previewStopRef.current)
     v.currentTime = win.start
-    void v.play()
+    void v.play().catch(() => {
+      setError('Could not preview this clip in the browser. Try MP4 (H.264) or a different file.')
+    })
     const tick = () => {
       if (v.currentTime >= win.end) { v.pause(); return }
       previewStopRef.current = requestAnimationFrame(tick)
@@ -75,10 +128,20 @@ export default function VideoTrimmer({ file, maxSec, onConfirm, onCancel }: Prop
     setProcessing(true)
     setError(null)
     setProgress(0)
+    if (previewStopRef.current) {
+      cancelAnimationFrame(previewStopRef.current)
+      previewStopRef.current = null
+    }
     try {
-      const trimmed = await trimVideoFile(file, win.start, win.end, setProgress)
+      // The encode pass plays the selection on THIS visible player and records
+      // it via a canvas — phones only decode video that's actually on screen,
+      // and won't open a second decoder session on the same source.
+      const trimmed = await trimVideoFile(file, win.start, win.end, setProgress, {
+        hostVideo: videoRef.current,
+      })
       onConfirm(trimmed)
     } catch (e) {
+      try { seekPreview(win.start) } catch { void 0 }
       setError(e instanceof Error ? e.message : 'Could not trim the clip.')
       setProcessing(false)
     }
@@ -99,12 +162,18 @@ export default function VideoTrimmer({ file, maxSec, onConfirm, onCancel }: Prop
 
         <video
           ref={videoRef}
-          src={url}
+          src={url ?? undefined}
           className="w-full rounded-lg bg-black aspect-video"
           controls={!processing}
           muted
           playsInline
+          preload="auto"
+          onLoadedData={onPreviewLoaded}
         />
+        <p className="text-xs text-muted-foreground">
+          Drag Start/End to choose the window — the preview updates as you drag.
+          {scrubHint === 'start' ? ' Showing start frame.' : scrubHint === 'end' ? ' Showing end frame.' : null}
+        </p>
 
         <div className="space-y-3">
           <div className="flex items-center justify-between text-sm">
@@ -153,7 +222,10 @@ export default function VideoTrimmer({ file, maxSec, onConfirm, onCancel }: Prop
             <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
               <div className="h-full bg-primary transition-all" style={{ width: `${Math.round(progress * 100)}%` }} />
             </div>
-            <p className="text-xs text-muted-foreground">Trimming… {Math.round(progress * 100)}% (runs in real time)</p>
+            <p className="text-xs text-muted-foreground">
+              Trimming {Math.round(progress * 100)}% — your selection plays above while it&apos;s
+              recorded. Keep this screen open.
+            </p>
           </div>
         )}
 

@@ -174,7 +174,7 @@ export default function MarketplacePage() {
       />
 
       <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as typeof activeTab)}>
-        <TabsList className="grid w-full max-w-2xl grid-cols-4">
+        <TabsList className="grid h-auto w-full grid-cols-2 gap-1">
           <TabsTrigger value="clips">Clip reviews</TabsTrigger>
           <TabsTrigger value="scout">Opponent scout</TabsTrigger>
           <TabsTrigger value="analysts">Coaches</TabsTrigger>
@@ -210,7 +210,7 @@ export default function MarketplacePage() {
               }
             />
           ) : (
-            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            <div className="grid gap-4">
               {clipJobs.map((j) => (
                 <JobCard key={j.id} job={j} />
               ))}
@@ -247,7 +247,7 @@ export default function MarketplacePage() {
               }
             />
           ) : (
-            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            <div className="grid gap-4">
               {scoutJobs.map((j) => (
                 <JobCard key={j.id} job={j} />
               ))}
@@ -283,7 +283,7 @@ export default function MarketplacePage() {
               }
             />
           ) : (
-            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            <div className="grid gap-4">
               {analysts.map((a) => (
                 <AnalystCard key={a.userId} analyst={a} />
               ))}
@@ -311,10 +311,10 @@ export default function MarketplacePage() {
             <EmptySectionState
               icon={Briefcase}
               title="You have no jobs yet"
-              description="Post a bounty, or claim one from the Open Bounties tab to get started."
+              description="Post a clip review or scouting request to get started."
             />
           ) : (
-            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            <div className="grid gap-4">
               {myJobs.map((j) => (
                 <JobCard key={j.id} job={j} />
               ))}
@@ -328,7 +328,7 @@ export default function MarketplacePage() {
 
 function SkeletonGrid() {
   return (
-    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+    <div className="grid gap-4">
       {Array.from({ length: 6 }).map((_, i) => (
         <Skeleton key={i} className="h-44 rounded-lg" />
       ))}

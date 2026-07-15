@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { enforceUsage } from '@/lib/musashiUsage'
+import { requireUser } from '@/lib/musashiAuth'
 import { getDb } from '@/lib/db'
 import { hasActiveJobBetween } from '@/lib/marketplace/messagingGate'
 
@@ -27,7 +27,7 @@ const createNotification = async (userId: string, type: string, title: string, b
 
 export async function GET(req: Request) {
   try {
-    const user = await enforceUsage(req, 'chat')
+    const user = await requireUser(req)
     const { searchParams } = new URL(req.url)
     const partnerId = searchParams.get('conversationUserId')
     const limit = Math.min(Number(searchParams.get('limit') || 50), 200)
@@ -137,7 +137,7 @@ export async function GET(req: Request) {
 
 export async function POST(req: Request) {
   try {
-    const user = await enforceUsage(req, 'chat')
+    const user = await requireUser(req)
     const body = await req.json() as Record<string, any>
     const receiverId = String(body?.receiverId || '').trim()
     const content = String(body?.content || '').trim()
@@ -236,7 +236,7 @@ export async function POST(req: Request) {
 
 export async function PATCH(req: Request) {
   try {
-    const user = await enforceUsage(req, 'chat')
+    const user = await requireUser(req)
     const body = await req.json() as Record<string, any>
     const { searchParams } = new URL(req.url)
     const messageId = searchParams.get('id')

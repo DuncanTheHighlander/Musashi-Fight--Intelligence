@@ -8,6 +8,7 @@
 import { safeParseResponse } from '@/lib/safeJson'
 import type { FightEvidenceLedger, OverlayAnnotation } from '@/lib/fightlang/fightlang.types'
 import { resolvedModels } from '@/lib/gemini/models'
+import { getServerSecret } from '@/lib/cloudflare/secrets'
 
 export type BreakdownStyle = 'commentary' | 'coaching' | 'scouting'
 
@@ -169,7 +170,7 @@ export async function generateGroundedBreakdown(args: {
   focusActor: string
   coachBrainBlock?: string
 }): Promise<{ model: string; payload: BreakdownPayload; rawText: string }> {
-  const apiKey = process.env.GEMINI_API_KEY
+  const apiKey = await getServerSecret('GEMINI_API_KEY')
   if (!apiKey) throw new Error('GEMINI_API_KEY not configured')
 
   const model = resolvedModels.pro()

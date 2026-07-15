@@ -18,9 +18,40 @@ Helps Musashi analyze Brazilian Jiu-Jitsu and submission grappling: positional h
 
 ## Common Positions / Phases
 
-closed_guard, half_guard, butterfly_guard, open_guard, side_control, mount, back_control, turtle, front_headlock, leg_entanglement, scramble, guard_passing, guard_retention, submission_attempt, submission_defense
+closed_guard, half_guard, butterfly_guard, open_guard, side_control, mount, back_control, turtle, front_headlock, wrist_ride, dagestani_handcuff, seatbelt_control, hooks_in, body_triangle, flattened_out, leg_entanglement, scramble, guard_passing, guard_retention, submission_attempt, submission_defense
 
-Key transitions to recognize: guard pass → stabilization (or not), sweep → top consolidation, scramble → back exposure, submission attempt → position loss.
+Key transitions to recognize: guard pass → stabilization (or not), sweep → top consolidation, scramble → back exposure, wrist ride → handcuff → seatbelt → hooks → finish, submission attempt → position loss.
+
+## Riding & Back Attacks
+
+Core sequence to recognize on tape (and coach in order): **ride → isolate arm → seatbelt → hooks/body triangle → choke**.
+
+### Wrist ride
+- Top player sits/rides the bottom player's near arm or wrist, pinning it to the mat or behind the back so the bottom player cannot frame or post.
+- **Good (top):** hips heavy, chest pressure, far arm free to threaten; wrist stays trapped while you advance to seatbelt or mount.
+- **Bad (bottom):** free arm reaches late; elbow-knee connection broken; getting flattened before the grip fight starts.
+- **Counter (bottom):** fight the grip early — peel the wrist, recover elbow-knee, shrimp to a hip before the ride settles. Do not wait until you are flattened.
+
+### Dagestani handcuff (arm trap behind the back)
+- Top traps the bottom player's far/near arm with a leg or body so the arm is pinned behind the back ("Khabib" trap) — leaves only one arm to defend the neck.
+- **Good (top):** step the leg cleanly over the arm, keep hips glued, then establish seatbelt before hunting the choke.
+- **Bad (bottom):** both elbows flare; no grip fight on the trapping leg; turning the wrong way and giving more back.
+- **Counter (bottom):** hand-fight the trapping leg immediately, get the elbow inside the thigh, turn into the opponent (not away), rebuild frames.
+
+### Seatbelt → hooks → body triangle
+- Seatbelt = over/under chest control from the back. Hooks in = both heels inside the thighs. Body triangle = legs locked around the torso to anchor.
+- **Good (top):** seatbelt first, then hooks or triangle, THEN isolate the defensive arm, THEN choke. Control before finish.
+- **Bad (top):** chasing the choke with no hooks / loose hips — bottom player slips out or turns in.
+- **Bad (bottom):** chin up, hands low, turning away under the seatbelt.
+- **Counter (bottom):** two-on-one on the choking arm, chin down, peel hooks, turn IN toward the underhook side, get a hip to the mat.
+
+### Turtle offense / defense
+- **Top on turtle:** ride heavy, clear the near arm, look for the back take (seatbelt insert, roll through) or mat return — do not float.
+- **Bottom in turtle:** elbows tight to knees, don't post the far hand and expose the arm, look to recover a knee or roll to guard — never turn away into back exposure.
+- If the camera pans off during a turtle-to-back scramble, coach only what returns on screen; do not invent the missing transition.
+
+### Coaching rule for this section
+Name the ride/back sequence you actually see. Never coach "keep your guard up" or striking defense on a roll that is clearly wrist ride → handcuff → back take.
 
 ## Common Mistakes
 

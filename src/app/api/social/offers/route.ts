@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { enforceUsage } from '@/lib/musashiUsage'
+import { requireUser } from '@/lib/musashiAuth'
 import { getDb } from '@/lib/db'
 
 const newId = () => {
@@ -13,7 +13,7 @@ const newId = () => {
 // GET: Fetch breakdown offers for a scouting request, or all offers by a coach
 export async function GET(req: Request) {
   try {
-    await enforceUsage(req, 'chat')
+    await requireUser(req)
 
     const { searchParams } = new URL(req.url)
     const requestId = searchParams.get('requestId')
@@ -91,7 +91,7 @@ export async function GET(req: Request) {
 // POST: Coach submits a breakdown offer on a scouting request
 export async function POST(req: Request) {
   try {
-    const user = await enforceUsage(req, 'chat')
+    const user = await requireUser(req)
     const body = await req.json() as Record<string, any>
 
     const requestId = String(body?.requestId || '').trim()
@@ -158,7 +158,7 @@ export async function POST(req: Request) {
 // PATCH: Accept, decline, or complete an offer
 export async function PATCH(req: Request) {
   try {
-    const user = await enforceUsage(req, 'chat')
+    const user = await requireUser(req)
     const body = await req.json() as Record<string, any>
 
     const offerId = String(body?.offerId || '').trim()

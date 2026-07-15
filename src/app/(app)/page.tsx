@@ -41,7 +41,10 @@ export default function HomePage() {
     user?.role === 'shogun' ? SHOGUN_MAX_VIDEO_SEC : isPro ? PRO_MAX_VIDEO_SEC : FREE_MAX_VIDEO_SEC
   const [trimRequest, setTrimRequest] = useState<File | null>(null)
   const [bootstrapVideoFile, setBootstrapVideoFile] = useState<File | null>(null)
-  const [autoPlayFixture, setAutoPlayFixture] = useState(false)
+  // Default ON: after upload/trim the clip auto-plays (muted) once boot hits
+  // Ready, instead of waiting on the ▶ tap. QA fixtures can still disable it
+  // via ?fixtureAutoplay=0.
+  const [autoPlayFixture, setAutoPlayFixture] = useState(true)
   const fixtureLoadedRef = useRef(false)
 
   useEffect(() => {

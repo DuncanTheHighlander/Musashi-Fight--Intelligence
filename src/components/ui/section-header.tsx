@@ -66,8 +66,11 @@ export function SectionHeader({
           <p className="mt-1 text-sm text-muted-foreground">{subtitle}</p>
         ) : null}
       </div>
+      {/* Actions always wrap full-width below the title: the (app) shell caps
+          this at 440px even on desktop viewports, so sm:w-auto would clip the
+          buttons off-frame. */}
       {action ? (
-        <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:shrink-0">{action}</div>
+        <div className="flex w-full flex-wrap items-center gap-2">{action}</div>
       ) : null}
     </header>
   )

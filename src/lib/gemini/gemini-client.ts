@@ -162,14 +162,15 @@ SHORT CLIP MODE (under ~16s): Every sentence must earn its place. Lead with the 
 GRAPPLING EVIDENCE OVERRIDE (CRITICAL — this clip is BJJ/grappling):
 - Body-on-body grappling causes severe pose-tracking occlusion, so the FightEvidenceLedger is highly prone to errors on this clip.
 - If the ledger contains striking-classified events (jab, cross, hooks, kicks) or striking faults (guard_drop, guard_low), treat them as compiler artifacts and IGNORE them entirely. Do not coach punches on a grappling roll.
+- On a grappling clip, if the ledger contains only guard/strike faults, treat the FightEvidenceLedger as EMPTY. Do not rebrand striking faults into grappling advice (never turn "low guard" into chokes or "keep your hands up" on a roll). Coach exclusively from the video (and VideoAnalysisLedger when present). Name the actual positions and transitions you see. Pose data may only inform pacing and scramble intensity — never technique claims.
 ${
   args.visionLedger?.video_analysis_ledger?.length
     ? `- The VideoAnalysisLedger below is your ABSOLUTE SOURCE OF TRUTH for positions, transitions, and techniques. Coach ONLY what appears in techniques_identified and action_events. If techniques_identified is "UNKNOWN", say you cannot name the technique confidently — never substitute ARMBAR or TRIANGLE for a wrist ride or grip fight.`
-    : `- If a video file is attached, the video is your primary evidence for positions, transitions, frames, and submissions. Use the ledger ONLY for macro trunk geometry (spine flattened, hip alignment) and pacing/scramble intensity.`
+    : `- If a video file is attached, the video is your primary evidence for positions, transitions, frames, and submissions.`
 }
 - Coach positional hierarchy, wedges and frames: did the athlete establish position before hunting the submission? Did the top player clear frames and pin the hips? Did the bottom player build skeletal structures to manage weight?
 - If the footage is occluded or a scramble is chaotic, say so plainly in the confidence note — never reconstruct hidden grips, hooks, or foot positions.
-- The 3 suggestedCorrections must be grappling corrections (frames, hips, posture, underhooks, guard retention, passing stability, control before submission) — never striking corrections.`
+- The 3 suggestedCorrections must be grappling corrections (frames, hips, posture, underhooks, grip fight, guard retention, passing stability, control before submission, escape from ride/back) — never striking corrections.`
     : ''
 
   const visionLedgerBlock =
@@ -254,17 +255,21 @@ Use these as analytical lenses only. Do not copy any creator, do not cite paid i
 - Training design: turning corrections into drills, reps, constraints, and clear success conditions.
 
 UNIVERSAL FEEDBACK FORMAT — every sport uses this same structure inside the existing JSON (the sport brain changes WHAT you coach, never this structure):
-- mainDiagnosis = Coach's Read + Main Story of the Exchange: 2-5 sentences. First state directly what happened in the clip, then explain WHY the exchange went the way it did — cause-and-effect (this action created that opening, which led to that consequence), not generic commentary. End with a brief confidence/caution note ONLY when relevant (feet cut off, hands hidden, heavy grappling occlusion, unclear camera angle, fighter identity unclear, pose fallback used, low pose confidence, or a clip too short for context).
+- mainDiagnosis = Coach's Read: MAX 2 sentences, ~35 words total. Tell the story of the exchange in two sentences like a fight reporter's lead line — then stop. Cause-and-effect, ringside voice, no third paragraph. Optional one-clause confidence caution only when needed (occlusion, cut-off feet, unclear identity).
 - quickCues = 3-5 short corner commands when evidence allows (aim for exactly 3). Each cue must be direct, actor-specific, actionable, evidence-supported, and memorable mid-training.
-- suggestedCorrections = exactly 3 detailed adjustments when evidence allows:
-  1. Adjustment 1 - Technical adjustment: the highest-leverage mechanics fix.
-  2. Adjustment 2 - Tactical adjustment: the decision, timing, range, or matchup fix.
-  3. Adjustment 3 - Training/habit adjustment: ONE practical, named drill connected directly to the main issue, with a rule and a success condition.
+- suggestedCorrections = exactly 3 punchy cards when evidence allows:
+  1. Technical — highest-leverage mechanics fix.
+  2. Tactical — decision, timing, range, or matchup fix.
+  3. Training/habit — ONE named drill tied to the main issue.
+  Card field budgets (HARD): title ≤8 words; why = 1 sentence ≤18 words; doInstead = 1 imperative sentence ≤20 words (a command or a named drill). Each card body should fit ≤3 short lines on a phone.
+  NO REPETITION: each card must make a DIFFERENT observation — never restate the same fault in new words across cards.
   If the evidence only supports fewer, give fewer — never pad with generic filler.
 - overlayAnnotations = Replay Evidence: short labels tied to real actorId/time/evidence IDs from the ledger. Never invent timestamps — never emit 0ms times for events that did not happen at the very start of the clip.
 - styleNotes = broader tactical tendencies, not vague labels.
 - audioScript = coach voiceover: short, human, direct, names the main read, the 3 adjustments, and one drill cue.
 - Correction titles must be short, human coaching titles ("Recover your hand before exiting"), NOT machine labels like "Adjustment 1 - Technical".
+
+TIME FORMAT (HARD): Write times as seconds into the clip — "at 0:04" or "4.2s in". NEVER raw milliseconds (no "2135ms", no "t=2135").
 
 DO NOT OVERCLAIM:
 - Banned unless measured kinematics back it: "massive power advantage", "explosive advantage", "raw power", "power output is exponentially higher", exact speed/force/angle/velocity numbers.
@@ -286,7 +291,12 @@ ${retrievedBlock}
 Current FightEvidenceLedger (truncated):
 ${ledgerJson}
 
-CONCISENESS RULE: Be dense and punchy like an elite corner coach, NOT a lecture. Every word must earn its spot. No filler, no generic advice. quickCue <=15 words. expanded <=2 sentences. If you can say it in fewer words, do.
+CONCISENESS RULE: Be dense and punchy like an elite corner coach / fight reporter, NOT a lecture. Every word must earn its spot. No filler, no generic advice.
+- mainDiagnosis: max 2 sentences, ~35 words. Reporter lead line — then stop.
+- suggestedCorrections.why: 1 sentence, ≤18 words.
+- suggestedCorrections.doInstead: 1 imperative sentence, ≤20 words.
+- quickCue ≤15 words. expanded ≤1–2 short sentences.
+- No repetition across the 3 cards. If you can say it in fewer words, do.
 
 PRODUCE exactly 3 quickCues when evidence allows. Each cue should:
 1. Describe the TACTICAL SITUATION (what's happening and why it matters)
@@ -302,18 +312,18 @@ OUTPUT JSON SCHEMA (exact keys):
       "t": {"startMs": 0, "endMs": 0},
       "quickCue": "string (punchy tactical cue, 8-15 words, like a corner coach would yell)",
       "keyMistake": "string (the specific tactical error, not just the detection name)",
-      "whyItMatters": "string (the consequence in fight terms — what opening it creates, what risk it poses)",
-      "whatToDoInstead": "string (specific corrective action)",
+      "whyItMatters": "string (1 sentence, ≤18 words — consequence in fight terms)",
+      "whatToDoInstead": "string (1 imperative sentence, ≤20 words)",
       "evidence": [{"id":"string","source":"pose|track|geometry|kinematics|compiler|user|llm","actorId":"A|B","t":{"startMs":0,"endMs":0}}],
       "confidence": {"score": 0.0, "basis": "heuristic|model|user|mixed"},
-      "expanded": "string (2-3 sentence tactical explanation, like a commentator would say)",
+      "expanded": "string (1-2 short sentences max)",
       "audioScript": "string (optional)"
     }
   ],
-  "mainDiagnosis": "string (Coach's Read: 2-5 sentence tactical story, not generic advice)",
+  "mainDiagnosis": "string (Coach's Read: max 2 sentences, ~35 words, fight-reporter lead)",
   "styleNotes": ["string (broader tactical tendencies, not vague labels like aggressive/defensive/needs work)"],
   "suggestedCorrections": [
-    {"actorId":"A|B","title":"string (Adjustment 1/2/3 - technical, tactical, or training/habit)","why":"string (problem, tactical reason, and consequence)","doInstead":"string (specific technique, decision, or drill assignment)","evidenceIds":["string"]}
+    {"actorId":"A|B","title":"string (short human title, ≤8 words)","why":"string (1 sentence, ≤18 words)","doInstead":"string (1 imperative sentence, ≤20 words — command or named drill)","evidenceIds":["string"]}
   ],
   "overlayAnnotations": [
     {

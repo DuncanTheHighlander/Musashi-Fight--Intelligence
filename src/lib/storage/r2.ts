@@ -90,6 +90,16 @@ export function resolveStorageMode(): StorageMode {
   return hasR2 ? 'r2' : 'mock'
 }
 
+/** True only when the Worker can mint a browser-direct S3-compatible URL. */
+export function isR2SigningConfigured(): boolean {
+  return Boolean(
+    process.env.STORAGE_SERVICE_URL?.trim() &&
+      process.env.STORAGE_ACCESS_KEY?.trim() &&
+      process.env.STORAGE_SECRET_KEY?.trim() &&
+      process.env.STORAGE_BUCKET_NAME?.trim(),
+  )
+}
+
 export function assertStorageConfigured(): StorageConfig {
   const endpoint = String(process.env.STORAGE_SERVICE_URL || '').trim()
   const accessKey = String(process.env.STORAGE_ACCESS_KEY || '').trim()

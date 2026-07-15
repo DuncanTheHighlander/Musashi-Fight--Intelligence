@@ -179,14 +179,15 @@ function WelcomeContent() {
               <CardContent>
                 <form className="space-y-4" onSubmit={onSignIn}>
                   <div className="space-y-2">
-                    <Label htmlFor="welcome-email">Email</Label>
+                    <Label htmlFor="welcome-email">Email or Shogun ID</Label>
                     <Input
                       id="welcome-email"
-                      type="email"
+                      type="text"
+                      inputMode="email"
                       value={email}
                       onChange={(e) => setEmail(e.target.value)}
-                      placeholder="you@example.com"
-                      autoComplete="email"
+                      placeholder="you@example.com or shogun"
+                      autoComplete="username"
                       className="h-10"
                       required
                     />

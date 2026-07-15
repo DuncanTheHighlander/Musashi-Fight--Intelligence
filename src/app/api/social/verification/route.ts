@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { enforceUsage } from '@/lib/musashiUsage'
+import { requireUser } from '@/lib/musashiAuth'
 import { getDb } from '@/lib/db'
 
 const parseJson = <T>(value: any, fallback: T): T => {
@@ -60,7 +60,7 @@ const verifyTechnique = (techniqueData: any, kinematicsData: any): boolean => {
 
 export async function GET(req: Request) {
   try {
-    const user = await enforceUsage(req, 'chat')
+    const user = await requireUser(req)
     const { searchParams } = new URL(req.url)
     const userId = searchParams.get('userId') || user.id
 
@@ -203,7 +203,7 @@ export async function GET(req: Request) {
 
 export async function POST(req: Request) {
   try {
-    const user = await enforceUsage(req, 'chat')
+    const user = await requireUser(req)
     const body = await req.json() as Record<string, any>
     
     // Manual verification request for specific technique

@@ -47,21 +47,14 @@ import { getPerformanceProfile, SERVER_DEFAULT_PROFILE } from '@/lib/performance
 import { cn } from '@/lib/utils'
 import { useVideoKeyboardShortcuts } from '@/hooks/useVideoKeyboardShortcuts'
 import {
-  Activity,
-  AlertTriangle,
-  Brain,
   CheckCircle2,
-  Cpu,
-  Eye,
   FileVideo,
   Gauge,
   Loader2,
   Mic,
   Play,
-  Radio,
   RotateCcw,
   Send,
-  Sparkles,
   Upload,
   Volume2,
   VolumeX,
@@ -77,7 +70,7 @@ import { FightOverlay } from '@/components/overlay/FightOverlay'
 import { CoachingPanel } from '@/components/feedback/CoachingPanel'
 import VideoTrimmer from '@/components/fight/VideoTrimmer'
 import { sanitizeCoachText, looksLikeCoachingJson } from '@/lib/feedback/coachFeedback'
-import { probeVideoDuration } from '@/lib/videoTrim'
+import { probeVideoDuration, resolveVideoDuration } from '@/lib/videoTrim'
 import { FREE_MAX_VIDEO_SEC, PRO_MAX_VIDEO_SEC, SHOGUN_MAX_VIDEO_SEC } from '@/lib/videoTierLimits'
 import type {
   PoseFrame as FightLangPoseFrame,
@@ -164,7 +157,22 @@ type PreScanProgress = {
   completed: number
 }
 
-type CvStage = 'idle' | 'working' | 'ok' | 'warn' | 'off'
+type VideoCreditBalance = {
+  limit: number
+  used: number
+  reserved: number
+  remaining: number
+  tier: 'free' | 'pro' | 'shogun'
+}
+
+type NoClipChatBalance = {
+  tier: 'free' | 'pro' | 'shogun'
+  limit: number | null
+  used: number
+  remaining: number | null
+  day: string
+  resetsAt: string
+}
 
 /**
  * Discriminated union mirroring the shapes returned by `src/lib/ai/aiGuard.ts`.
@@ -177,15 +185,6 @@ type AiQuotaState =
   | { kind: 'quota_exhausted' }
   | { kind: 'kill_switch'; hint?: string }
 
-type CvHealthItem = {
-  key: string
-  label: string
-  value: string
-  detail?: string
-  stage: CvStage
-  icon: React.ComponentType<{ className?: string }>
-}
-
 const EMPTY_PLAYBACK_SNAPSHOT: PlaybackSnapshot = {
   currentTime: 0,
   duration: 0,
@@ -197,56 +196,11 @@ const EMPTY_PLAYBACK_SNAPSHOT: PlaybackSnapshot = {
   bufferedPct: 0,
 }
 
-const CV_STAGE_CLASS: Record<CvStage, string> = {
-  idle: 'border-border/45 bg-muted/15 text-muted-foreground',
-  working: 'border-sky-400/35 bg-sky-500/10 text-sky-100',
-  ok: 'border-emerald-400/35 bg-emerald-500/10 text-emerald-100',
-  warn: 'border-amber-400/40 bg-amber-500/10 text-amber-100',
-  off: 'border-muted/35 bg-muted/10 text-muted-foreground',
-}
-
 function getBufferedPercent(video: HTMLVideoElement): number {
   const duration = video.duration
   if (!Number.isFinite(duration) || duration <= 0 || video.buffered.length === 0) return 0
   const bufferedEnd = video.buffered.end(video.buffered.length - 1)
   return Math.max(0, Math.min(100, (bufferedEnd / duration) * 100))
-}
-
-function formatClock(seconds: number): string {
-  if (!Number.isFinite(seconds) || seconds <= 0) return '0:00'
-  const whole = Math.floor(seconds)
-  const mins = Math.floor(whole / 60)
-  const secs = whole % 60
-  return `${mins}:${String(secs).padStart(2, '0')}`
-}
-
-function CvHealthRow({ item }: { item: CvHealthItem }) {
-  const Icon = item.icon
-  return (
-    <div className={cn('rounded-xl border px-3.5 py-2.5 transition-colors', CV_STAGE_CLASS[item.stage])}>
-      <div className="flex items-start gap-2.5">
-        <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-background/25">
-          <Icon className="h-3.5 w-3.5" />
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="font-display text-[10px] tracking-[0.12em] opacity-80">{item.label}</div>
-          <div className="truncate text-sm font-semibold leading-snug">{item.value}</div>
-          {item.detail && (
-            <div className="mt-1 line-clamp-2 text-xs leading-relaxed opacity-80">{item.detail}</div>
-          )}
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function CvStat({ label, value }: { label: string; value: string | number }) {
-  return (
-    <div className="rounded-xl border border-border/40 bg-background/40 px-3.5 py-2.5">
-      <div className="font-display text-[10px] tracking-[0.12em] text-muted-foreground">{label}</div>
-      <div className="mt-1 text-sm font-bold tabular-nums text-foreground">{value}</div>
-    </div>
-  )
 }
 
 /** Instant strip text from compiler ledger before LLM returns. */
@@ -507,13 +461,16 @@ const CLIP_PROCESSING_MIN_MS = 400
 // (no NVIDIA GPU) get saturated running MediaPipe 3× across an entire clip. One pass is enough
 // for the FightLang compiler to produce an initial ledger; further passes run lazily on demand.
 const BOOT_PIPELINE_PASSES = 1
+/**
+ * Never make play wait for a full local pose pass. We give the analyzer a
+ * moment to attach, then let it continue in the background. On a CPU-only
+ * device a full pass can take minutes, which previously looked like a frozen
+ * trimmed video because the play layer intentionally swallowed all input.
+ */
+const BOOT_PLAYABLE_WAIT_MS = 900
 /** Built-in demo clip — the bundled fight clip at `public/test-videos/`. */
 const DEMO_CLIP_URL = '/test-videos/test-video-for-app.mp4'
-/** Free general-Q&A messages allowed with no clip loaded, before an
- *  upload is required. Shogun/admin accounts are exempt. Client-side only —
- *  a matching server-side cap would be needed to make this hard to bypass. */
-const NO_CLIP_CHAT_LIMIT = 3
-
+/** How the current clip entered the Fight Lab. */
 type ClipLoadSource = 'none' | 'upload' | 'restored' | 'demo'
 
 type ClipPickOptions = {
@@ -747,7 +704,7 @@ export default function FightCoachExperience({
   const [chatLoading, setChatLoading] = useState(false)
   const [coachingLoading, setCoachingLoading] = useState(false)
   const [chatInput, setChatInput] = useState('')
-  const [noClipMessagesSent, setNoClipMessagesSent] = useState(0)
+  const [noClipChatCredits, setNoClipChatCredits] = useState<NoClipChatBalance | null>(null)
   // Target for the idle no-clip chat portal (see idleChatSlotId) — looked up
   // client-side since the slot is a plain DOM node the host page renders.
   const [idleChatSlotEl, setIdleChatSlotEl] = useState<HTMLElement | null>(null)
@@ -790,6 +747,7 @@ export default function FightCoachExperience({
   const isShogun = user?.role === 'shogun'
   const [isPro, setIsPro] = useState(false)
   const maxClipSec = isShogun ? SHOGUN_MAX_VIDEO_SEC : isPro ? PRO_MAX_VIDEO_SEC : FREE_MAX_VIDEO_SEC
+  const [videoCredits, setVideoCredits] = useState<VideoCreditBalance | null>(null)
   const [trimRequest, setTrimRequest] = useState<File | null>(null)
 
   useEffect(() => {
@@ -816,6 +774,62 @@ export default function FightCoachExperience({
     }
   }, [user])
 
+  const refreshVideoCredits = useCallback(async () => {
+    if (!user) {
+      setVideoCredits(null)
+      return
+    }
+    try {
+      const res = await fetch('/api/video-credits', { credentials: 'include' })
+      if (!res.ok) return
+      const data = await res.json() as Partial<VideoCreditBalance>
+      if (
+        typeof data.limit === 'number' &&
+        typeof data.used === 'number' &&
+        typeof data.reserved === 'number' &&
+        typeof data.remaining === 'number' &&
+        (data.tier === 'free' || data.tier === 'pro' || data.tier === 'shogun')
+      ) {
+        setVideoCredits(data as VideoCreditBalance)
+      }
+    } catch {
+      // Quota display is informational; the server remains the source of truth.
+    }
+  }, [user])
+
+  useEffect(() => {
+    void refreshVideoCredits()
+  }, [refreshVideoCredits])
+
+  const refreshNoClipChatCredits = useCallback(async () => {
+    if (!user) {
+      setNoClipChatCredits(null)
+      return
+    }
+    try {
+      const res = await fetch('/api/chat-credits', { credentials: 'include' })
+      if (!res.ok) return
+      const data = await res.json() as Partial<NoClipChatBalance>
+      const nullableNumber = (value: unknown) => value === null || typeof value === 'number'
+      if (
+        (data.tier === 'free' || data.tier === 'pro' || data.tier === 'shogun') &&
+        nullableNumber(data.limit) &&
+        typeof data.used === 'number' &&
+        nullableNumber(data.remaining) &&
+        typeof data.day === 'string' &&
+        typeof data.resetsAt === 'string'
+      ) {
+        setNoClipChatCredits(data as NoClipChatBalance)
+      }
+    } catch {
+      // Informational display only; the POST route remains authoritative.
+    }
+  }, [user])
+
+  useEffect(() => {
+    void refreshNoClipChatCredits()
+  }, [refreshNoClipChatCredits])
+
   // YouTube-style breakdown
   const [breakdownLoading, setBreakdownLoading] = useState(false)
   const [breakdownResult, setBreakdownResult] = useState<{
@@ -837,9 +851,19 @@ export default function FightCoachExperience({
   const [uploadProgress, setUploadProgress] = useState(0)
   const [geminiFileUri, setGeminiFileUri] = useState<string | null>(null)
   const geminiFileUriRef = useRef<string | null>(null)
+  /** Always points at the latest uploadVideoForNativeAnalysis (defined later in this component). */
+  const uploadVideoForNativeAnalysisRef = useRef<
+    (fileOverride?: File, opts?: { silentToast?: boolean }) => Promise<string | null | undefined>
+  >(async () => null)
+  /** Stable across retries for one picked clip; created client-side, enforced server-side. */
+  const videoAnalysisSessionIdRef = useRef<string | null>(null)
   const videoFileRef = useRef<File | null>(null)
+  // The object URL currently backing the player — revoked on re-pick/unmount
+  // so repeated uploads don't leak whole clips in memory.
+  const videoObjectUrlRef = useRef<string | null>(null)
   // Isolated + fail-safe: R2 asset ref for the current clip, so it's reviewable/labelable later.
   const clipAssetRefRef = useRef<string | null>(null)
+  const [clipStorageStatus, setClipStorageStatus] = useState<'idle' | 'saving' | 'saved' | 'unavailable'>('idle')
   const [compiledLedger, setCompiledLedger] = useState<Record<string, unknown> | null>(null)
 
   // Streaming auto-analysis (SSE from /api/fight action:analyze_video_stream)
@@ -1185,6 +1209,10 @@ export default function FightCoachExperience({
   const onPickVideo = (file: File, opts?: ClipPickOptions) => {
     const source: ClipLoadSource = opts?.source ?? 'upload'
     const sessionId = opts?.sessionId ?? `local-${Date.now()}`
+    videoAnalysisSessionIdRef.current =
+      typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : `video-${Date.now()}-${Math.random().toString(36).slice(2)}`
     clipProcessingMinUntilRef.current = Date.now() + CLIP_PROCESSING_MIN_MS
 
     // Lock playback before attaching blob URL so the first paint never shows an unlocked player.
@@ -1219,19 +1247,28 @@ export default function FightCoachExperience({
     // Auto-save the analyzed clip to R2 so it can be reviewed/labeled later.
     // Fully isolated + fail-safe: any failure here cannot affect analysis or playback.
     clipAssetRefRef.current = null
+    setClipStorageStatus(source === 'upload' ? 'saving' : 'idle')
     if (source === 'upload') {
       void (async () => {
         try {
           const asset = await uploadMarketplaceFile({ file, purpose: 'analysis_clip' })
           clipAssetRefRef.current = toAssetRef(asset.id)
+          setClipStorageStatus('saved')
         } catch (err) {
           console.warn('[clip upload]', err)
+          // Do not block playback or AI upload, but do not hide the fact that
+          // the review copy is unavailable. This is the deployed R2 501 path.
+          setClipStorageStatus('unavailable')
         }
       })()
     }
     setGeminiFileUri(null)
     geminiFileUriRef.current = null
+    if (videoObjectUrlRef.current) {
+      try { URL.revokeObjectURL(videoObjectUrlRef.current) } catch { void 0 }
+    }
     const url = URL.createObjectURL(file)
+    videoObjectUrlRef.current = url
     setVideoUrl(url)
     setVideoMuted(false)
     setFightEvidenceLedger(createEmptyLedger())
@@ -1308,6 +1345,13 @@ export default function FightCoachExperience({
 
   const onPickVideoRef = useRef(onPickVideo)
   onPickVideoRef.current = onPickVideo
+
+  useEffect(() => () => {
+    if (videoObjectUrlRef.current) {
+      try { URL.revokeObjectURL(videoObjectUrlRef.current) } catch { void 0 }
+      videoObjectUrlRef.current = null
+    }
+  }, [])
 
   /** User-picked uploads must respect free 10s / Pro 30s. Demo + restored skip trimmer. */
   const requestVideoPick = useCallback(
@@ -1648,6 +1692,18 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
         discipline: clipMeta.sport,
         clipType: clipMeta.clipType,
       })
+
+      // Grappling Coach Cards need the actual video — skeleton has no hands.
+      // Silent-upload once so analyze can forward videoFileUri (same upload
+      // chat already uses; shared across cards + chat).
+      if (grappling && videoFileRef.current && !geminiFileUriRef.current) {
+        try {
+          await uploadVideoForNativeAnalysisRef.current(undefined, { silentToast: true })
+        } catch (uploadErr) {
+          console.warn('[FightLang] Grappling video attach failed (non-fatal):', uploadErr)
+        }
+      }
+
       const first = slice[0]
       const last = slice[slice.length - 1]
       const kinSlice = localKinematicsSeriesRef.current.filter((k) => {
@@ -1799,7 +1855,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
         if (!isStale()) setFightLangLoading(false)
       }
     },
-    [currentFightClipAiMetadata, focusTarget, isPoseQualitySpendBlocked]
+    [currentFightClipAiMetadata, focusTarget, isPoseQualitySpendBlocked, toast]
   )
   const styleScanThreeFrames = async () => {
     if (!videoRef.current) return
@@ -1915,10 +1971,10 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
     if (!chatInput.trim()) return
     // Allow chat as soon as video is uploaded — don't gate behind initialAnalysisReady
 
-    if (!videoUrl && !isShogun && noClipMessagesSent >= NO_CLIP_CHAT_LIMIT) {
+    if (!videoUrl && noClipChatCredits?.tier === 'free' && noClipChatCredits.remaining === 0) {
       toast({
         title: 'Free question limit reached',
-        description: 'Upload a clip for unlimited coaching, or sign in as an admin account.',
+        description: 'Upload a clip for video-grounded coaching, upgrade to Pro, or return after the daily reset.',
         variant: 'destructive',
       })
       return
@@ -1926,10 +1982,18 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
 
     const userMessage = chatInput.trim()
     setChatInput('')
-    if (!videoUrl) setNoClipMessagesSent((n) => n + 1)
     setMessages((prev: any[]) => [...prev, { role: 'user', content: userMessage }])
-    
+
     try {
+      // Clip chat must be vision-backed: if a clip is loaded but was never
+      // attached to Gemini (upload is otherwise buried in Advanced Controls),
+      // attach it now so the coach actually SEES the tape — critical for
+      // grappling, where pose evidence collapses. On failure the server's
+      // empty-evidence gate keeps the answer honest instead of invented.
+      if (videoUrl && videoFileRef.current && !geminiFileUriRef.current && !uploadingVideo) {
+        setChatLoading(true)
+        await uploadVideoForNativeAnalysis(undefined, { silentToast: true })
+      }
       // Get current context
       const kinematicsContext = kinematicsRef.current ? {
         fighters: kinematicsRef.current.fighters,
@@ -1954,11 +2018,24 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
           context: {
             analysisStyle: 'comet',
             ...currentFightClipAiMetadata(),
+            // Evidence summary for the server's empty-evidence honesty gate:
+            // with a clip loaded but nothing actually observable, the model
+            // must say so instead of inventing clip content.
+            evidence: {
+              clipLoaded: Boolean(videoUrl),
+              videoAttached: Boolean(geminiFileUriRef.current),
+              poseFrames: fightLangPoseFramesRef.current.length,
+              ledgerEvents: Array.isArray((compiledLedger as { events?: unknown[] } | null)?.events)
+                ? ((compiledLedger as { events?: unknown[] }).events as unknown[]).length
+                : 0,
+              playbackStarted: playbackUnlocked,
+            },
             nativeVideo: Boolean(geminiFileUriRef.current),
             ...(geminiFileUriRef.current ? {
               videoFileUri: geminiFileUriRef.current,
               videoMimeType: videoFileRef.current?.type || 'video/mp4',
               clipDuration: videoRef.current?.duration || 0,
+              videoAnalysisSessionId: videoAnalysisSessionIdRef.current,
               requestedFPS: 5,
             } : {}),
             kinematics: kinematicsContext,
@@ -1982,12 +2059,23 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
       })
       
       const parsed = await parseApiResponse(response)
+      // Failed calls (quota, verification, guard statuses) return {error,hint}
+      // with no message/gameplan — surface the reason IN the chat thread.
+      // Silently dropping it left users staring at their own unanswered message.
+      const failure = parsed as { error?: string; hint?: string }
+      if (!response.ok || (failure.error && !(parsed as { message?: string }).message)) {
+        const reason =
+          [failure.error, failure.hint].filter(Boolean).join(' ') ||
+          `Coaching failed (status ${response.status}). Please try again.`
+        setMessages((prev) => [...prev, { role: 'assistant', content: `⚠️ ${reason}` }])
+        return
+      }
       if (coachingMode === 'strategy') {
         const strategy = parsed as StrategyResponse
         setCurrentStrategy(strategy)
-        setMessages((prev) => [...prev, { 
-          role: 'assistant', 
-          content: `Strategy generated:\nGameplan: ${strategy.gameplan}\nCounters: ${(strategy.counters || []).join(', ')}` 
+        setMessages((prev) => [...prev, {
+          role: 'assistant',
+          content: `Strategy generated:\nGameplan: ${strategy.gameplan}\nCounters: ${(strategy.counters || []).join(', ')}`
         }])
       } else {
         const chat = parsed as { message: string }
@@ -1996,18 +2084,23 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
         if (chatText) {
           setMessages((prev) => [...prev, { role: 'assistant', content: chatText }])
           speakText(chatText)
+        } else {
+          setMessages((prev) => [...prev, { role: 'assistant', content: '⚠️ The coach returned an empty reply — please ask again.' }])
         }
       }
     } catch (error) {
       console.error('Chat failed:', error)
+      const msg = error instanceof Error ? error.message : 'Unknown error'
+      setMessages((prev) => [...prev, { role: 'assistant', content: `⚠️ Coaching failed: ${msg}` }])
       toast({
         title: "Chat failed",
-        description: error instanceof Error ? error.message : "Unknown error",
+        description: msg,
         variant: "destructive"
       })
     } finally {
       setChatLoading(false)
       setStrategyLoading(false)
+      if (!videoUrl) void refreshNoClipChatCredits()
     }
   }
   const stopVoice = useCallback(() => {
@@ -2315,9 +2408,21 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
     
     try {
       // Upload via server-side API route (keeps GEMINI_API_KEY secure on server)
+      const duration = Number(videoRef.current?.duration) || clipDurationSec
+      if (!Number.isFinite(duration) || duration <= 0) {
+        throw new Error('Video is still loading. Wait for the video to become ready, then try analysis again.')
+      }
+      const videoAnalysisSessionId = videoAnalysisSessionIdRef.current || (
+        typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+          ? crypto.randomUUID()
+          : `video-${Date.now()}-${Math.random().toString(36).slice(2)}`
+      )
+      videoAnalysisSessionIdRef.current = videoAnalysisSessionId
       const formData = new FormData()
       formData.append('action', 'upload_video')
       formData.append('video', sourceFile, sourceFile.name)
+      formData.append('videoAnalysisSessionId', videoAnalysisSessionId)
+      formData.append('clipDurationSec', String(duration))
 
       const res = await fetch('/api/fight', {
         method: 'POST',
@@ -2329,7 +2434,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
         throw new Error(errData.error || `Upload failed with status ${res.status}`)
       }
 
-      const data = await res.json() as { fileUri?: string }
+      const data = await res.json() as { fileUri?: string; credits?: VideoCreditBalance }
       const fileUri = data.fileUri
 
       if (!fileUri) {
@@ -2338,6 +2443,8 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
 
       setGeminiFileUri(fileUri)
       geminiFileUriRef.current = fileUri
+      if (data.credits) setVideoCredits(data.credits)
+      else void refreshVideoCredits()
       setUploadProgress(100)
       setInitialAnalysisStatus('Video ready. Starting full analysis...')
 
@@ -2365,6 +2472,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
       setUploadingVideo(false)
     }
   }
+  uploadVideoForNativeAnalysisRef.current = uploadVideoForNativeAnalysis
 
   const runInitialClipAnalysis = async (fileUri: string, sourceFile: File) => {
     setInitialAnalysisLoading(true)
@@ -2382,9 +2490,11 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
             analysisStyle: 'comet',
             ...currentFightClipAiMetadata(),
             nativeVideo: true,
+            initialVideoAnalysis: true,
             videoFileUri: fileUri,
             videoMimeType: sourceFile.type || 'video/mp4',
             clipDuration: videoRef.current?.duration || 0,
+            videoAnalysisSessionId: videoAnalysisSessionIdRef.current,
             requestedFPS: 5,
             focusTarget,
           }
@@ -2430,6 +2540,16 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
   const prepareClipForFullAnalysis = async (fileOverride?: File) => {
     const sourceFile = fileOverride ?? videoFile
     if (!sourceFile) return
+    if (!geminiFileUri && videoCredits && videoCredits.remaining <= 0) {
+      toast({
+        title: 'AI video credits used',
+        description: videoCredits.tier === 'free'
+          ? 'Free includes 3 successful AI video analyses. Local playback and skeleton tracking still work.'
+          : 'Your current video-analysis allowance is used. Please try again after it resets.',
+        variant: 'destructive',
+      })
+      return
+    }
 
     const fileUri = fileOverride ? await uploadVideoForNativeAnalysis(sourceFile) : (geminiFileUri || await uploadVideoForNativeAnalysis())
     if (!fileUri) return
@@ -2469,14 +2589,33 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
         pollCount++
         if (pollCount === 1 || pollCount === 5 || pollCount === 50) {
         }
-        if (v && v.readyState >= HTMLMediaElement.HAVE_METADATA && Number.isFinite(v.duration) && v.duration > 0) {
+        // duration === Infinity is accepted here: MediaRecorder-trimmed WebM
+        // reports Infinity until seeked; it's resolved right below.
+        if (
+          v &&
+          v.readyState >= HTMLMediaElement.HAVE_METADATA &&
+          (v.duration === Infinity || (Number.isFinite(v.duration) && v.duration > 0))
+        ) {
           break
         }
         await sleep(80)
       }
       const v = videoRef.current
-      if (!v || v.readyState < HTMLMediaElement.HAVE_METADATA || !Number.isFinite(v.duration) || v.duration <= 0) {
+      if (!v || v.readyState < HTMLMediaElement.HAVE_METADATA) {
         throw new Error('Could not read video metadata — try MP4 (H.264) or WebM.')
+      }
+      if (v.duration === Infinity) {
+        setBootPipelineMessage('Resolving clip duration…')
+        const fixed = await resolveVideoDuration(v)
+        if (fixed > 0) setClipDurationSec(fixed)
+      }
+      if (!Number.isFinite(v.duration) || v.duration <= 0) {
+        throw new Error('Could not read video metadata — try MP4 (H.264) or WebM.')
+      }
+      if (v.videoWidth === 0 || v.videoHeight === 0) {
+        // Never let a pictureless (corrupt / audio-only / failed-trim) file
+        // reach Ready — that's the "black player with 0 pose frames" state.
+        throw new Error('This video decoded with no picture — the trim/upload likely failed. Re-trim or use a different format.')
       }
 
       const minLeft = clipProcessingMinUntilRef.current - Date.now()
@@ -2515,7 +2654,10 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
       // drops playback onto the much weaker live-tracking path. We wait for
       // real completion and bail only if progress STALLS for 90s (hung
       // decoder / crashed WASM), surfacing live progress in the boot message.
-      let prescanFinished = false
+      // A full paused scan is optional enrichment, never a prerequisite for
+      // playback. Give it a short head start, then keep mapping in background.
+      let prescanFinished = true
+      await Promise.race([prescanDone, sleep(BOOT_PLAYABLE_WAIT_MS)])
       void prescanDone.then(() => {
         prescanFinished = true
       })
@@ -2539,6 +2681,10 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
       }
       if (!stillThisClip()) return
 
+      const total = bootLastPassTotalStepsRef.current
+      const done = Math.min(bootLastPassFramesCompletedRef.current, total)
+      const preScanFinished = total > 0 && done >= total
+
       // Step 4: Warm the local FightLang compiler in the background so overlays
       // and summaries are available quickly without silently spending on APIs.
       clipAnalysisPipelineStartedRef.current = true
@@ -2550,11 +2696,20 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
       setBootPipelineMessage('Finishing…')
       await sleep(100)
 
-      const ver = verifyBootReadiness({
+      const rawVerification = verifyBootReadiness({
         media: bootMediaOutcomeRef.current ?? 'cancelled',
         lastPassTotalSteps: bootLastPassTotalStepsRef.current,
         lastPassFramesCompleted: bootLastPassFramesCompletedRef.current,
       })
+      const ver = preScanFinished
+        ? rawVerification
+        : {
+            ok: true,
+            summary: total > 0
+              ? `Video decoded. Background pose mapping ${done}/${total} frames.`
+              : 'Video decoded. Background pose mapping is starting.',
+            warnings: [] as string[],
+          }
       setBootVerificationSummary(ver.summary)
       setBootWarnings(ver.warnings)
       if (process.env.NODE_ENV === 'development') {
@@ -2631,6 +2786,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
           videoFileUri: fileUri,
           videoMimeType: sourceFile.type || 'video/mp4',
           clipDuration: videoRef.current?.duration || 0,
+          videoAnalysisSessionId: videoAnalysisSessionIdRef.current,
           focusTarget,
           poseEvidence,
           ...currentFightClipAiMetadata(),
@@ -2984,7 +3140,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
     return () => {
       stop()
     }
-  }, [analysisSource, aiFocusPose, captureFrameAsBlob, focusTarget, myCorner, reflexCadenceMs, reflexOn, selectedFighterId, speakText, toast, videoUrl])
+  }, [analysisSource, aiFocusPose, captureFrameAsBlob, currentFightClipAiMetadata, focusTarget, myCorner, reflexCadenceMs, reflexOn, selectedFighterId, speakText, toast, videoUrl])
 
   useEffect(() => {
     const stop = () => {
@@ -3299,42 +3455,6 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
     syncPlaybackState(video)
   }, [applyPlaybackLock, bootPipelineReady, syncPlaybackState, toast, videoUrl])
 
-  const rerunLocalVision = () => {
-    const file = videoFileRef.current
-    if (!file) return
-    setFightEvidenceLedger(createEmptyLedger())
-    setFightLangOverlayAnnotations(null)
-    setFightLangCoaching(null)
-    setAiQuotaState(null)
-    setCompiledLedger(null)
-    setPipelineStats(null)
-    setPoseFrameCount(0)
-    setLastPoseSampleMs(null)
-    setPoseDetected({ A: false, B: false })
-    setPreScanProgress(null)
-    setPreScanDetections({ samples: 0, A: 0, B: 0, both: 0 })
-    setBootWarnings([])
-    setLastCompileError(null)
-    poseEngineInfoRef.current = null
-    setPoseEngineInfo(null)
-    setPoseQualityOverride(false)
-    fightLangPoseFramesRef.current = []
-    lastFightLangVideoBucketRef.current = null
-    earlyCompileOnceRef.current = false
-    autoCoachPromptShownRef.current = false
-    applyPlaybackLock(false)
-    setBootPipelineReady(false)
-    setBootPipelineMessage('Re-running local MediaPipe pre-scan...')
-    void runBootPipeline(file)
-  }
-
-  const runFullLocalCompile = useCallback(() => {
-    void compileFightLangFast({ mode: 'full' })
-  }, [compileFightLangFast])
-
-  const cvFrameTotal = pipelineStats?.poseFrames ?? poseFrameCount
-  const cvCalloutTotal = fightLangOverlayAnnotations?.length ?? pipelineStats?.overlayAnnotations ?? 0
-  const cvFaultTotal = pipelineStats?.faults ?? 0
   const preScanCompleted = preScanProgress
     ? Math.min(preScanProgress.completed, preScanProgress.totalSteps)
     : bootLastPassFramesCompletedRef.current
@@ -3349,185 +3469,12 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
         : fightLangPreScanBusy || /mapping fighters/i.test(bootPipelineMessage)
           ? 'prescanning'
           : 'buffering'
-  const mediaLabel = playbackState.duration > 0
-    ? `${formatClock(playbackState.currentTime)} / ${formatClock(playbackState.duration)}`
-    : 'No decoded clip'
-  const fighterLabel =
-    poseDetected.A && poseDetected.B
-      ? 'Blue + Red locked'
-      : poseDetected.A
-        ? 'Blue only'
-        : poseDetected.B
-          ? 'Red only'
-          : preScanDetections.both > 0
-            ? `Pre-scan both ${preScanDetections.both}x`
-            : preScanDetections.A > 0 || preScanDetections.B > 0
-              ? 'Pre-scan partial'
-              : preScanCompleted > 0
-                ? 'Pre-scan sampled'
-                : 'Waiting for pose'
-
-  const cvHealthItems = useMemo<CvHealthItem[]>(() => {
-    const mediaStage: CvStage = mediaErrorMessage
-      ? 'warn'
-      : playbackState.readyState >= 2
-        ? 'ok'
-        : videoUrl
-          ? 'working'
-          : 'idle'
-    const poseStage: CvStage = bootPipelineReady
-      ? bootWarnings.length > 0
-        ? 'warn'
-        : 'ok'
-      : fightLangPreScanBusy || Boolean(bootPipelineMessage)
-        ? 'working'
-        : videoUrl
-          ? 'idle'
-          : 'off'
-    const fighterStage: CvStage = (poseDetected.A && poseDetected.B) || preScanDetections.both > 0
-      ? 'ok'
-      : poseDetected.A || poseDetected.B || preScanDetections.A > 0 || preScanDetections.B > 0 || preScanCompleted > 0
-        ? 'warn'
-        : videoUrl
-          ? 'idle'
-          : 'off'
-    const compilerStage: CvStage = lastCompileError
-      ? 'warn'
-      : cvCalloutTotal > 0 || Boolean(compiledLedger)
-        ? 'ok'
-        : cvFrameTotal >= 4
-          ? 'working'
-          : videoUrl
-            ? 'idle'
-            : 'off'
-    const aiStage: CvStage = uploadingVideo || initialAnalysisLoading || streamAnalysisPhase === 'analyzing' || fightLangLoading
-      ? 'working'
-      : coachingEnabled || initialAnalysisReady || messages.length > 0
-        ? 'ok'
-        : videoUrl
-          ? 'off'
-          : 'idle'
-
-    return [
-      {
-        key: 'media',
-        label: 'Media',
-        value: mediaLabel,
-        detail: playbackState.videoWidth > 0 ? `${playbackState.videoWidth}x${playbackState.videoHeight} - ${Math.round(playbackState.bufferedPct)}% buffered` : mediaErrorMessage ?? 'Choose a clip to decode.',
-        stage: mediaStage,
-        icon: Radio,
-      },
-      {
-        key: 'pose',
-        label: 'Pose engine',
-        value: bootPipelineReady ? `Pre-scan ${preScanLabel}` : bootPipelineMessage || 'Standing by',
-        detail: fightLangPreScanBusy
-          ? 'MediaPipe is seeking sampled frames before play.'
-          : poseEngineInfo
-            ? `Deep track: ${poseEngineInfo.engine === 'rtmpose-cloud' ? 'RTMPose (cloud, primary)' : poseEngineInfo.fallback ? 'MediaPipe (fallback)' : poseEngineInfo.engine}${poseEngineInfo.quality ? ` — quality ${poseEngineInfo.quality.overall}` : ''}`
-            : bootVerificationSummary ?? 'Runs locally before any AI call.',
-        stage: poseStage,
-        icon: Cpu,
-      },
-      {
-        key: 'fighters',
-        label: 'Fighters',
-        value: fighterLabel,
-        detail: `Live frames ${cvFrameTotal}${lastPoseSampleMs !== null ? ` at ${formatClock(lastPoseSampleMs / 1000)}` : ''} - pre-scan both ${preScanDetections.both}/${preScanDetections.samples}`,
-        stage: fighterStage,
-        icon: Eye,
-      },
-      {
-        key: 'fightlang',
-        label: 'FightLang',
-        value: cvCalloutTotal > 0 ? `${cvCalloutTotal} overlay callouts` : cvFrameTotal >= 4 ? 'Compiling evidence' : 'Needs live frames',
-        detail: lastCompileError ?? `${cvFaultTotal} faults - ${pipelineStats?.events ?? 0} events`,
-        stage: compilerStage,
-        icon: Activity,
-      },
-      {
-        key: 'ai',
-        label: 'AI Layer',
-        value: coachingEnabled ? `Coaching ${llmCallCount}/${LLM_CALL_CAP}` : initialAnalysisReady ? 'Full analysis ready' : 'Opt-in only',
-        detail: streamAnalysisPhase === 'analyzing' ? 'Streaming strategy in progress.' : coachingEnabled ? 'Gemini calls are capped.' : 'Local CV works without Gemini spend.',
-        stage: aiStage,
-        icon: Brain,
-      },
-    ]
-  }, [
-    bootPipelineMessage,
-    bootPipelineReady,
-    bootVerificationSummary,
-    bootWarnings.length,
-    coachingEnabled,
-    compiledLedger,
-    cvCalloutTotal,
-    cvFaultTotal,
-    cvFrameTotal,
-    fightLangLoading,
-    fightLangPreScanBusy,
-    fighterLabel,
-    initialAnalysisLoading,
-    initialAnalysisReady,
-    lastCompileError,
-    lastPoseSampleMs,
-    llmCallCount,
-    mediaErrorMessage,
-    mediaLabel,
-    messages.length,
-    pipelineStats?.events,
-    playbackState.bufferedPct,
-    playbackState.readyState,
-    playbackState.videoHeight,
-    playbackState.videoWidth,
-    poseDetected.A,
-    poseDetected.B,
-    poseEngineInfo,
-    preScanCompleted,
-    preScanDetections.A,
-    preScanDetections.B,
-    preScanDetections.both,
-    preScanDetections.samples,
-    preScanLabel,
-    streamAnalysisPhase,
-    uploadingVideo,
-    videoUrl,
-  ])
-
-  const cvGuidance = useMemo(() => {
-    const tips: string[] = []
-    if (mediaErrorMessage) tips.push(mediaErrorMessage)
-    if (bootWarnings.length > 0) tips.push(bootWarnings[0]!)
-    if (playbackState.ended) tips.push('Clip ended. Use Replay to run live tracking from the first frame again.')
-    if (playbackUnlocked && !playbackState.ended && playbackState.currentTime > 1.2 && poseFrameCount < 4) {
-      tips.push('Live tracking has not produced enough pose frames. Use clearer full-body footage or re-run local vision.')
-    }
-    if (playbackUnlocked && poseFrameCount >= 4 && !(poseDetected.A && poseDetected.B)) {
-      tips.push('Only one fighter is stable. Full-body view, better lighting, and less occlusion will improve two-fighter lock.')
-    }
-    if (videoUrl && !coachingEnabled && !initialAnalysisReady) {
-      tips.push('AI coaching is off. The local skeleton, kinematics, and FightLang overlays still run with zero Gemini spend.')
-    }
-    return tips.slice(0, 3)
-  }, [
-    bootWarnings,
-    coachingEnabled,
-    initialAnalysisReady,
-    mediaErrorMessage,
-    playbackState.currentTime,
-    playbackState.ended,
-    playbackUnlocked,
-    poseDetected.A,
-    poseDetected.B,
-    poseFrameCount,
-    videoUrl,
-  ])
 
   // Idle-collapsed: no visible surface at all — the page's own uploader (home
   // hero) is the single upload terminal until a clip loads. min-h-screen would
   // otherwise leave a giant empty block under the hero.
   const idleCollapsed = collapseWhenIdle && !videoUrl
-  const noClipLimitReached = !videoUrl && !isShogun && noClipMessagesSent >= NO_CLIP_CHAT_LIMIT
+  const noClipLimitReached = !videoUrl && noClipChatCredits?.tier === 'free' && noClipChatCredits.remaining === 0
 
   return (
     <div className={idleCollapsed ? 'w-full' : 'min-h-screen w-full bg-background'}>
@@ -3537,7 +3484,10 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
           maxSec={maxClipSec}
           onConfirm={(trimmed) => {
             setTrimRequest(null)
-            onPickVideoRef.current(trimmed, { source: 'upload' })
+            // Let the trimmer dialog unmount before the sport picker mounts:
+            // overlapping Radix dialogs can strand a full-screen overlay that
+            // blocks every tap on the page.
+            setTimeout(() => onPickVideoRef.current(trimmed, { source: 'upload' }), 150)
           }}
           onCancel={() => setTrimRequest(null)}
         />
@@ -3727,9 +3677,13 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
             </div>
             {!isShogun && (
               <p className="px-3 pb-3 text-[11px] text-muted-foreground">
-                {noClipLimitReached
-                  ? 'Free question limit reached — upload a clip for unlimited coaching.'
-                  : `${Math.max(0, NO_CLIP_CHAT_LIMIT - noClipMessagesSent)} free question${Math.max(0, NO_CLIP_CHAT_LIMIT - noClipMessagesSent) === 1 ? '' : 's'} left without a clip.`}
+                {!noClipChatCredits
+                  ? 'Checking today’s free question balance…'
+                  : noClipChatCredits.tier === 'pro'
+                    ? 'No-video coaching is included with Pro.'
+                    : noClipLimitReached
+                      ? 'Daily free question limit reached — upload a clip or upgrade to Pro.'
+                      : `${noClipChatCredits.remaining} free question${noClipChatCredits.remaining === 1 ? '' : 's'} left today without a clip.`}
               </p>
             )}
           </>,
@@ -4040,12 +3994,43 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                               // User consent to play — flip the lock, then call play().
                               applyPlaybackLock(true)
                               const v = videoRef.current
-                              if (v) {
-                                try {
-                                  if (v.currentTime > 0) v.currentTime = 0
-                                } catch { void 0 }
-                                v.play().catch(() => { /* swallow AbortError */ })
+                              if (!v) {
+                                toast({
+                                  title: "Couldn't play this clip",
+                                  description: 'Video player not ready. Try New clip or re-upload.',
+                                  variant: 'destructive',
+                                })
+                                applyPlaybackLock(false)
+                                return
                               }
+                              try {
+                                if (v.currentTime > 0) v.currentTime = 0
+                              } catch { void 0 }
+                              void v.play().then(() => {
+                                // Bad trim/output can "play" with no picture — fail loudly.
+                                window.setTimeout(() => {
+                                  const el = videoRef.current
+                                  if (!el || !playbackUnlockedRef.current) return
+                                  if (el.videoWidth === 0 || el.videoHeight === 0) {
+                                    applyPlaybackLock(false)
+                                    setBootPipelineReady(false)
+                                    setBootPipelineMessage('This clip has no picture — re-trim or try MP4 (H.264).')
+                                    toast({
+                                      title: "Couldn't play this clip",
+                                      description: 'The trim/upload likely produced an unplayable file. Re-trim or use MP4 (H.264).',
+                                      variant: 'destructive',
+                                    })
+                                  }
+                                }, 500)
+                              }).catch((err) => {
+                                applyPlaybackLock(false)
+                                const msg = err instanceof Error ? err.message : 'Playback blocked'
+                                toast({
+                                  title: "Couldn't play this clip",
+                                  description: `${msg}. Try MP4 (H.264) or re-trim.`,
+                                  variant: 'destructive',
+                                })
+                              })
                               // Kick off long-form streaming narration after a short delay.
                               const uri = geminiFileUriRef.current
                               if (uri && videoFileRef.current) {
@@ -4066,7 +4051,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                           <p className="max-w-md text-sm text-white/80">
                             {clipLoadSource === 'restored'
                               ? 'Your last clip is ready. Press play to start skeleton tracking.'
-                              : 'Pose mapping finished. Press play to start skeleton tracking.'}{' '}
+                              : 'Your video is ready. Skeleton mapping can continue while you play.'}{' '}
                             Deeper AI analysis only runs when you choose it.
                           </p>
                           {bootVerificationSummary && (
@@ -4079,7 +4064,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
 
                   {/* Pre-scan overlay */}
                   {fightLangPreScanBusy && playbackUnlocked && (
-                    <div className="pointer-events-none absolute inset-0 z-[25] flex flex-col items-center justify-center gap-2 bg-background/60 backdrop-blur-[2px]">
+                    <div className="pointer-events-none absolute right-3 top-12 z-[25] flex items-center gap-2 rounded-full border border-primary/30 bg-background/85 px-3 py-2 shadow-lg backdrop-blur">
                       <Loader2 className="h-7 w-7 animate-spin text-primary" />
                       <p className="text-xs font-medium text-foreground">Mapping fighters across the clip…</p>
                     </div>
@@ -4301,65 +4286,6 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                   )}
                 </div>
               </div>
-              {bootVerificationSummary && playbackUnlocked && videoUrl && (
-                <p className="text-[10px] leading-snug text-muted-foreground/90" title="Measured boot pipeline">
-                  Boot check: {bootVerificationSummary}
-                  {deepTrackFrames != null && ` · Deep track ${deepTrackFrames} frames (per-frame replay)`}
-                </p>
-              )}
-
-              {videoUrl && (
-                <div className="rounded-2xl border border-border/50 bg-card/40 p-4 shadow-sm backdrop-blur-sm">
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    <div>
-                      <div className="flex items-center gap-2 font-display text-sm tracking-[0.12em] text-foreground sm:text-base">
-                        <Sparkles className="h-4 w-4 text-primary" aria-hidden />
-                        CV Health
-                      </div>
-                      <div className="mt-1 text-xs text-muted-foreground">
-                        Local MediaPipe and FightLang run first. AI stays opt-in and capped.
-                      </div>
-                    </div>
-                    <div className="flex flex-wrap gap-2">
-                      <Button size="sm" variant="outline" className="h-8 gap-1.5 text-xs" disabled={!bootPipelineReady} onClick={replayClip}>
-                        <RotateCcw className="h-3.5 w-3.5" />
-                        Replay
-                      </Button>
-                      <Button size="sm" variant="outline" className="h-8 gap-1.5 text-xs" disabled={fightLangPreScanBusy} onClick={rerunLocalVision}>
-                        <Cpu className="h-3.5 w-3.5" />
-                        Re-run CV
-                      </Button>
-                      <Button size="sm" variant="outline" className="h-8 gap-1.5 text-xs" disabled={poseFrameCount < 4} onClick={runFullLocalCompile}>
-                        <Activity className="h-3.5 w-3.5" />
-                        Compile
-                      </Button>
-                    </div>
-                  </div>
-
-                  <div className="mt-4 grid grid-cols-1 gap-2.5 sm:grid-cols-2 xl:grid-cols-5">
-                    {cvHealthItems.map((item) => <CvHealthRow key={item.key} item={item} />)}
-                  </div>
-
-                  <div className="mt-3 grid grid-cols-2 gap-2.5 sm:grid-cols-5">
-                    <CvStat label="Pose Frames" value={cvFrameTotal} />
-                    <CvStat label="Fighters" value={`${poseDetected.A ? 'A' : '-'} ${poseDetected.B ? 'B' : '-'}`} />
-                    <CvStat label="Faults" value={cvFaultTotal} />
-                    <CvStat label="Callouts" value={cvCalloutTotal} />
-                    <CvStat label="AI Calls" value={`${llmCallCount}/${LLM_CALL_CAP}`} />
-                  </div>
-
-                  {cvGuidance.length > 0 && (
-                    <div className="mt-3 space-y-1.5">
-                      {cvGuidance.map((tip, index) => (
-                        <div key={`${index}-${tip}`} className="flex gap-2 rounded-lg border border-amber-400/25 bg-amber-500/10 px-3 py-2 text-[11px] leading-snug text-amber-100">
-                          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                          <span>{tip}</span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
 
               {/* Compact Controls Bar */}
               <div className="flex flex-wrap items-center gap-2">
@@ -4425,7 +4351,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
               {/* Pipeline Stats (compact) */}
               {pipelineStats && (
                 <div className="rounded-xl border border-border/40 bg-card/30 p-3 text-[11px] text-muted-foreground">
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  <div className="grid grid-cols-2 gap-2">
                     <div><span className="font-medium text-foreground">Frames:</span> {pipelineStats.poseFrames}</div>
                     <div><span className="font-medium text-foreground">Events:</span> {pipelineStats.events}</div>
                     <div><span className="font-medium text-foreground">Faults:</span> {pipelineStats.faults}</div>
@@ -4466,11 +4392,22 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                   <div className="flex flex-wrap gap-2">
                     <Button size="sm" variant="outline" onClick={analyzeCurrentFrame} disabled={analyzing}>{analyzing ? 'Analyzing…' : 'Analyze Frame'}</Button>
                     <Button size="sm" variant="outline" onClick={() => void analyzeFightLangWindow({ windowMs: 15000 })} disabled={fightLangLoading}>{fightLangLoading ? 'FightLang…' : 'FightLang 15s'}</Button>
-                    <Button size="sm" variant="outline" onClick={() => void prepareClipForFullAnalysis()} disabled={uploadingVideo || initialAnalysisLoading || !videoFile}>
+                    <Button size="sm" variant="outline" onClick={() => void prepareClipForFullAnalysis()} disabled={uploadingVideo || initialAnalysisLoading || !videoFile || Boolean(videoCredits && videoCredits.remaining <= 0 && !geminiFileUri)}>
                       {uploadingVideo ? `Uploading ${uploadProgress}%…` : initialAnalysisLoading ? 'Analyzing…' : initialAnalysisReady ? 'Re-run Full Analysis' : 'Full Clip Analysis'}
                     </Button>
                     <Button size="sm" variant="outline" onClick={analyzeExchangesAndPatterns} disabled={analyzingExchanges}>{analyzingExchanges ? 'Detecting…' : 'Exchanges & Patterns'}</Button>
                   </div>
+                  {videoCredits && (
+                    <div className="rounded-md border border-border/50 bg-background/30 px-2 py-1.5 text-[10px] text-muted-foreground">
+                      AI video credits: <span className="font-semibold text-foreground">{videoCredits.remaining} remaining</span>
+                      {' '}({videoCredits.used} used{videoCredits.reserved ? `, ${videoCredits.reserved} processing` : ''} of {videoCredits.limit}; {videoCredits.tier === 'free' ? 'Free 10s clips' : videoCredits.tier === 'pro' ? 'Pro weekly clips' : 'admin'})
+                    </div>
+                  )}
+                  {clipStorageStatus !== 'idle' && (
+                    <div className="text-[10px] text-muted-foreground">
+                      Clip archive: {clipStorageStatus === 'saving' ? 'saving a review copy…' : clipStorageStatus === 'saved' ? 'saved for review' : 'unavailable — this clip stays in this browser only'}
+                    </div>
+                  )}
 
                   <div className="grid grid-cols-2 gap-3 text-xs">
                     <div className="space-y-2">

@@ -31,6 +31,13 @@ export const GRAPPLING_POSITIONS = [
   'mount',
   'back_control',
   'turtle',
+  'wrist_ride',
+  'dagestani_handcuff',
+  'seatbelt_control',
+  'hooks_in',
+  'body_triangle',
+  'front_headlock',
+  'flattened_out',
   'scramble_unresolved',
   'camera_occluded',
 ] as const
@@ -41,6 +48,8 @@ export const GRAPPLING_ACTION_EVENTS = [
   'sweep_completed',
   'guard_pass_completed',
   'back_exposure_forced',
+  'back_take',
+  'mat_return',
   'arm_isolation_secured',
   'submission_lock_applied',
   'submission_tap',
@@ -61,6 +70,10 @@ export const GRAPPLING_TECHNICAL_FAULTS = [
  */
 export const GRAPPLING_TECHNIQUES = [
   'WRIST_RIDE',
+  'DAGESTANI_HANDCUFF',
+  'SEATBELT',
+  'HOOKS_IN',
+  'BODY_TRIANGLE',
   'ARMBAR',
   'TRIANGLE',
   'KIMURA',
@@ -71,6 +84,7 @@ export const GRAPPLING_TECHNIQUES = [
   'SIDE_CONTROL',
   'MOUNT',
   'BACK_CONTROL',
+  'FRONT_HEADLOCK',
   'GUARD_PASS',
   'SWEEP',
   'TAKEDOWN',
@@ -228,6 +242,7 @@ Hard rules:
 - "technical_faults" entries must be from: ${GRAPPLING_TECHNICAL_FAULTS.join(', ')}.
 - "techniques_identified" entries must be ONLY from this list: ${GRAPPLING_TECHNIQUES.join(', ')}.
 - TECHNIQUE CONFIDENCE RULE: You may ONLY output techniques from the list above. If you are not highly confident in the exact technique (e.g. wrist ride vs armbar), output "UNKNOWN" — never guess a submission name.
+- Prefer ride/back vocabulary when that is what you see: wrist_ride, dagestani_handcuff, seatbelt_control, hooks_in, body_triangle, flattened_out — and action events back_take / mat_return when they complete on screen.
 - Do NOT label a wrist ride, grip fight, or control position as ARMBAR unless the arm is clearly extended and the elbow joint is being hyperextended on screen.
 - Never invent grips, hooks, or foot positions you cannot see. Put uncertainty in "unknowns".
 - "top_player_identifier" is a visible-appearance description only (e.g., "black rashguard", "bare torso"). Never a name.
@@ -295,8 +310,9 @@ You may be provided two data inputs:
 CRITICAL RULE FOR GRAPPLING CLIPS:
 - Because body-on-body grappling causes severe pose-tracking occlusion and bounding-box overlaps, the FightEvidenceLedger is highly prone to errors on grappling footage.
 - If the FightEvidenceLedger or pose evidence contains striking events (e.g., 'jab', 'cross', 'hook') or striking faults ('guard_low') during this grappling clip, you MUST ignore them entirely. They are compiler artifacts.
+- If the ledger contains only guard/strike faults, treat it as EMPTY — coach exclusively from the video and VideoAnalysisLedger. Never rebrand "low guard" into choke or hand advice on a roll.
 - The VideoAnalysisLedger is your ABSOLUTE SOURCE OF TRUTH for the timeline, positions, and transitions.
-- You may only use pose-derived data to evaluate macro trunk geometry (e.g., whether a spine is flattened, hip alignment, or pacing/scramble intensity).
+- You may only use pose-derived data to evaluate pacing/scramble intensity — never technique claims.
 
 ANALYSIS FRAMEWORK — look at the roll through three filters:
 1. Positional Hierarchy: Did the student establish position before hunting the submission? Did they stabilize the pass?

@@ -1,5 +1,6 @@
-import { requireUser, type MusashiRole } from '@/lib/musashiAuth'
+import { assertEmailVerified, requireUser, type MusashiRole } from '@/lib/musashiAuth'
 import { getDb } from '@/lib/db'
+import { VIDEO_DURATION_TOLERANCE_SEC } from '@/lib/videoTierLimits'
 
 export type MusashiAction = 'analyze' | 'chat' | 'reflex' | 'track'
 
@@ -8,7 +9,7 @@ export const FREE_MAX_VIDEO_SEC = 10
 /** Max clip length for Pro AI video analysis (seconds). */
 export const PRO_MAX_VIDEO_SEC = 30
 /** Lifetime free AI video analyses before upgrade required. */
-export const FREE_LIFETIME_VIDEOS = 2
+export const FREE_LIFETIME_VIDEOS = 3
 /**
  * Pro weekly AI video analyses.
  * Rationale: at ~$0.08–0.12 per 30s multimodal pipeline (Gemini + optional cloud pose),
@@ -289,7 +290,10 @@ export const enforceVideoAnalysis = async (
   }
 
   const limits = await resolveVideoTierLimits(userId, role)
-  if (clipDurationSec > limits.maxDurationSec) {
+  // Tolerance: a clip trimmed to exactly the cap measures a frame or two over
+  // (MediaRecorder overshoot) — hard-rejecting it would 402 every just-trimmed
+  // clip and the AI would never see the video.
+  if (clipDurationSec > limits.maxDurationSec + VIDEO_DURATION_TOLERANCE_SEC) {
     throw new Error('VIDEO_DURATION_EXCEEDED')
   }
 
@@ -365,6 +369,9 @@ export const questionsPerClipForTier = (isPro: boolean): number =>
 export const extractChatClipKey = (action: string, body: Record<string, unknown>): string | null => {
   if (action !== 'chat' && action !== 'strategy') return null
   const ctx = body?.context as Record<string, unknown> | undefined
+  // The first native-video breakdown is paid for by the video-analysis credit.
+  // Do not also spend one of the per-clip follow-up questions on that request.
+  if (ctx?.initialVideoAnalysis === true) return null
   if (!ctx?.videoFileUri) return null
   const clipKey = String(ctx.videoFileUri).trim().slice(0, 256)
   return clipKey || null
@@ -513,6 +520,9 @@ export const enforceUsage = async (req: Request, action: MusashiAction) => {
   }
 
   const user = await requireUser(req)
+  // AI quotas only apply after the account is eligible to use AI. Rejected
+  // verification attempts must not burn rate-limit or daily-usage counters.
+  assertEmailVerified(user)
   const limits = await resolveLimits(user.id, user.role)
 
   await enforceRateLimit(user.id, limits.perMinute)

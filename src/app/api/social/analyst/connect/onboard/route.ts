@@ -2,7 +2,7 @@
  * POST /api/social/analyst/connect/onboard — start Stripe Connect Express onboarding.
  */
 import { NextResponse } from 'next/server'
-import { enforceUsage } from '@/lib/musashiUsage'
+import { requireUser } from '@/lib/musashiAuth'
 import { getDb } from '@/lib/marketplace/types'
 import { createOrRefreshConnectAccount } from '@/lib/marketplace/connect'
 import { resolveMarketplacePaymentMode } from '@/lib/marketplace/payments'
@@ -16,7 +16,7 @@ export async function POST(req: Request) {
       )
     }
 
-    const user = await enforceUsage(req, 'chat')
+    const user = await requireUser(req)
     const origin = process.env.MUSASHI_APP_URL?.replace(/\/$/, '') || new URL(req.url).origin
     const result = await createOrRefreshConnectAccount(getDb(), {
       userId: user.id,

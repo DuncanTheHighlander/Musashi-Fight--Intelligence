@@ -1,4 +1,9 @@
 import { getStripeSecretKey } from '@/lib/stripe/getStripeSecretKey'
+import {
+  ensureStripeCustomer,
+  getDefaultPaymentMethodId,
+  stripeFormRequest,
+} from '@/lib/stripe/customer'
 import type { MarketplaceJobRow } from './types'
 
 export type MarketplacePaymentMode = 'mock' | 'stripe'
@@ -9,6 +14,9 @@ export type MarketplaceFundingSession = {
   checkoutUrl: string | null
   checkoutSessionId: string | null
   message: string
+  /** Set when a saved card charged successfully (no redirect). */
+  fundedInline?: boolean
+  paymentIntentId?: string | null
 }
 
 type StripeCheckoutSession = {
@@ -60,6 +68,7 @@ export function mockMarketplaceFundingSession(): MarketplaceFundingSession {
     checkoutUrl: null,
     checkoutSessionId: null,
     message: 'Mock escrow recorded. No real card was charged.',
+    fundedInline: true,
   }
 }
 
@@ -69,6 +78,7 @@ export async function createMarketplaceCheckoutSession(args: {
   actor: { id: string; email?: string | null }
   successUrl?: string | null
   cancelUrl?: string | null
+  customerId?: string | null
 }): Promise<MarketplaceFundingSession> {
   const secretKey = await getStripeSecretKey()
   if (!secretKey) throw new Error('STRIPE_NOT_CONFIGURED')
@@ -100,8 +110,12 @@ export async function createMarketplaceCheckoutSession(args: {
   form.set('payment_intent_data[metadata][musashi_marketplace_job_id]', args.job.id)
   form.set('payment_intent_data[metadata][musashi_user_id]', args.actor.id)
 
-  const email = String(args.actor.email || '').trim()
-  if (email && email !== 'dev@local') form.set('customer_email', email)
+  if (args.customerId) {
+    form.set('customer', args.customerId)
+  } else {
+    const email = String(args.actor.email || '').trim()
+    if (email && email !== 'dev@local') form.set('customer_email', email)
+  }
 
   const session = await stripeRequest(
     secretKey,
@@ -120,5 +134,64 @@ export async function createMarketplaceCheckoutSession(args: {
     checkoutUrl,
     checkoutSessionId: session.id ? String(session.id) : null,
     message: 'Redirect to Stripe Checkout to fund this job.',
+  }
+}
+
+/**
+ * Charge the fighter's default saved card. Returns fundedInline on success;
+ * otherwise null so the caller can fall back to Checkout.
+ */
+export async function tryChargeMarketplaceWithSavedCard(args: {
+  job: MarketplaceJobRow
+  actor: { id: string; email: string }
+}): Promise<MarketplaceFundingSession | null> {
+  const secretKey = await getStripeSecretKey()
+  if (!secretKey) return null
+
+  let customerId: string
+  try {
+    customerId = await ensureStripeCustomer(args.actor)
+  } catch {
+    return null
+  }
+
+  const paymentMethodId = await getDefaultPaymentMethodId(customerId)
+  if (!paymentMethodId) return null
+
+  const form = new URLSearchParams()
+  form.set('amount', String(args.job.amount_cents))
+  form.set('currency', args.job.currency.toLowerCase())
+  form.set('customer', customerId)
+  form.set('payment_method', paymentMethodId)
+  form.set('confirm', 'true')
+  form.set('off_session', 'true')
+  form.set('metadata[musashi_kind]', 'marketplace_job_funding')
+  form.set('metadata[musashi_marketplace_job_id]', args.job.id)
+  form.set('metadata[musashi_user_id]', args.actor.id)
+
+  try {
+    const pi = await stripeFormRequest(
+      secretKey,
+      'POST',
+      '/v1/payment_intents',
+      form,
+      `marketplace_job_${args.job.id}_pi_saved`,
+    )
+    const status = String(pi.status || '')
+    if (status === 'succeeded') {
+      return {
+        provider: 'stripe',
+        requiresRedirect: false,
+        checkoutUrl: null,
+        checkoutSessionId: null,
+        fundedInline: true,
+        paymentIntentId: pi.id ? String(pi.id) : null,
+        message: 'Charged saved card — escrow funded.',
+      }
+    }
+    // 3DS / requires_action → fall back to Checkout
+    return null
+  } catch {
+    return null
   }
 }

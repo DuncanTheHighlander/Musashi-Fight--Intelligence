@@ -1,4 +1,4 @@
-import { describe, expect, it, afterEach } from 'vitest'
+import { describe, expect, it, afterEach, vi } from 'vitest'
 import {
   assertEmailVerified,
   isEmailVerificationRequired,
@@ -22,6 +22,7 @@ describe('email verification gate', () => {
   const prevDisable = process.env.MUSASHI_DISABLE_AUTH
 
   afterEach(() => {
+    vi.unstubAllEnvs()
     if (prevReq === undefined) delete process.env.MUSASHI_REQUIRE_EMAIL_VERIFIED
     else process.env.MUSASHI_REQUIRE_EMAIL_VERIFIED = prevReq
     if (prevDisable === undefined) delete process.env.MUSASHI_DISABLE_AUTH
@@ -53,5 +54,15 @@ describe('email verification gate', () => {
   it('does not block when requirement is off', () => {
     process.env.MUSASHI_REQUIRE_EMAIL_VERIFIED = '0'
     expect(() => assertEmailVerified(baseUser())).not.toThrow()
+  })
+
+  it('only enables the production default when email delivery is configured', () => {
+    delete process.env.MUSASHI_REQUIRE_EMAIL_VERIFIED
+    vi.stubEnv('NODE_ENV', 'production')
+    vi.stubEnv('EMAIL_API_KEY', '')
+    expect(isEmailVerificationRequired()).toBe(false)
+
+    vi.stubEnv('EMAIL_API_KEY', 're_live_configured')
+    expect(isEmailVerificationRequired()).toBe(true)
   })
 })

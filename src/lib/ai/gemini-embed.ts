@@ -1,4 +1,5 @@
 import { safeParseResponse } from '@/lib/safeJson'
+import { getServerSecret } from '@/lib/cloudflare/secrets'
 
 import { GEMINI_EMBED_MODEL_DEFAULT } from '@/lib/gemini/models'
 
@@ -39,8 +40,8 @@ export const defaultOutputDimensionality = (): number => {
   return parsed
 }
 
-const getKey = (explicit?: string): string => {
-  const key = explicit || process.env.GEMINI_API_KEY
+const getKey = async (explicit?: string): Promise<string> => {
+  const key = explicit || await getServerSecret('GEMINI_API_KEY')
   if (!key) throw new Error('GEMINI_API_KEY not configured')
   return key
 }
@@ -71,7 +72,7 @@ export async function embedText(
   input: string | string[],
   options?: EmbedOptions
 ): Promise<number[] | number[][]> {
-  const apiKey = getKey(options?.apiKey)
+  const apiKey = await getKey(options?.apiKey)
   const model = options?.model || defaultModel()
 
   const inputs = toInputs(input)
@@ -126,7 +127,7 @@ export async function embedVideo(
   input: EmbedVideoInput,
   options?: EmbedOptions
 ): Promise<number[]> {
-  const apiKey = getKey(options?.apiKey)
+  const apiKey = await getKey(options?.apiKey)
   const model = options?.model || defaultModel()
   const url = buildUrl(model, apiKey)
 
@@ -154,7 +155,7 @@ export async function embedVideoWithCaption(
   video: EmbedVideoInput,
   options?: EmbedOptions
 ): Promise<number[]> {
-  const apiKey = getKey(options?.apiKey)
+  const apiKey = await getKey(options?.apiKey)
   const model = options?.model || defaultModel()
   const url = buildUrl(model, apiKey)
 

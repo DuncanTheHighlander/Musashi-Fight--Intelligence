@@ -31,12 +31,14 @@ afterEach(() => {
 
 describe('validateEnv', () => {
   test('rejects placeholder required credentials in production', () => {
-    setProdEnv({ GEMINI_API_KEY: 'your-gemini-api-key-here' })
+    // Gemini is now validated asynchronously through the Cloudflare Secrets
+    // Store binding; this synchronous check covers the required Worker env.
+    setProdEnv({ MUSASHI_SESSION_SECRET: 'your-secret-here' })
 
     const result = validateEnv()
 
     expect(result.valid).toBe(false)
-    expect(result.errors).toContain('Missing required env var: GEMINI_API_KEY')
+    expect(result.errors).toContain('Missing required env var: MUSASHI_SESSION_SECRET')
   })
 
   test('rejects MUSASHI_DISABLE_AUTH in production', () => {

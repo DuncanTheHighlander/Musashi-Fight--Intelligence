@@ -109,6 +109,33 @@ describe('buildGroundedCoachingPrompt', () => {
     expect(prompt).toContain('User question: How do I stop getting passed?')
   })
 
+  it('enforces punchy Coach Card word budgets and human time format', () => {
+    const prompt = buildGroundedCoachingPrompt({
+      ledger,
+      retrievedSnippets: [],
+      focusTarget: 'A',
+    })
+    expect(prompt).toContain('MAX 2 sentences, ~35 words')
+    expect(prompt).toContain('≤18 words')
+    expect(prompt).toContain('≤20 words')
+    expect(prompt).toContain('NO REPETITION')
+    expect(prompt).toContain('NEVER raw milliseconds')
+    expect(prompt).toContain('4.2s in')
+  })
+
+  it('hardens grappling override: empty striking ledger, coach from video', () => {
+    const prompt = buildGroundedCoachingPrompt({
+      ledger,
+      retrievedSnippets: [],
+      focusTarget: 'A',
+      coachBrain: { selectedSport: 'bjj', clipType: 'rolling_grappling' },
+    })
+    expect(prompt).toContain('treat the FightEvidenceLedger as EMPTY')
+    expect(prompt).toContain('Coach exclusively from the video')
+    expect(prompt).toContain('never technique claims')
+    expect(prompt).toContain('Riding & Back Attacks')
+  })
+
   it('includes poseEngine and poseQuality metadata with caution language', () => {
     const prompt = buildGroundedCoachingPrompt({
       ledger,
@@ -155,14 +182,15 @@ describe('buildGroundedCoachingPrompt', () => {
 
     expect(prompt).toContain('UNIVERSAL FEEDBACK FORMAT')
     expect(prompt).toContain('mainDiagnosis = Coach')
-    expect(prompt).toContain('Main Story of the Exchange')
+    expect(prompt).toContain('fight reporter')
+    expect(prompt).toContain('MAX 2 sentences')
     expect(prompt).toContain('cause-and-effect')
     expect(prompt).toContain('quickCues = 3-5 short corner commands')
-    expect(prompt).toContain('suggestedCorrections = exactly 3 detailed adjustments')
-    expect(prompt).toContain('Adjustment 1 - Technical adjustment')
-    expect(prompt).toContain('Adjustment 2 - Tactical adjustment')
-    expect(prompt).toContain('Adjustment 3 - Training/habit adjustment')
-    expect(prompt).toContain('confidence/caution note ONLY when relevant')
+    expect(prompt).toContain('suggestedCorrections = exactly 3 punchy cards')
+    expect(prompt).toContain('Technical — highest-leverage')
+    expect(prompt).toContain('Tactical — decision')
+    expect(prompt).toContain('Training/habit — ONE named drill')
+    expect(prompt).toContain('NO REPETITION')
     expect(prompt).toContain('Never invent timestamps')
     expect(prompt).toContain('Do not structure the response as Moment 1 / Moment 2 / Moment 3')
   })
