@@ -1659,8 +1659,10 @@ const handleChat = async (body: any, user: any) => {
            return { resp, data }
         }
 
+        // gemini-2.5-pro is retired ("no longer available to new users") —
+        // default to the same pro model the rest of the codebase uses.
         const initialModel = useCometStyle
-          ? (process.env.GEMINI_COMET_MODEL || 'gemini-2.5-pro')
+          ? (process.env.GEMINI_COMET_MODEL || resolvedModels.pro())
           : model
 
         let { resp, data } = await doDeepChat(initialModel, true)
