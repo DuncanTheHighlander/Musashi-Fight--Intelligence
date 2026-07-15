@@ -1672,7 +1672,9 @@ const handleChat = async (body: any, user: any) => {
           data = fallback.data
         }
         
-        if (!resp.ok && (resp.status === 404 || resp.status === 500)) {
+        // 429/503 included: free-tier keys have ZERO pro-model quota — without
+        // falling back to Flash here, every deep chat dies at Google's door.
+        if (!resp.ok && (resp.status === 404 || resp.status === 429 || resp.status === 500 || resp.status === 503)) {
           for (const fallbackModel of fallbackModels) {
             const fallback = await doDeepChat(fallbackModel, true)
             resp = fallback.resp
@@ -1862,7 +1864,9 @@ const handleChat = async (body: any, user: any) => {
           data = fallback.data
         }
       }
-      if (!resp.ok && (resp.status === 404 || resp.status === 500)) {
+      // 429/503 included: free-tier keys have ZERO pro-model quota — fall back
+      // to Flash instead of failing the whole chat.
+      if (!resp.ok && (resp.status === 404 || resp.status === 429 || resp.status === 500 || resp.status === 503)) {
         for (const fallbackModel of fallbackModels) {
           if (model === fallbackModel) continue
           logger.warn('Gemini model failed, retrying with fallback', { model, status: resp.status, fallback: fallbackModel })
