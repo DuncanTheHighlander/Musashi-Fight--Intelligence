@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { UploadClientError, uploadMarketplaceFile, type UploadProgress } from './uploadClient'
+import {
+  DIRECT_R2_MIN_UPLOAD_BYTES,
+  UploadClientError,
+  uploadMarketplaceFile,
+  type UploadProgress,
+} from './uploadClient'
 
 type TicketResponse = {
   asset: { id: string; status: string }
@@ -67,10 +72,17 @@ function makeTicket(url = '/api/uploads/asset_test/content'): TicketResponse {
   }
 }
 
+/** A tiny in-memory File that reports an arbitrary size (avoids allocating 100MB+). */
+function fileOfSize(bytes: number, name = 'clip.mp4'): File {
+  const file = new File(['clip'], name, { type: 'video/mp4' })
+  Object.defineProperty(file, 'size', { value: bytes })
+  return file
+}
+
 function mockFetchWithTicket(ticket: TicketResponse) {
   const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
     const url = String(input)
-    // analysis_clip → /api/upload-ticket (direct R2); other purposes → /api/uploads
+    // Small clips → /api/uploads (Worker/mock); huge clips → /api/upload-ticket
     if (url === '/api/upload-ticket' || url === '/api/uploads') {
       return Response.json(
         {
@@ -120,7 +132,7 @@ describe('uploadMarketplaceFile', () => {
       file: new File(['clip'], 'clip.mp4', { type: 'video/mp4' }),
       purpose: 'analysis_clip',
     })
-    expect(String(r2Fetch.mock.calls[0]?.[0])).toBe('/api/upload-ticket')
+    expect(String(r2Fetch.mock.calls[0]?.[0])).toBe('/api/uploads')
     expect(FakeXMLHttpRequest.instances[0].withCredentials).toBe(false)
 
     FakeXMLHttpRequest.instances = []
@@ -131,6 +143,56 @@ describe('uploadMarketplaceFile', () => {
       purpose: 'deliverable',
     })
     expect(FakeXMLHttpRequest.instances[0].withCredentials).toBe(true)
+  })
+
+  it('routes small analysis clips through /api/uploads and huge ones direct to R2', async () => {
+    const smallFetch = mockFetchWithTicket(makeTicket())
+    await uploadMarketplaceFile({
+      file: fileOfSize(DIRECT_R2_MIN_UPLOAD_BYTES),
+      purpose: 'analysis_clip',
+    })
+    expect(String(smallFetch.mock.calls[0]?.[0])).toBe('/api/uploads')
+
+    FakeXMLHttpRequest.instances = []
+    const hugeFetch = mockFetchWithTicket(
+      makeTicket('https://account.r2.cloudflarestorage.com/bucket/object?X-Amz-Signature=abc'),
+    )
+    await uploadMarketplaceFile({
+      file: fileOfSize(DIRECT_R2_MIN_UPLOAD_BYTES + 1),
+      purpose: 'analysis_clip',
+    })
+    expect(String(hugeFetch.mock.calls[0]?.[0])).toBe('/api/upload-ticket')
+  })
+
+  it('falls back to /api/uploads when direct R2 signing is unavailable (501)', async () => {
+    const ticket = makeTicket()
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/upload-ticket') {
+        return Response.json(
+          { error: 'Direct R2 upload is not configured.', code: 'STORAGE_NOT_CONFIGURED' },
+          { status: 501 },
+        )
+      }
+      if (url === '/api/uploads') return Response.json(ticket, { status: 201 })
+      if (url === `/api/uploads/${ticket.asset.id}/complete`) {
+        return Response.json({ asset: { id: ticket.asset.id, status: 'uploaded' } })
+      }
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const asset = await uploadMarketplaceFile({
+      file: fileOfSize(DIRECT_R2_MIN_UPLOAD_BYTES + 1),
+      purpose: 'analysis_clip',
+    })
+
+    expect(asset.id).toBe(ticket.asset.id)
+    expect(fetchMock.mock.calls.map((c) => String(c[0]))).toEqual([
+      '/api/upload-ticket',
+      '/api/uploads',
+      `/api/uploads/${ticket.asset.id}/complete`,
+    ])
   })
 
   it('reports unweighted raw percent and byte progress', async () => {

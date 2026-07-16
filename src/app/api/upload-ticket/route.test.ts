@@ -58,7 +58,7 @@ describe('POST /api/upload-ticket', () => {
     )
 
     expect(res.status).toBe(201)
-    const json = await res.json()
+    const json = (await res.json()) as { assetId: string; presignedUrl: string }
     expect(json.assetId).toBe('asset_abc')
     expect(json.presignedUrl).toMatch(/^https:\/\/account\.r2\.cloudflarestorage\.com/)
     expect(createUploadTicketMock).toHaveBeenCalledWith(
@@ -85,7 +85,7 @@ describe('POST /api/upload-ticket', () => {
       }),
     )
     expect(res.status).toBe(413)
-    const json = await res.json()
+    const json = (await res.json()) as { code: string }
     expect(json.code).toBe('DIRECT_R2_REQUIRED')
   })
 })

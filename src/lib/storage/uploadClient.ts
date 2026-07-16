@@ -68,6 +68,13 @@ export class UploadClientError extends Error {
 export const DEFAULT_UPLOAD_STALL_TIMEOUT_MS = 20_000
 export const DEFAULT_UPLOAD_HARD_TIMEOUT_MS = 10 * 60_000
 
+/**
+ * Files at or below this ride the Worker/mock /api/uploads path (safely under
+ * Cloudflare's ~100 MB Worker request-body limit). Only larger originals need
+ * a browser-direct R2 presigned PUT via /api/upload-ticket.
+ */
+export const DIRECT_R2_MIN_UPLOAD_BYTES = 90 * 1024 * 1024
+
 type TicketResponse = {
   asset: { id: string; status: string }
   upload: {
@@ -123,34 +130,43 @@ export async function uploadMarketplaceFile(args: {
 
   throwIfAborted(signal, 'ticket')
 
-  // Analysis clips (phone .mov often 100–500 MB) must use browser-direct R2.
-  // /api/upload-ticket always requires a presigned URL — never Worker proxy.
-  const ticketUrl = purpose === 'analysis_clip' ? '/api/upload-ticket' : '/api/uploads'
+  const requestTicket = async (url: string): Promise<Response> => {
+    try {
+      return await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        signal,
+        body: JSON.stringify({
+          purpose,
+          originalName: file.name,
+          contentType,
+          sizeBytes: file.size,
+          jobId,
+          disputeId,
+        }),
+      })
+    } catch (error) {
+      if (signal?.aborted || isAbortError(error)) throw abortedError('ticket')
+      throw uploadError({
+        code: 'UPLOAD_TICKET_FAILED',
+        stage: 'ticket',
+        message: 'Could not create the upload. Check your connection and retry.',
+        retryable: true,
+      })
+    }
+  }
 
-  let ticketRes: Response
-  try {
-    ticketRes = await fetch(ticketUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-      signal,
-      body: JSON.stringify({
-        purpose,
-        originalName: file.name,
-        contentType,
-        sizeBytes: file.size,
-        jobId,
-        disputeId,
-      }),
-    })
-  } catch (error) {
-    if (signal?.aborted || isAbortError(error)) throw abortedError('ticket')
-    throw uploadError({
-      code: 'UPLOAD_TICKET_FAILED',
-      stage: 'ticket',
-      message: 'Could not create the upload. Check your connection and retry.',
-      retryable: true,
-    })
+  // Small clips (already physically trimmed on-device) use the Worker/mock
+  // /api/uploads path. Only huge originals that cannot fit a Worker request
+  // body go browser-direct to R2 via /api/upload-ticket.
+  const preferDirectR2 = purpose === 'analysis_clip' && file.size > DIRECT_R2_MIN_UPLOAD_BYTES
+
+  let ticketRes = await requestTicket(preferDirectR2 ? '/api/upload-ticket' : '/api/uploads')
+  if (preferDirectR2 && (ticketRes.status === 501 || ticketRes.status === 413)) {
+    // Direct-R2 signing is unavailable (e.g. local dev without STORAGE_*
+    // secrets). Fall back to the Worker/mock path instead of failing outright.
+    ticketRes = await requestTicket('/api/uploads')
   }
   if (!ticketRes.ok) {
     const server = await readSafeServerFailure(ticketRes)
