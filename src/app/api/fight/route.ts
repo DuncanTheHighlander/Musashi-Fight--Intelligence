@@ -3447,7 +3447,10 @@ export async function POST(req: Request) {
           const requestedSourceStartSec = Number(
             (formData ? formData.get('sourceStartSec') : null) ?? body?.sourceStartSec ?? 0,
           )
-          const requestedDurationSec =
+          const requestedSourceEndSec = Number(
+            (formData ? formData.get('sourceEndSec') : null) ?? body?.sourceEndSec ?? NaN,
+          )
+          const requestedDurationSecRaw =
             (formData ? formData.get('requestedDurationSec') : null) ??
             body?.requestedDurationSec
           // The client may suggest where the source window starts, but cannot
@@ -3457,6 +3460,13 @@ export async function POST(req: Request) {
             Number.isFinite(requestedSourceStartSec) && requestedSourceStartSec >= 0
               ? Math.min(requestedSourceStartSec, 86_400)
               : 0
+          // Prefer explicit endSec when present; otherwise fall back to duration.
+          const durationFromWindow =
+            Number.isFinite(requestedSourceEndSec) && requestedSourceEndSec > sourceStartSec
+              ? requestedSourceEndSec - sourceStartSec
+              : null
+          const requestedDurationSec =
+            durationFromWindow != null ? durationFromWindow : requestedDurationSecRaw
           const requestId =
             typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
               ? crypto.randomUUID()
@@ -3470,7 +3480,7 @@ export async function POST(req: Request) {
             // The authenticated tier remains the server-owned ceiling, but a
             // shorter athlete-selected interval must not be lengthened to that
             // ceiling. Modal applies the final source-duration cap after it
-            // probes the actual media.
+            // probes the actual media. Never trust a client-supplied maxSec.
             const limits = await resolveVideoTierLimits(user.id, user.role)
             const normalizedMaxSec = resolveRequestedVideoDurationSec(
               requestedDurationSec,

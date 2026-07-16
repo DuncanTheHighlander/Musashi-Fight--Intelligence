@@ -150,6 +150,40 @@ describe('upload assets', () => {
     })).rejects.toThrow('DIRECT_R2_REQUIRED')
   })
 
+  test('requireDirectR2 refuses Worker fallback even for small analysis clips', async () => {
+    vi.stubEnv('MUSASHI_STORAGE_MODE', 'r2')
+    vi.stubEnv('NODE_ENV', 'production')
+    vi.stubEnv('STORAGE_SERVICE_URL', '')
+    vi.stubEnv('STORAGE_ACCESS_KEY', '')
+    vi.stubEnv('STORAGE_SECRET_KEY', '')
+    vi.stubEnv('STORAGE_BUCKET_NAME', '')
+    getWorkerUploadsBucketMock.mockResolvedValue({ head: vi.fn() })
+
+    await expect(createUploadTicket(createMockD1(), {
+      userId: 'dev',
+      purpose: 'analysis_clip',
+      originalName: 'clip.mp4',
+      contentType: 'video/mp4',
+      sizeBytes: 64,
+      requireDirectR2: true,
+    })).rejects.toThrow('DIRECT_R2_REQUIRED')
+  })
+
+  test('requireDirectR2 returns an https R2 URL when signing is configured', async () => {
+    configurePresignedR2Mode()
+    const ticket = await createUploadTicket(createMockD1(), {
+      userId: 'dev',
+      purpose: 'analysis_clip',
+      originalName: 'phone.mov',
+      contentType: 'video/quicktime',
+      sizeBytes: MAX_WORKER_PROXY_UPLOAD_BYTES + 5_000_000,
+      requireDirectR2: true,
+    })
+    expect(ticket.upload.provider).toBe('r2')
+    expect(ticket.upload.url).toMatch(/^https:\/\//)
+    expect(ticket.upload.url).toContain('r2.cloudflarestorage.com')
+  })
+
   test('presigned completion still verifies R2 HEAD and exact ticketed size', async () => {
     configurePresignedR2Mode()
     const head = vi.fn().mockResolvedValue({ size: 64 })

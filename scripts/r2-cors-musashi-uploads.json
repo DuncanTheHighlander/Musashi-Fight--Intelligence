@@ -5,12 +5,17 @@
         "origins": [
           "https://app.duncanazsmith.workers.dev",
           "http://localhost:3000",
-          "http://127.0.0.1:3000"
+          "http://127.0.0.1:3000",
+          "http://localhost:8787",
+          "http://127.0.0.1:8787",
+          "capacitor://localhost",
+          "https://localhost",
+          "ionic://localhost"
         ],
         "methods": ["GET", "PUT", "HEAD"],
-        "headers": ["Content-Type"]
+        "headers": ["Content-Type", "x-amz-content-sha256", "x-amz-date", "authorization"]
       },
-      "exposeHeaders": ["ETag"],
+      "exposeHeaders": ["ETag", "Content-Length"],
       "maxAgeSeconds": 3600
     }
   ]

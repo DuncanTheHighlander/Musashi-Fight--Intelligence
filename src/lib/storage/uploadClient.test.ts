@@ -70,7 +70,18 @@ function makeTicket(url = '/api/uploads/asset_test/content'): TicketResponse {
 function mockFetchWithTicket(ticket: TicketResponse) {
   const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
     const url = String(input)
-    if (url === '/api/uploads') return Response.json(ticket, { status: 201 })
+    // analysis_clip → /api/upload-ticket (direct R2); other purposes → /api/uploads
+    if (url === '/api/upload-ticket' || url === '/api/uploads') {
+      return Response.json(
+        {
+          ...ticket,
+          assetId: ticket.asset.id,
+          presignedUrl: ticket.upload.url,
+          headers: ticket.upload.headers,
+        },
+        { status: 201 },
+      )
+    }
     if (url === `/api/uploads/${ticket.asset.id}/complete`) {
       return Response.json({ asset: { id: ticket.asset.id, status: 'uploaded' } })
     }
@@ -102,20 +113,22 @@ describe('uploadMarketplaceFile', () => {
 
   it('isolates credentials by upload URL origin', async () => {
     vi.stubGlobal('window', { location: { origin: 'https://app.example' } })
-    mockFetchWithTicket(
-      makeTicket('https://r2.example/object?X-Amz-Signature=abc'),
+    const r2Fetch = mockFetchWithTicket(
+      makeTicket('https://account.r2.cloudflarestorage.com/bucket/object?X-Amz-Signature=abc'),
     )
     await uploadMarketplaceFile({
       file: new File(['clip'], 'clip.mp4', { type: 'video/mp4' }),
       purpose: 'analysis_clip',
     })
+    expect(String(r2Fetch.mock.calls[0]?.[0])).toBe('/api/upload-ticket')
     expect(FakeXMLHttpRequest.instances[0].withCredentials).toBe(false)
 
     FakeXMLHttpRequest.instances = []
+    // Non-analysis purposes still use /api/uploads (may be Worker same-origin).
     mockFetchWithTicket(makeTicket('https://app.example/api/uploads/asset_test/content'))
     await uploadMarketplaceFile({
       file: new File(['clip'], 'clip.mp4', { type: 'video/mp4' }),
-      purpose: 'analysis_clip',
+      purpose: 'deliverable',
     })
     expect(FakeXMLHttpRequest.instances[0].withCredentials).toBe(true)
   })

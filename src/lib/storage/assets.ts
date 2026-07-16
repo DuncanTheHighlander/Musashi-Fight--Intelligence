@@ -28,6 +28,12 @@ export type CreateUploadTicketInput = {
   jobId?: string | null
   disputeId?: string | null
   origin?: string
+  /**
+   * When true, never issue a Worker-proxied PUT URL. Used for phone analysis
+   * clips that can exceed Cloudflare's ~100 MB request body limit — the browser
+   * must PUT straight to a short-lived R2/S3 presigned URL.
+   */
+  requireDirectR2?: boolean
 }
 
 export type UploadTicket = {
@@ -165,6 +171,10 @@ export async function createUploadTicket(
   const now = new Date().toISOString()
   const objectKey = buildObjectKey(input.userId, input.purpose, input.originalName)
   const canPresign = mode === 'r2' && isR2SigningConfigured()
+  if (input.requireDirectR2) {
+    if (mode !== 'r2') throw new Error('STORAGE_NOT_CONFIGURED')
+    if (!canPresign) throw new Error('DIRECT_R2_REQUIRED')
+  }
   const workerBucket = mode === 'r2' && !canPresign ? await getWorkerUploadsBucket() : null
   if (mode === 'r2' && !canPresign && !workerBucket) assertStorageConfigured()
   if (mode === 'r2' && !canPresign && input.sizeBytes > MAX_WORKER_PROXY_UPLOAD_BYTES) {

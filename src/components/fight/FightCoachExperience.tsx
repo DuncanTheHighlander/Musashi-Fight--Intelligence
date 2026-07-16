@@ -70,7 +70,7 @@ import { createEmptyLedger, ingestFrameEvidence } from '@/lib/compiler/evidenceC
 import { FightOverlay } from '@/components/overlay/FightOverlay'
 import { CoachingPanel } from '@/components/feedback/CoachingPanel'
 import { sanitizeCoachText, looksLikeCoachingJson } from '@/lib/feedback/coachFeedback'
-import VideoTrimmer, { type VideoTrimResult } from '@/components/fight/VideoTrimmer'
+import ClipTimeWindowSlider, { type ClipTimeWindow } from '@/components/fight/ClipTimeWindowSlider'
 import { defaultTrimWindow, resolveVideoDuration } from '@/lib/videoTrim'
 import {
   FREE_MAX_VIDEO_SEC,
@@ -1425,9 +1425,8 @@ export default function FightCoachExperience({
     earlyCompileOnceRef.current = false
     autoCoachPromptShownRef.current = false
     setClipDurationSec(0)
-    // Do NOT clear analysisWindow here — requestVideoPick / VideoTrimmer set
-    // either 0..physicalTrimDuration or the server-fallback source timestamps
-    // immediately before calling onPickVideo.
+    // Do NOT clear analysisWindow here — ClipTimeWindowSlider sets
+    // source start/end timestamps immediately before calling onPickVideo.
     // Clearing to 0,0 made selectedWindowDurationSec() fall back to full-file
     // length and triggered VIDEO_DURATION_EXCEEDED ("clip too long") on upload.
     setCoachPreviewCoaching(null)
@@ -1475,7 +1474,11 @@ export default function FightCoachExperience({
     }
   }, [])
 
-  /** Fresh uploads first produce a small, validated physical analysis artifact. */
+  /**
+   * Fresh uploads open the lightweight time-window slider only (timestamps).
+   * The original phone file is uploaded direct-to-R2; Modal/FFmpeg performs the
+   * physical trim. Never use canvas/MediaRecorder re-encode on the client.
+   */
   const requestVideoPick = useCallback(
     (file: File, opts?: ClipPickOptions) => {
       const source = opts?.source ?? 'upload'
@@ -1487,9 +1490,6 @@ export default function FightCoachExperience({
         return
       }
 
-      // Do not attach the source to Fight Lab yet. VideoTrimmer owns the only
-      // decoder until it either returns a validated physical artifact or the
-      // user explicitly chooses the original + timestamp server fallback.
       setTrimSelection({ file, opts })
     },
     [applyAnalysisWindow],
@@ -2648,9 +2648,8 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
       )
       videoAnalysisSessionIdRef.current = videoAnalysisSessionId
 
-      // One canonical client operation: upload the original once to R2. The
-      // Worker owns FFmpeg normalization and Gemini upload; never fall back to
-      // a second multipart upload of the same file.
+      // Direct-to-R2: ticket → browser PUT to R2 hostname → /complete.
+      // Raw video bytes never enter /api/fight or any Worker request body.
       let assetId = parseAssetRef(clipAssetRefRef.current || '')
       if (!assetId) {
         try {
@@ -2681,6 +2680,13 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
         }
       }
 
+      const sourceStartSec = analysisWindowRef.current.startSec
+      const sourceEndSec = analysisWindowRef.current.endSec
+      const windowDurationSec =
+        Number.isFinite(sourceEndSec) && sourceEndSec > sourceStartSec
+          ? sourceEndSec - sourceStartSec
+          : duration
+
       setIngestionStage('original_uploaded')
       setInitialAnalysisStatus('Server is normalizing your video for AI…')
       setIngestionStage('normalizing')
@@ -2692,12 +2698,14 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
           action: 'upload_video',
           assetId,
           videoAnalysisSessionId,
-          // The server treats this as the requested interval, clamps it to the
-          // authenticated tier and remaining source duration, and must never
-          // silently lengthen a shorter athlete-selected window.
-          clipDurationSec: duration,
-          requestedDurationSec: duration,
-          sourceStartSec: analysisWindowRef.current.startSec,
+          // Metadata only — never the video File / FormData.
+          sourceStartSec,
+          sourceEndSec,
+          requestedDurationSec: windowDurationSec,
+          clipDurationSec: windowDurationSec,
+          sport: selectedSportRef.current || undefined,
+          clipType: selectedClipTypeRef.current || undefined,
+          ...currentFightClipAiMetadata(),
         }),
       })
 
@@ -3973,28 +3981,16 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
   return (
     <div className={idleCollapsed ? 'w-full' : 'min-h-screen w-full bg-background'}>
       {trimSelection ? (
-        <VideoTrimmer
+        <ClipTimeWindowSlider
           file={trimSelection.file}
           maxSec={maxClipSec}
-          onConfirm={(result: VideoTrimResult) => {
+          onConfirm={(window: ClipTimeWindow) => {
             const pending = trimSelection
             setTrimSelection(null)
-            // Let Radix fully remove the trim dialog/overlay before mounting
-            // the sport picker. Keeping the two modal lifecycles separate
-            // avoids the mobile full-screen overlay that used to swallow taps.
+            // Timestamps only — upload the original bytes direct-to-R2.
+            // Modal physically trims [startSec, endSec] server-side.
             setTimeout(() => {
-              applyAnalysisWindow(0, result.durationSec)
-              onPickVideoRef.current(result.file, pending.opts)
-            }, 180)
-          }}
-          onFallback={({ startSec, endSec }) => {
-            const pending = trimSelection
-            setTrimSelection(null)
-            // Local MediaRecorder/canvas is not dependable on every mobile
-            // codec. In this explicit fallback only, upload the original and
-            // preserve the selected source timestamps for the server slice.
-            setTimeout(() => {
-              applyAnalysisWindow(startSec, endSec)
+              applyAnalysisWindow(window.startSec, window.endSec)
               onPickVideoRef.current(pending.file, pending.opts)
             }, 180)
           }}

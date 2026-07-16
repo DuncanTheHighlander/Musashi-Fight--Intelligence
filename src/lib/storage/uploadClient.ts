@@ -123,9 +123,13 @@ export async function uploadMarketplaceFile(args: {
 
   throwIfAborted(signal, 'ticket')
 
+  // Analysis clips (phone .mov often 100–500 MB) must use browser-direct R2.
+  // /api/upload-ticket always requires a presigned URL — never Worker proxy.
+  const ticketUrl = purpose === 'analysis_clip' ? '/api/upload-ticket' : '/api/uploads'
+
   let ticketRes: Response
   try {
-    ticketRes = await fetch('/api/uploads', {
+    ticketRes = await fetch(ticketUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
@@ -169,7 +173,33 @@ export async function uploadMarketplaceFile(args: {
       retryable: isRetryableStatus(ticketRes.status),
     })
   }
-  const ticket = (await ticketRes.json()) as TicketResponse
+  const ticketJson = (await ticketRes.json()) as TicketResponse & {
+    assetId?: string
+    presignedUrl?: string
+  }
+  const ticket: TicketResponse = {
+    asset: ticketJson.asset?.id
+      ? ticketJson.asset
+      : { id: String(ticketJson.assetId || ''), status: 'pending_upload' },
+    upload: ticketJson.upload?.url
+      ? ticketJson.upload
+      : {
+          method: 'PUT',
+          url: String(ticketJson.presignedUrl || ''),
+          headers: (ticketJson as { headers?: Record<string, string> }).headers || {
+            'Content-Type': contentType,
+          },
+        },
+  }
+  if (!ticket.asset.id || !ticket.upload.url) {
+    throw uploadError({
+      code: 'UPLOAD_TICKET_FAILED',
+      stage: 'ticket',
+      message: 'Upload ticket was incomplete. Retry in a moment.',
+      retryable: true,
+    })
+  }
+  // putWithProgress sets withCredentials=false for cross-origin R2 hosts.
 
   await putWithProgress(ticket.upload.url, file, ticket.upload.headers, {
     onProgress,
