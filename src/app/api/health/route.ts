@@ -1,5 +1,8 @@
 import { NextResponse } from 'next/server'
 import { isGeminiConfigured } from '@/lib/cloudflare/secrets'
+import { readSecretEnv } from '@/lib/env'
+import { isR2SigningConfigured, resolveStorageMode } from '@/lib/storage/r2'
+import { getWorkerUploadsBucket } from '@/lib/storage/workerR2'
 
 /**
  * Lightweight health check.
@@ -16,6 +19,24 @@ import { isGeminiConfigured } from '@/lib/cloudflare/secrets'
 export async function GET() {
   const timestamp = new Date().toISOString()
   const isProd = process.env.NODE_ENV === 'production'
+  const storageMode = resolveStorageMode()
+  const storageSigningConfigured = isR2SigningConfigured()
+  const storageBindingAvailable = storageMode === 'r2'
+    ? Boolean(await getWorkerUploadsBucket())
+    : storageMode === 'mock'
+  const storage = {
+    mode: storageMode,
+    signingConfigured: storageSigningConfigured,
+    bindingAvailable: storageBindingAvailable,
+    directUploadReady: storageMode === 'r2' && storageSigningConfigured,
+    workerProxyReady: storageMode === 'r2' && storageBindingAvailable,
+    largeOriginalReady: storageMode === 'r2' && storageSigningConfigured,
+    ready: storageMode === 'mock' || storageSigningConfigured || storageBindingAvailable,
+  }
+  const videoIngestion = {
+    normalizerConfigured: Boolean(readSecretEnv('MUSASHI_VIDEO_NORMALIZER_URL')),
+    normalizerAuthConfigured: Boolean(readSecretEnv('MUSASHI_POSE_CLOUD_TOKEN')),
+  }
 
   if (isProd) {
     const geminiConfigured = await isGeminiConfigured()
@@ -28,7 +49,13 @@ export async function GET() {
         status: 'ok',
         timestamp,
         service: 'musashi',
+        version: process.env.NEXT_PUBLIC_APP_VERSION || 'worker',
         ai: { ready: geminiConfigured && !killSwitch && !offlineMode },
+        storage,
+        videoIngestion: {
+          ...videoIngestion,
+          ready: videoIngestion.normalizerConfigured && videoIngestion.normalizerAuthConfigured && geminiConfigured && !killSwitch && !offlineMode,
+        },
       },
       {
         status: 200,
@@ -59,6 +86,11 @@ export async function GET() {
         geminiConfigured,
         killSwitch,
         offlineMode,
+      },
+      storage,
+      videoIngestion: {
+        ...videoIngestion,
+        ready: videoIngestion.normalizerConfigured && videoIngestion.normalizerAuthConfigured && geminiConfigured && !killSwitch && !offlineMode,
       },
     },
     {

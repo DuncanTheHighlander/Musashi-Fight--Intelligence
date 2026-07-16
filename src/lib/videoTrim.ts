@@ -9,14 +9,50 @@
 
 /** Shortest selectable window. */
 export const MIN_TRIM_SEC = 1
+/** Start every phone upload with a small, reliable review artifact. */
+export const DEFAULT_UPLOAD_TRIM_SEC = 10
+export const MIN_TRIM_DURATION_TOLERANCE_SEC = 0.75
+export const TRIM_DURATION_TOLERANCE_FRACTION = 0.1
 
 export type TrimWindow = { start: number; end: number }
+
+/** Encoder/container timestamps may drift slightly without changing the clip. */
+export function trimDurationToleranceSec(expectedDurationSec: number): number {
+  const expected = Number.isFinite(expectedDurationSec) && expectedDurationSec > 0
+    ? expectedDurationSec
+    : 0
+  return Math.max(MIN_TRIM_DURATION_TOLERANCE_SEC, expected * TRIM_DURATION_TOLERANCE_FRACTION)
+}
+
+/** True only when an encoded artifact is close enough to the selected interval. */
+export function isTrimDurationAcceptable(actualDurationSec: number, expectedDurationSec: number): boolean {
+  if (!Number.isFinite(actualDurationSec) || actualDurationSec <= 0) return false
+  if (!Number.isFinite(expectedDurationSec) || expectedDurationSec <= 0) return false
+  return Math.abs(actualDurationSec - expectedDurationSec) <= trimDurationToleranceSec(expectedDurationSec)
+}
+
+/** Trimming must capture source time, never a slow-motion or accelerated replay. */
+export function forceNormalPlaybackRate(
+  media: Pick<HTMLMediaElement, 'defaultPlaybackRate' | 'playbackRate'>,
+): void {
+  media.defaultPlaybackRate = 1
+  media.playbackRate = 1
+}
 
 /** Initial selection: from 0, as long as the limit (or the clip) allows. */
 export function defaultTrimWindow(durationSec: number, maxSec: number): TrimWindow {
   const dur = Number.isFinite(durationSec) && durationSec > 0 ? durationSec : 0
   const cap = Math.max(MIN_TRIM_SEC, Math.min(maxSec, dur || maxSec))
   return { start: 0, end: cap }
+}
+
+/**
+ * Paid/admin tiers may expand the handles to their entitlement, but a fresh
+ * phone upload starts at ten seconds so it never silently sends a multi-minute
+ * original just because the account has a large analysis allowance.
+ */
+export function defaultUploadTrimWindow(durationSec: number, tierMaxSec: number): TrimWindow {
+  return defaultTrimWindow(durationSec, Math.min(tierMaxSec, DEFAULT_UPLOAD_TRIM_SEC))
 }
 
 /**
@@ -200,7 +236,10 @@ export type TrimValidation = {
  * Prove a trimmed File is actually playable before anyone treats it as Ready:
  * metadata loads, picture dimensions are non-zero, and duration resolves.
  */
-export async function validateTrimmedVideo(file: File): Promise<TrimValidation> {
+export async function validateTrimmedVideo(
+  file: File,
+  expectedDurationSec?: number,
+): Promise<TrimValidation> {
   if (typeof document === 'undefined') return { ok: true, width: 0, height: 0, durationSec: 0 }
   if (file.size < MIN_TRIM_OUTPUT_BYTES) {
     return { ok: false, width: 0, height: 0, durationSec: 0, reason: 'the trimmed file came out empty' }
@@ -220,6 +259,19 @@ export async function validateTrimmedVideo(file: File): Promise<TrimValidation> 
     }
     if (durationSec <= 0.5) {
       return { ok: false, width, height, durationSec, reason: 'the trimmed video has no readable duration' }
+    }
+    if (
+      Number(expectedDurationSec) > 0 &&
+      !isTrimDurationAcceptable(durationSec, Number(expectedDurationSec))
+    ) {
+      const tolerance = trimDurationToleranceSec(Number(expectedDurationSec))
+      return {
+        ok: false,
+        width,
+        height,
+        durationSec,
+        reason: `the trimmed duration (${durationSec.toFixed(2)}s) does not match the selected interval (${Number(expectedDurationSec).toFixed(2)}s; allowed drift ${tolerance.toFixed(2)}s)`,
+      }
     }
     return { ok: true, width, height, durationSec }
   } catch {
@@ -245,6 +297,7 @@ async function recordSegment(
   video.muted = true
   video.playsInline = true
   video.preload = 'auto'
+  forceNormalPlaybackRate(video)
 
   try {
     await once(video, 'loadedmetadata')
@@ -266,8 +319,10 @@ async function recordSegment(
     const stopped = new Promise<void>((resolve) => { recorder.onstop = () => resolve() })
 
     await seekTo(video, Math.max(0, startSec))
+    forceNormalPlaybackRate(video)
 
     recorder.start(100)
+    forceNormalPlaybackRate(video)
     await video.play()
 
     await new Promise<void>((resolve) => {
@@ -318,6 +373,7 @@ async function recordSegmentFromHost(
     throw new Error(`the preview failed to load (media error ${video.error.code}) — reopen the trimmer and retry`)
   }
   if (video.readyState < HTMLMediaElement.HAVE_METADATA) await once(video, 'loadedmetadata')
+  forceNormalPlaybackRate(video)
   const vw = video.videoWidth
   const vh = video.videoHeight
   if (!vw || !vh) throw new Error('the preview has no picture to record')
@@ -342,6 +398,7 @@ async function recordSegmentFromHost(
   const stopped = new Promise<void>((resolve) => { recorder.onstop = () => resolve() })
 
   await seekTo(video, Math.max(0, startSec))
+  forceNormalPlaybackRate(video)
   // Paint the first frame before start() so no chunk is ever empty.
   try { ctx.drawImage(video, 0, 0, cw, ch) } catch { void 0 }
 
@@ -354,6 +411,7 @@ async function recordSegmentFromHost(
 
   recorder.start(100)
   try {
+    forceNormalPlaybackRate(video)
     await video.play()
   } catch {
     recorder.stop()
@@ -436,7 +494,10 @@ export async function trimVideoFile(
   startSec: number,
   endSec: number,
   onProgress?: (fraction: number) => void,
-  opts?: { hostVideo?: HTMLVideoElement | null },
+  opts?: {
+    hostVideo?: HTMLVideoElement | null
+    onValidated?: (validation: TrimValidation) => void
+  },
 ): Promise<File> {
   if (typeof window === 'undefined' || typeof MediaRecorder === 'undefined') {
     throw new Error('Video trimming is not supported in this browser.')
@@ -448,8 +509,10 @@ export async function trimVideoFile(
     const out = host
       ? await recordSegmentFromHost(host, file, startSec, endSec, mimeType, onProgress)
       : await recordSegment(file, startSec, endSec, mimeType, onProgress)
-    const check = await validateTrimmedVideo(out)
+    const expectedDurationSec = Math.max(0, endSec - startSec)
+    const check = await validateTrimmedVideo(out, expectedDurationSec)
     if (check.ok) {
+      opts?.onValidated?.(check)
       onProgress?.(1)
       return out
     }

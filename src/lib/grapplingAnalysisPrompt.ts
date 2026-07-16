@@ -15,7 +15,7 @@
  *   leaked in from pose tracking are compiler artifacts to be ignored.
  */
 
-import { resolveSportKey } from '@/lib/coachBrain/coachBrain'
+import { isVisionFirstSport, resolveSportKey } from '@/lib/coachBrain/coachBrain'
 import type { FactualLedger } from '@/lib/fightAnalysisPrompt'
 
 export type GrapplingTimelineEntry = NonNullable<FactualLedger['video_analysis_ledger']>[number]
@@ -141,6 +141,8 @@ export function isGrapplingClip(args: {
   discipline?: string | null
   clipType?: string | null
 }): boolean {
+  // Vision-first sports (BJJ / wrestling / judo) always use the grappling path.
+  if (isVisionFirstSport(args.discipline)) return true
   if (resolveSportKey(args.discipline) === 'bjj_grappling') return true
   const clipType = String(args.clipType || '').trim().toLowerCase()
   return GRAPPLING_CLIP_TYPES.has(clipType)

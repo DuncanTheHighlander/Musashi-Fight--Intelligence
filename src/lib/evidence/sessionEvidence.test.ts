@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { FightEvidenceLedger } from '@/lib/fightlang/fightlang.types'
-import { buildSessionEvidence, mergeEvidence } from '@/lib/evidence/sessionEvidence'
+import { buildSessionEvidence, mergeEvidence, resolveEvidenceMode } from '@/lib/evidence/sessionEvidence'
 import { normalizeGrapplingTechnique, sanitizeGrapplingVisionLedger } from '@/lib/grapplingAnalysisPrompt'
 
 const mockLedger = (): FightEvidenceLedger =>
@@ -102,6 +102,19 @@ describe('buildSessionEvidence', () => {
     })
     expect(session.provenance.mode).toBe('grappling')
     expect(session.merged.mergeNotes.length).toBeGreaterThan(0)
+  })
+})
+
+describe('resolveEvidenceMode', () => {
+  it('uses grappling mode for vision-first sports (wrestling / judo / bjj)', () => {
+    expect(resolveEvidenceMode({ sport: 'wrestling' })).toBe('grappling')
+    expect(resolveEvidenceMode({ sport: 'judo' })).toBe('grappling')
+    expect(resolveEvidenceMode({ sport: 'bjj' })).toBe('grappling')
+  })
+
+  it('keeps striking mode for boxing and hybrid MMA', () => {
+    expect(resolveEvidenceMode({ sport: 'boxing' })).toBe('striking')
+    expect(resolveEvidenceMode({ sport: 'mma' })).toBe('striking')
   })
 })
 

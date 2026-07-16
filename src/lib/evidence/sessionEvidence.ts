@@ -7,6 +7,7 @@
 import type { FactualLedger } from '@/lib/fightAnalysisPrompt'
 import type { FightEvidenceLedger, FightEventKind, PoseFrame } from '@/lib/fightlang/fightlang.types'
 import { isGrapplingClip } from '@/lib/grapplingAnalysisPrompt'
+import { isVisionFirstSport } from '@/lib/coachBrain/coachBrain'
 import type { PoseEngine, PoseQualitySummary } from '@/lib/pose/poseQuality'
 
 export type EvidenceMode = 'striking' | 'grappling' | 'hybrid'
@@ -63,7 +64,9 @@ export function resolveEvidenceMode(args: {
   sport?: string | null
   clipType?: string | null
 }): EvidenceMode {
-  if (isGrapplingClip(args)) return 'grappling'
+  // Vision-first sports (BJJ / wrestling / judo) use grappling vision prompts
+  // even when pose is absent — tape is the source of truth.
+  if (isGrapplingClip(args) || isVisionFirstSport(args.sport)) return 'grappling'
   return 'striking'
 }
 

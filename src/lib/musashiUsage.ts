@@ -1,5 +1,6 @@
 import { assertEmailVerified, requireUser, type MusashiRole } from '@/lib/musashiAuth'
 import { getDb } from '@/lib/db'
+import { resolveQuotaDurationSec } from '@/lib/gemini/videoFilePart'
 import { VIDEO_DURATION_TOLERANCE_SEC } from '@/lib/videoTierLimits'
 
 export type MusashiAction = 'analyze' | 'chat' | 'reflex' | 'track'
@@ -462,7 +463,11 @@ export const extractFightVideoQuotaContext = (
   formData: FormData | null
 ): VideoAnalysisOpts | null => {
   if (action === 'analyze_video_stream') {
-    const clipDurationSec = Number(body?.clipDuration)
+    const clipDurationSec = resolveQuotaDurationSec({
+      clipDurationSec: Number(body?.clipDuration),
+      startSec: Number(body?.startSec),
+      endSec: Number(body?.endSec),
+    })
     const clipKey = String(
       body?.videoFileUri ||
         (body?.clip as { sourceId?: string } | undefined)?.sourceId ||
@@ -473,7 +478,11 @@ export const extractFightVideoQuotaContext = (
   }
 
   if (['analyze_frame', 'analyze_frames'].includes(action) && formData) {
-    const clipDurationSec = Number(formData.get('clipDuration') || formData.get('clipDurationSec') || 0)
+    const clipDurationSec = resolveQuotaDurationSec({
+      clipDurationSec: Number(formData.get('clipDuration') || formData.get('clipDurationSec') || 0),
+      startSec: Number(formData.get('startSec')),
+      endSec: Number(formData.get('endSec')),
+    })
     const clipKey = String(
       formData.get('videoFileUri') || formData.get('clipKey') || formData.get('sessionId') || ''
     ).trim()
@@ -484,7 +493,11 @@ export const extractFightVideoQuotaContext = (
   if (action === 'chat' || action === 'strategy') {
     const ctx = body?.context as Record<string, unknown> | undefined
     if (!ctx?.nativeVideo || !ctx?.videoFileUri) return null
-    const clipDurationSec = Number(ctx.clipDuration)
+    const clipDurationSec = resolveQuotaDurationSec({
+      clipDurationSec: Number(ctx.clipDuration),
+      startSec: Number(ctx.startSec),
+      endSec: Number(ctx.endSec),
+    })
     const clipKey = String(ctx.videoFileUri || ctx.sourceId || '').trim()
     if (!clipKey || !Number.isFinite(clipDurationSec) || clipDurationSec <= 0) return null
     return { clipDurationSec, clipKey }

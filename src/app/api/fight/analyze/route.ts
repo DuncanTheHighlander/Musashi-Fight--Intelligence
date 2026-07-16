@@ -1,7 +1,12 @@
 import { NextResponse } from 'next/server'
 import { compileFightLang } from '@/lib/compiler/fightlang.compiler'
 import { inferStyle } from '@/lib/strategy/style-inference'
-import type { PoseFrame, PoseLandmark, FightEvidenceLedger } from '@/lib/fightlang/fightlang.types'
+import {
+  FIGHTLANG_CONTRACT_VERSION,
+  type PoseFrame,
+  type PoseLandmark,
+  type FightEvidenceLedger,
+} from '@/lib/fightlang/fightlang.types'
 import { validateFightEvidenceLedger } from '@/lib/validators/fightlang.validator'
 import { validateCoachingPayloadAgainstLedger, type CoachingPayload } from '@/lib/validators/llm-output.validator'
 import { generateGroundedCoaching } from '@/lib/gemini/gemini-client'
@@ -25,6 +30,7 @@ import {
 import type { MotionBurstEvidence, TemporalEvidence } from '@/lib/evidence/sessionEvidenceExtensions'
 import { clientKinematicsToFightLang } from '@/lib/compiler/segmentation'
 import { getRecurringFaultsForUser } from '@/lib/coachBrain/recurringFaults'
+import { isVisionFirstSport } from '@/lib/coachBrain/coachBrain'
 
 export const maxDuration = 60
 
@@ -53,6 +59,9 @@ type AnalyzeRequest = {
   llm?: { enabled?: boolean }
   videoFileUri?: string
   videoMimeType?: string
+  /** Analysis window for Gemini videoMetadata (original file, no client re-encode). */
+  startSec?: number | null
+  endSec?: number | null
   /** User-selected sport (aliases ok: tkd, bjj, muay_thai, ...). Routes the coach-brain sport file. */
   sport?: string
   /** e.g. 'sparring' | 'bag work' | 'competition' — free-form context for the coach. */
@@ -104,6 +113,31 @@ function normalizePoseFrames(req: AnalyzeRequest): PoseFrame[] {
   }
 
   return []
+}
+
+/** Empty FightLang stub for vision-first sports (BJJ / wrestling / judo) when pose is absent. */
+function emptyVisionFirstLedger(clip?: AnalyzeRequest['clip']): FightEvidenceLedger {
+  return {
+    contractVersion: FIGHTLANG_CONTRACT_VERSION,
+    generatedAtMs: Date.now(),
+    clip: clip
+      ? {
+          ...(typeof clip.durationMs === 'number' ? { durationMs: clip.durationMs } : {}),
+          ...(typeof clip.fps === 'number' ? { fps: clip.fps } : {}),
+          ...(clip.sourceId ? { sourceId: clip.sourceId } : {}),
+        }
+      : undefined,
+    actors: ['A', 'B'],
+    geometry: [],
+    kinematics: [],
+    actorStateTimeline: [],
+    events: [],
+    faults: [],
+    patterns: [],
+    sequences: [],
+    evidenceIndex: [],
+    notes: ['Vision-first analysis: no pose frames; tape is the source of truth.'],
+  }
 }
 
 export async function POST(request: Request) {
@@ -166,7 +200,14 @@ export async function POST(request: Request) {
     }
 
     const poseFrames = normalizePoseFrames(data)
-    if (poseFrames.length === 0) {
+    const visionFirst = isVisionFirstSport(data.sport)
+    const visionOnly =
+      poseFrames.length === 0 &&
+      llmEnabled &&
+      Boolean(data.videoFileUri) &&
+      visionFirst
+
+    if (poseFrames.length === 0 && !visionOnly) {
       return NextResponse.json({ success: false, error: 'Provide poseFrames or poseTimeline.' }, { status: 400 })
     }
 
@@ -175,12 +216,21 @@ export async function POST(request: Request) {
         ? [...data.pose3DFrames].sort((a, b) => a.tMs - b.tMs)
         : undefined
 
-    const kinematicsForCompile = Array.isArray(data.kinematics)
-      ? clientKinematicsToFightLang(data.kinematics as any)
-      : undefined
+    let ledger: FightEvidenceLedger
+    let compilerOverlays: Awaited<ReturnType<typeof compileFightLang>>['overlayAnnotations'] = []
+    let exchangeWindows: Awaited<ReturnType<typeof compileFightLang>>['exchangeWindows'] = []
+    let suppressionStats: Awaited<ReturnType<typeof compileFightLang>>['suppressionStats'] = undefined
 
-    const { ledger, overlayAnnotations: compilerOverlays, exchangeWindows, suppressionStats } =
-      compileFightLang({
+    if (visionOnly) {
+      // Vision-first sports (BJJ / wrestling / judo): tape is enough — skip pose compile.
+      ledger = emptyVisionFirstLedger(data.clip)
+      console.log(`[FightLang] Vision-only path for sport=${data.sport ?? 'unknown'} (no pose frames)`)
+    } else {
+      const kinematicsForCompile = Array.isArray(data.kinematics)
+        ? clientKinematicsToFightLang(data.kinematics as any)
+        : undefined
+
+      const compiled = compileFightLang({
         poseFrames,
         ...(pose3DFrames ? { pose3DFrames } : {}),
         kinematics: kinematicsForCompile,
@@ -189,13 +239,18 @@ export async function POST(request: Request) {
         sport: data.sport,
         clipType: data.clipType,
       })
+      ledger = compiled.ledger
+      compilerOverlays = compiled.overlayAnnotations
+      exchangeWindows = compiled.exchangeWindows
+      suppressionStats = compiled.suppressionStats
 
-    const ledgerValidation = validateFightEvidenceLedger(ledger)
-    if (!ledgerValidation.ok) {
-      return NextResponse.json(
-        { success: false, error: 'Ledger validation failed', issues: ledgerValidation.issues },
-        { status: 500 }
-      )
+      const ledgerValidation = validateFightEvidenceLedger(ledger)
+      if (!ledgerValidation.ok) {
+        return NextResponse.json(
+          { success: false, error: 'Ledger validation failed', issues: ledgerValidation.issues },
+          { status: 500 }
+        )
+      }
     }
 
     const strategyAssessment = ledger.actors.map((actorId) => inferStyle(ledger, actorId))
@@ -225,7 +280,7 @@ export async function POST(request: Request) {
                 : 'both'
 
         const fightLangCandidate =
-          mode === 'striking' ? fightLangToVerificationCandidate(ledger) : null
+          mode === 'striking' && !visionOnly ? fightLangToVerificationCandidate(ledger) : null
 
         let visionLedger = await buildVisionLedger({
           videoFileUri: data.videoFileUri,
@@ -234,6 +289,8 @@ export async function POST(request: Request) {
           clipDurationMs: data.clip?.durationMs,
           focusTarget: focusTargetStr,
           fightLangCandidate,
+          startSec: data.startSec,
+          endSec: data.endSec,
         })
 
         visionLedger = await verifyVisionLedger({
@@ -242,6 +299,8 @@ export async function POST(request: Request) {
           videoMimeType: data.videoMimeType,
           mode,
           clipDurationMs: data.clip?.durationMs,
+          startSec: data.startSec,
+          endSec: data.endSec,
         })
 
         sessionEvidence = buildSessionEvidence({
@@ -259,11 +318,26 @@ export async function POST(request: Request) {
           `[FightLang] SessionEvidence: mode=${sessionEvidence.provenance.mode} mergeNotes=${sessionEvidence.merged.mergeNotes.join(' | ')}`,
         )
       } catch (visionErr) {
+        const message = visionErr instanceof Error ? visionErr.message : String(visionErr)
+        if (visionOnly) {
+          // Vision-first with no pose cannot coach from FightLang alone.
+          return NextResponse.json(
+            { success: false, error: `Vision analysis failed: ${message}` },
+            { status: 502 },
+          )
+        }
         console.warn(
           '[FightLang] Vision scan/verify failed (non-fatal, coaching uses FightLang only):',
-          visionErr instanceof Error ? visionErr.message : visionErr,
+          message,
         )
       }
+    }
+
+    if (visionOnly && !sessionEvidence.merged.visionFacts) {
+      return NextResponse.json(
+        { success: false, error: 'Vision analysis produced no usable ledger for this clip.' },
+        { status: 502 },
+      )
     }
 
     const coachingLedger = sessionEvidence.merged.coachingLedger
@@ -377,8 +451,12 @@ export async function POST(request: Request) {
           focusTarget: data.focusTarget,
           videoFileUri: data.videoFileUri,
           videoMimeType: data.videoMimeType,
+          startSec: data.startSec,
+          endSec: data.endSec,
           visionLedger: sessionEvidence.merged.visionFacts,
           temporalEvidence: temporal,
+          // Without pose identity tracks, map A/B to left/right of the frame.
+          visionScreenMapping: visionOnly || (visionFirst && Boolean(data.videoFileUri)),
           coachBrain: {
             selectedSport: data.sport,
             clipType: data.clipType,

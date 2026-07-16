@@ -10,6 +10,7 @@ import {
   fightActionToQuotaBucket,
   questionsPerClipForTier,
   extractChatClipKey,
+  extractFightVideoQuotaContext,
 } from '@/lib/musashiUsage'
 
 describe('musashiUsage video tier defaults', () => {
@@ -48,6 +49,37 @@ describe('fightActionConsumesVideoQuota', () => {
   it('charges streaming and frame analyze actions', () => {
     expect(fightActionConsumesVideoQuota('analyze_video_stream', {})).toBe(true)
     expect(fightActionConsumesVideoQuota('analyze_frames', {})).toBe(true)
+  })
+})
+
+describe('extractFightVideoQuotaContext', () => {
+  it('uses analysis-window length when start/end offsets are present', () => {
+    const ctx = extractFightVideoQuotaContext(
+      'analyze_video_stream',
+      {
+        clipDuration: 19,
+        startSec: 2,
+        endSec: 12,
+        videoFileUri: 'files/abc',
+      },
+      null,
+    )
+    expect(ctx).toEqual({ clipDurationSec: 10, clipKey: 'files/abc' })
+  })
+
+  it('falls back to clipDuration when offsets are missing', () => {
+    const ctx = extractFightVideoQuotaContext(
+      'chat',
+      {
+        context: {
+          nativeVideo: true,
+          videoFileUri: 'files/xyz',
+          clipDuration: 8,
+        },
+      },
+      null,
+    )
+    expect(ctx).toEqual({ clipDurationSec: 8, clipKey: 'files/xyz' })
   })
 })
 

@@ -10,6 +10,12 @@ const instrumentationNodeStub = path.join(__dirname, 'src/instrumentation.node.s
 const nextConfig: NextConfig = {
   // wrangler/miniflare pull Node-only deps; keep them out of the webpack graph
   serverExternalPackages: ['wrangler', 'miniflare'],
+  // Video uploads routinely exceed Next's default 10MB middleware body buffer.
+  // Primary fix: exclude /api/fight (+ uploads content) from middleware matcher.
+  // Keep this raised as belt-and-suspenders when middleware does match.
+  experimental: {
+    middlewareClientMaxBodySize: '200mb',
+  },
   async redirects() {
     return []
   },

@@ -193,9 +193,9 @@ export const aiErrorResponse = (err: unknown): NextResponse => {
   if (message === 'VIDEO_DURATION_EXCEEDED') {
     return errorResponse(
       {
-        error: 'Clip exceeds your plan max length.',
+        error: 'Selected analysis window exceeds your plan max.',
         code: 'VIDEO_DURATION_EXCEEDED',
-        hint: 'Free: 10s max. Pro: 30s max. Trim your clip or upgrade.',
+        hint: 'Free: pick up to 10s. Pro: up to 30s. Use the timestamp slider — the original file can be longer.',
       },
       402
     )

@@ -70,13 +70,19 @@ binding = "SECRET_SUPABASE"
 store_id = "3a6ee7307f0b482ab4b3f3dd6794168c"
 secret_name = "Supabase"
 
+[[secrets_store_secrets]]
+binding = "SECRET_EMAIL"
+store_id = "3a6ee7307f0b482ab4b3f3dd6794168c"
+secret_name = "ResendEmail"
+
 [vars]
 MUSASHI_MARKETPLACE_PAYMENTS = "stripe"
 MUSASHI_STORAGE_MODE = "r2"
 GEMINI_EMBED_DIMENSION = "1536"
+MUSASHI_VIDEO_NORMALIZER_URL = "https://duncanazsmith--musashi-pose-api-normalize-video.modal.run"
 NODE_ENV = "production"
 MUSASHI_DISABLE_AUTH = "0"
 # AI coaching requires verified email in production (assertEmailVerified). Override: MUSASHI_REQUIRE_EMAIL_VERIFIED=0
-# Email provider (Resend). EMAIL_API_KEY is a Worker secret — `wrangler secret put EMAIL_API_KEY`.
+# Resend: Secrets Store SECRET_EMAIL (ResendEmail), or legacy Worker secret EMAIL_API_KEY.
 EMAIL_SERVICE_URL = "https://api.resend.com"
 EMAIL_FROM_ADDRESS = "noreply@musashi.ai"

@@ -6,7 +6,7 @@ import { checkSession, login as authLogin, logout as authLogout, type User } fro
 interface AuthContextType {
   user: User | null
   loading: boolean
-  login: (email: string, password: string) => Promise<void>
+  login: (email: string, password: string) => Promise<User>
   logout: () => Promise<void>
   checkSession: () => Promise<void>
 }
@@ -33,9 +33,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     checkSessionHandler()
   }, [checkSessionHandler])
 
-  const login = useCallback(async (email: string, password: string) => {
+  const login = useCallback(async (email: string, password: string): Promise<User> => {
     const loggedInUser = await authLogin(email, password)
     setUser(loggedInUser)
+    return loggedInUser
   }, [])
 
   const logout = useCallback(async () => {

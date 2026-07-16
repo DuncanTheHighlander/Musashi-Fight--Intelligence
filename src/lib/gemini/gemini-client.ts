@@ -8,6 +8,7 @@ import { buildCoachBrainBlock, type CoachBrainContext } from '@/lib/coachBrain/c
 import { isGrapplingClip } from '@/lib/grapplingAnalysisPrompt'
 import type { FactualLedger } from '@/lib/fightAnalysisPrompt'
 import type { TemporalEvidence } from '@/lib/evidence/sessionEvidenceExtensions'
+import { buildGeminiVideoFilePart } from '@/lib/gemini/videoFilePart'
 
 class GeminiQuotaError extends Error {
   status: number
@@ -46,11 +47,21 @@ const defaultReasonModel = (): GeminiModelName =>
 const normalizeCoachingFocus = (focus?: CoachingFocusTarget): CoachingFocusTarget =>
   focus === 'A' || focus === 'B' || focus === 'unsure' ? focus : 'both'
 
-function buildCoachingFocusBlock(focus?: CoachingFocusTarget): string {
+function buildCoachingFocusBlock(
+  focus?: CoachingFocusTarget,
+  opts?: { visionScreenMapping?: boolean },
+): string {
+  const screenMapping =
+    opts?.visionScreenMapping
+      ? [
+          'SCREEN IDENTITY (no pose track): Fighter A is the fighter on the LEFT side of the screen; Fighter B is on the RIGHT. Coach accordingly.',
+        ]
+      : []
   const normalized = normalizeCoachingFocus(focus)
   if (normalized === 'A') {
     return [
       'FOCUS TARGET: Fighter A / blue corner',
+      ...screenMapping,
       '- quickCues MUST use actorId "A".',
       '- suggestedCorrections MUST use actorId "A".',
       '- overlayAnnotations MUST use actorId "A".',
@@ -60,6 +71,7 @@ function buildCoachingFocusBlock(focus?: CoachingFocusTarget): string {
   if (normalized === 'B') {
     return [
       'FOCUS TARGET: Fighter B / red corner',
+      ...screenMapping,
       '- quickCues MUST use actorId "B".',
       '- suggestedCorrections MUST use actorId "B".',
       '- overlayAnnotations MUST use actorId "B".',
@@ -69,6 +81,7 @@ function buildCoachingFocusBlock(focus?: CoachingFocusTarget): string {
   if (normalized === 'unsure') {
     return [
       'FOCUS TARGET: not sure which fighter (identity uncertain)',
+      ...screenMapping,
       '- The user could not confidently identify which fighter is theirs. Handle identity cautiously.',
       '- If one athlete is clearly more visible and coachable in the footage, coach that athlete — but state which one you mean by visible traits ("the fighter in dark shorts / Fighter A per tracking") instead of assuming identity.',
       '- If identity stays unclear (similar gear, tracker swaps, heavy occlusion), coach the exchange as a whole: the pattern, the cause-and-effect, and corrections framed so either athlete can apply them.',
@@ -77,6 +90,7 @@ function buildCoachingFocusBlock(focus?: CoachingFocusTarget): string {
   }
   return [
     'FOCUS TARGET: both fighters',
+    ...screenMapping,
     '- Explain the exchange, then give concise, useful feedback for EACH fighter.',
     '- Structure the 3 suggestedCorrections as: (1) Fighter A — their main fix, (2) Fighter B — their main fix, (3) the shared lesson both fighters should take from the exchange.',
     '- Keep it tight: do not double the response length — pick the highest-value read per fighter.',
@@ -108,6 +122,8 @@ export function buildGroundedCoachingPrompt(args: {
   visionLedger?: FactualLedger | null
   /** Phase 3 temporal context: exchange windows + peak motion burst. */
   temporalEvidence?: TemporalEvidence | null
+  /** When true (vision-first / no pose), map Fighter A=LEFT and B=RIGHT on screen. */
+  visionScreenMapping?: boolean
 }): string {
   // Keep the model constrained: ledger is truth; everything must cite evidence ids when available.
   const ledgerJson = JSON.stringify(
@@ -220,7 +236,7 @@ ${JSON.stringify(args.temporalEvidence.exchangeWindows, null, 2)}
 YOUR JOB: Analyze the fight evidence and produce serious, technical, useful coaching. The feedback must feel like a high-level coach reviewed the exchange: what happened, why it happened, what danger or opportunity it creates, and exactly what the selected fighter should fix next.
 ${shortClipBlock}
 
-${buildCoachingFocusBlock(args.focusTarget)}
+${buildCoachingFocusBlock(args.focusTarget, { visionScreenMapping: args.visionScreenMapping })}
 
 CRITICAL CONTRACT:
 - The FightEvidenceLedger is the ONLY source of truth for what was detected.
@@ -458,14 +474,19 @@ async function attemptCoachingWithModel(args: {
   prompt: string
   videoFileUri?: string
   videoMimeType?: string
+  startSec?: number | null
+  endSec?: number | null
 }): Promise<{ model: string; payload: CoachingPayload; rawText: string }> {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(args.model)}:generateContent?key=${encodeURIComponent(args.apiKey)}`
 
   const parts: Array<Record<string, unknown>> = []
   if (args.videoFileUri) {
-    parts.push({
-      fileData: { fileUri: args.videoFileUri, mimeType: args.videoMimeType || 'video/mp4' },
-    })
+    parts.push(
+      buildGeminiVideoFilePart(args.videoFileUri, args.videoMimeType || 'video/mp4', {
+        startSec: args.startSec,
+        endSec: args.endSec,
+      }),
+    )
   }
   parts.push({ text: args.prompt })
 
@@ -535,12 +556,17 @@ export async function generateGroundedCoaching(args: {
   /** Gemini Files API URI — lets Pro SEE the actual fight footage alongside the ledger */
   videoFileUri?: string
   videoMimeType?: string
+  /** Optional analysis window (server-side Gemini videoMetadata offsets). */
+  startSec?: number | null
+  endSec?: number | null
   /** Coach-brain context: selectedSport, clipType, userQuestion, poseEngine, poseQuality. */
   coachBrain?: CoachBrainContext
   /** Verified vision ledger (Phase 2 SessionEvidence merge output). */
   visionLedger?: FactualLedger | null
   /** Phase 3 temporal evidence (exchange windows + motion burst). */
   temporalEvidence?: TemporalEvidence | null
+  /** When true (vision-first / no pose), map Fighter A=LEFT and B=RIGHT on screen. */
+  visionScreenMapping?: boolean
 }): Promise<{ model: string; payload: CoachingPayload; rawText: string }> {
   // DRY_RUN short-circuit — returns a deterministic mock payload so smoke
   // tests and local iteration don't burn Gemini tokens. Toggle via env:
@@ -565,6 +591,7 @@ export async function generateGroundedCoaching(args: {
     coachBrain: args.coachBrain,
     visionLedger: args.visionLedger,
     temporalEvidence: args.temporalEvidence,
+    visionScreenMapping: args.visionScreenMapping,
   })
 
   // Phase 2: dedupe + LRU result cache. Two callers with literally identical
@@ -574,7 +601,9 @@ export async function generateGroundedCoaching(args: {
   const cachingDisabled = process.env.MUSASHI_COACHING_CACHE === '0'
   const cacheKey = cachingDisabled
     ? null
-    : await sha256Hex(`${prompt}\u0000${normalizeCoachingFocus(args.focusTarget)}\u0000${args.videoFileUri ?? ''}\u0000${args.videoMimeType ?? ''}`)
+    : await sha256Hex(
+        `${prompt}\u0000${normalizeCoachingFocus(args.focusTarget)}\u0000${args.videoFileUri ?? ''}\u0000${args.videoMimeType ?? ''}\u0000${args.startSec ?? ''}\u0000${args.endSec ?? ''}`,
+      )
 
   const runGemini = async (): Promise<{ model: string; payload: CoachingPayload; rawText: string }> => {
     // Model cascade: try the configured Pro model first; on quota/rate errors
@@ -598,6 +627,8 @@ export async function generateGroundedCoaching(args: {
           prompt,
           videoFileUri: args.videoFileUri,
           videoMimeType: args.videoMimeType,
+          startSec: args.startSec,
+          endSec: args.endSec,
         })
         return { ...result, payload: applyCoachingFocus(result.payload, args.focusTarget) }
       } catch (err) {

@@ -3,10 +3,24 @@
 import { chromium } from 'playwright'
 
 const log = (...a) => console.log('[e2e]', ...a)
+const baseUrl = (process.env.E2E_BASE_URL || 'http://localhost:3000').replace(/\/$/, '')
+const email = process.env.E2E_EMAIL || 'smoketest-mobile@example.com'
+const password = process.env.E2E_PASSWORD || 'Sm0keTest!2026'
+const trimOnly = process.env.E2E_TRIM_ONLY === '1'
 
 const browser = await chromium.launch({ channel: 'chrome', headless: true })
-const ctx = await browser.newContext()
+const ctx = await browser.newContext({
+  viewport: { width: 390, height: 844 },
+  isMobile: true,
+  hasTouch: true,
+  serviceWorkers: 'block',
+})
 const page = await ctx.newPage()
+page.on('response', (response) => {
+  if (/\/_next\/static\/chunks\/8019\./.test(response.url())) {
+    log('Fight Lab client chunk:', response.url(), response.status())
+  }
+})
 page.on('console', (m) => {
   const t = m.text()
   if (m.type() === 'error' || m.type() === 'warning' || /\[trim\]|Trim|seek|decode|MediaRecorder|record/i.test(t)) {
@@ -29,19 +43,19 @@ const dumpState = async () => {
 
 try {
   // 1. Login
-  await page.goto('http://localhost:3000/welcome', { waitUntil: 'domcontentloaded' })
-  const status = await page.evaluate(async () => {
+  await page.goto(`${baseUrl}/welcome`, { waitUntil: 'domcontentloaded' })
+  const status = await page.evaluate(async ({ email, password }) => {
     const r = await fetch('/api/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email: 'smoketest-mobile@example.com', password: 'Sm0keTest!2026' }),
+      body: JSON.stringify({ email, password }),
     })
     return r.status
-  })
+  }, { email, password })
   log('login status:', status)
   if (status !== 200) throw new Error('login failed')
 
-  await page.goto('http://localhost:3000/', { waitUntil: 'domcontentloaded' })
+  await page.goto(`${baseUrl}/`, { waitUntil: 'domcontentloaded' })
   await page.waitForSelector('input[type=file]', { state: 'attached', timeout: 30000 })
 
   // 2. Generate a 12s clip in-page (distinct visuals to spot in playback)
@@ -104,10 +118,11 @@ try {
   if (String(outcome).startsWith('ERROR')) throw new Error('trim failed: ' + outcome)
   log('trim confirmed, sport dialog open')
 
-  // 6. Pick BJJ + close (wait for the trimmer dialog to be fully gone first)
+  // 6. Pick Boxing and explicitly start the review. BJJ is covered by the
+  // authenticated production smoke because its boot requires R2 + Gemini.
   await page.waitForSelector('text=Trim your clip', { state: 'detached', timeout: 10000 })
-  await page.click('button:has-text("BJJ")')
-  await page.click('button:has-text("Use these settings")')
+  await page.click('button:has-text("Boxing")')
+  await page.click('button:has-text("Start review")')
   // The whole page must be interactive again — no stranded modal overlay.
   await page.waitForSelector('div[data-state="open"].fixed.inset-0', { state: 'detached', timeout: 10000 })
   log('dialogs closed cleanly, no stuck overlay')
@@ -119,23 +134,42 @@ try {
   }, null, { timeout: 30000 })
   const meta = await page.evaluate(() => {
     const v = document.querySelector('video')
-    return { duration: v.duration, w: v.videoWidth, h: v.videoHeight }
+    return {
+      duration: v.duration,
+      w: v.videoWidth,
+      h: v.videoHeight,
+      playbackRate: v.playbackRate,
+      defaultPlaybackRate: v.defaultPlaybackRate,
+    }
   })
   log('trimmed clip in player:', JSON.stringify(meta))
+  if (meta.playbackRate !== 1 || meta.defaultPlaybackRate !== 1) {
+    throw new Error(`trimmed playback speed is not normal: ${JSON.stringify(meta)}`)
+  }
 
-  // 8. Boot pipeline -> Ready -> AUTO-PLAY (default now ON). Wait for actual playback.
-  log('waiting for boot + auto-play (deep track can take a few minutes)...')
-  await page.waitForFunction(() => {
-    const v = document.querySelector('video')
-    return v && !v.paused && v.currentTime > 0.5 && v.videoWidth > 0
-  }, null, { timeout: 300000, polling: 2000 })
-  const play1 = await page.evaluate(() => document.querySelector('video').currentTime)
-  await page.waitForTimeout(2500)
-  const play2 = await page.evaluate(() => document.querySelector('video').currentTime)
-  log(`AUTO-PLAY VERIFIED: currentTime ${play1.toFixed(2)} -> ${play2.toFixed(2)} (advancing=${play2 > play1})`)
-  if (!(play2 > play1)) throw new Error('video not actually advancing')
+  if (trimOnly) {
+    console.log('\n=== PASS: mobile trim + normal-speed artifact verified end-to-end ===')
+  } else {
 
-  console.log('\n=== PASS: trim + auto-play verified end-to-end ===')
+    // 8. Boot pipeline -> Ready -> explicit Play. Real athlete uploads must
+    // never start moving until the user presses Play.
+    log('waiting for boot readiness (deep track can take a few minutes)...')
+    await page.waitForSelector('button[aria-label="Play video"]', { timeout: 300000 })
+    const pausedBeforePlay = await page.evaluate(() => document.querySelector('video')?.paused)
+    if (!pausedBeforePlay) throw new Error('video auto-played before explicit Play')
+    await page.click('button[aria-label="Play video"]')
+    await page.waitForFunction(() => {
+      const v = document.querySelector('video')
+      return v && !v.paused && v.currentTime > 0.5 && v.videoWidth > 0
+    }, null, { timeout: 300000, polling: 2000 })
+    const play1 = await page.evaluate(() => document.querySelector('video').currentTime)
+    await page.waitForTimeout(2500)
+    const play2 = await page.evaluate(() => document.querySelector('video').currentTime)
+    log(`EXPLICIT PLAY VERIFIED: currentTime ${play1.toFixed(2)} -> ${play2.toFixed(2)} (advancing=${play2 > play1})`)
+    if (!(play2 > play1)) throw new Error('video not actually advancing')
+
+    console.log('\n=== PASS: mobile trim + explicit playback verified end-to-end ===')
+  }
 } catch (err) {
   console.error('\n=== FAIL:', err.message, '===')
   process.exitCode = 1

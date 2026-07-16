@@ -265,7 +265,13 @@ export const isEmailVerificationRequired = (): boolean => {
   if (process.env.MUSASHI_DISABLE_AUTH === '1' && process.env.NODE_ENV !== 'production') return false
   if (process.env.MUSASHI_REQUIRE_EMAIL_VERIFIED === '0') return false
   if (process.env.MUSASHI_REQUIRE_EMAIL_VERIFIED === '1') return true
-  return process.env.NODE_ENV === 'production' && Boolean(readSecretEnv('EMAIL_API_KEY'))
+  // Production: email is configured via Secrets Store SECRET_EMAIL and/or Worker EMAIL_API_KEY.
+  // EMAIL_FROM_ADDRESS + EMAIL_SERVICE_URL are plain vars; treat them as "provider wired"
+  // so verification stays on even when the key lives only in Secrets Store (async).
+  if (process.env.NODE_ENV !== 'production') return Boolean(readSecretEnv('EMAIL_API_KEY'))
+  const hasFrom = Boolean(String(process.env.EMAIL_FROM_ADDRESS || '').trim())
+  const hasService = Boolean(String(process.env.EMAIL_SERVICE_URL || '').trim())
+  return Boolean(readSecretEnv('EMAIL_API_KEY')) || (hasFrom && hasService)
 }
 
 export const assertEmailVerified = (user: MusashiUser): void => {
@@ -380,9 +386,19 @@ export const createUser = async (params: { email: string; password: string; role
   return user
 }
 
-export const ensureShogunUserExists = async (): Promise<MusashiUser> => {
+/** Configured admin login email from Cloudflare secret MUSASHI_SHOGUN_EMAIL. */
+export const getConfiguredShogunEmail = (): string => {
   const configuredEmail = String(process.env.MUSASHI_SHOGUN_EMAIL || '').trim().toLowerCase()
-  const email = configuredEmail.includes('@') ? configuredEmail : 'shogun@musashi.local'
+  return configuredEmail.includes('@') ? configuredEmail : 'shogun@musashi.local'
+}
+
+/**
+ * Ensure the admin (shogun) account exists and stays in sync with Cloudflare secrets.
+ * Always refreshes password_hash + role from MUSASHI_SHOGUN_PASSWORD(_HASH) so rotating
+ * the Worker secret actually unlocks login (previously only applied on first create).
+ */
+export const ensureShogunUserExists = async (): Promise<MusashiUser> => {
+  const email = getConfiguredShogunEmail()
   const passwordHashEnv = String(process.env.MUSASHI_SHOGUN_PASSWORD_HASH || '').trim()
   const passwordEnv = String(process.env.MUSASHI_SHOGUN_PASSWORD || '')
 
@@ -391,6 +407,9 @@ export const ensureShogunUserExists = async (): Promise<MusashiUser> => {
   }
 
   const db = await getDbAsync()
+  const passwordHash = passwordHashEnv ? passwordHashEnv : await hashPassword(passwordEnv)
+  const now = new Date().toISOString()
+
   const existing = await db
     .prepare(
       'SELECT id, email, display_name, role, email_verified_at, password_updated_at, created_at, updated_at FROM musashi_users WHERE email = ?',
@@ -399,21 +418,28 @@ export const ensureShogunUserExists = async (): Promise<MusashiUser> => {
     .first()
 
   if (existing?.id) {
-    return {
+    await db
+      .prepare(
+        'UPDATE musashi_users SET password_hash = ?, role = ?, updated_at = ? WHERE id = ?',
+      )
+      .bind(passwordHash, 'shogun', now, String(existing.id))
+      .run()
+
+    const user: MusashiUser = {
       id: String(existing.id),
       email: String(existing.email),
       display_name: existing.display_name ? String(existing.display_name) : null,
-      role: String(existing.role) as MusashiRole,
+      role: 'shogun',
       emailVerifiedAt: existing.email_verified_at ? String(existing.email_verified_at) : null,
       passwordUpdatedAt: existing.password_updated_at ? String(existing.password_updated_at) : null,
       createdAt: String(existing.created_at),
-      updatedAt: String(existing.updated_at),
+      updatedAt: now,
     }
+    await syncLegacyUserRow(user)
+    return user
   }
 
   const id = crypto.randomUUID()
-  const now = new Date().toISOString()
-  const passwordHash = passwordHashEnv ? passwordHashEnv : await hashPassword(passwordEnv)
 
   await db
     .prepare(

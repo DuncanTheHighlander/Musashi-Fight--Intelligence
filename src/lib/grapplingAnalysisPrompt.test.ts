@@ -60,10 +60,14 @@ describe('isGrapplingClip', () => {
     expect(isGrapplingClip({ clipType: 'submission' })).toBe(true)
   })
 
+  it('routes vision-first sports (wrestling / judo) to the grappling pipeline', () => {
+    expect(isGrapplingClip({ discipline: 'wrestling' })).toBe(true)
+    expect(isGrapplingClip({ discipline: 'judo' })).toBe(true)
+  })
+
   it('does not route striking sports or striking clip types', () => {
     expect(isGrapplingClip({ discipline: 'boxing' })).toBe(false)
     expect(isGrapplingClip({ discipline: 'mma', clipType: 'sparring' })).toBe(false)
-    expect(isGrapplingClip({ discipline: 'wrestling' })).toBe(false)
     expect(isGrapplingClip({})).toBe(false)
   })
 })

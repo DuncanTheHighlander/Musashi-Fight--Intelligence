@@ -20,6 +20,7 @@ import {
   fightLangToVerificationCandidate,
   type SessionEvidenceProvenance,
 } from '@/lib/evidence/sessionEvidence'
+import { buildGeminiVideoFilePart } from '@/lib/gemini/videoFilePart'
 
 function extractJsonObject<T = Record<string, unknown>>(raw: string): T | null {
   const text = raw.trim()
@@ -51,6 +52,8 @@ async function flashGenerate(args: {
   prompt: string
   useGrapplingSchema?: boolean
   timeoutMs?: number
+  startSec?: number | null
+  endSec?: number | null
 }): Promise<FactualLedger | null> {
   const geminiKey = await getServerSecret('GEMINI_API_KEY')
   if (!geminiKey) return null
@@ -71,7 +74,10 @@ async function flashGenerate(args: {
           {
             role: 'user',
             parts: [
-              { fileData: { fileUri: args.videoFileUri, mimeType: args.videoMimeType } },
+              buildGeminiVideoFilePart(args.videoFileUri, args.videoMimeType, {
+                startSec: args.startSec,
+                endSec: args.endSec,
+              }),
               { text: args.prompt },
             ],
           },
@@ -111,6 +117,8 @@ export type BuildVisionLedgerArgs = {
   focusTarget?: string
   fightLangCandidate?: FactualLedger | null
   poseEvidenceText?: string
+  startSec?: number | null
+  endSec?: number | null
 }
 
 /** Flash scan: grappling timeline or striking factual ledger from video. */
@@ -120,12 +128,15 @@ export async function buildVisionLedger(args: BuildVisionLedgerArgs): Promise<Fa
     typeof args.clipDurationMs === 'number' && args.clipDurationMs > 0
       ? args.clipDurationMs / 1000
       : undefined
+  const window = { startSec: args.startSec, endSec: args.endSec }
 
   if (args.mode === 'grappling') {
     let ledger = await flashGenerate({
       videoFileUri: args.videoFileUri,
       videoMimeType: mime,
       useGrapplingSchema: true,
+      startSec: window.startSec,
+      endSec: window.endSec,
       prompt: buildGrapplingEvidenceLedgerPrompt({
         clipDuration: args.clipDurationMs,
         focusTarget: args.focusTarget,
@@ -136,6 +147,8 @@ export async function buildVisionLedger(args: BuildVisionLedgerArgs): Promise<Fa
         videoFileUri: args.videoFileUri,
         videoMimeType: mime,
         useGrapplingSchema: true,
+        startSec: window.startSec,
+        endSec: window.endSec,
         prompt: buildGrapplingEvidenceLedgerPrompt({
           clipDuration: args.clipDurationMs,
           focusTarget: args.focusTarget,
@@ -154,6 +167,8 @@ export async function buildVisionLedger(args: BuildVisionLedgerArgs): Promise<Fa
   return flashGenerate({
     videoFileUri: args.videoFileUri,
     videoMimeType: mime,
+    startSec: window.startSec,
+    endSec: window.endSec,
     prompt: buildEvidenceLedgerPrompt({
       clipDuration: clipDurationSec,
       focusTarget: args.focusTarget as 'both' | 'blue' | 'red' | 'A' | 'B' | undefined,
@@ -169,6 +184,8 @@ export type VerifyVisionLedgerArgs = {
   mode: SessionEvidenceProvenance['mode']
   clipDurationMs?: number
   poseEvidenceText?: string
+  startSec?: number | null
+  endSec?: number | null
 }
 
 /** Re-watch video and correct/remove unsupported ledger entries. */
@@ -195,6 +212,8 @@ export async function verifyVisionLedger(args: VerifyVisionLedgerArgs): Promise<
     useGrapplingSchema: args.mode === 'grappling',
     prompt,
     timeoutMs: 40_000,
+    startSec: args.startSec,
+    endSec: args.endSec,
   })
 
   if (!verified || !hasMeaningfulLedgerData(verified)) {

@@ -5,10 +5,8 @@ import { useRouter } from 'next/navigation'
 import dynamic from 'next/dynamic'
 import { Loader2, Video } from 'lucide-react'
 import { useSection } from '@/contexts/SectionContext'
-import { useAuth } from '@/hooks/useAuth'
-import VideoTrimmer from '@/components/fight/VideoTrimmer'
-import { probeVideoDuration } from '@/lib/videoTrim'
-import { FREE_MAX_VIDEO_SEC, PRO_MAX_VIDEO_SEC, SHOGUN_MAX_VIDEO_SEC } from '@/lib/videoTierLimits'
+import { FREE_MAX_VIDEO_SEC, PRO_MAX_VIDEO_SEC } from '@/lib/videoTierLimits'
+import { MAX_ORIGINAL_UPLOAD_BYTES } from '@/lib/gemini/videoFilePart'
 
 // FightCoachExperience pulls in MediaPipe + WASM. Loading it on the server
 // (or even on the client during the initial RSC payload) crashes the dev
@@ -35,41 +33,12 @@ import ProfileSection from '@/components/sections/ProfileSection'
 export default function HomePage() {
   const { activeSection } = useSection()
   const router = useRouter()
-  const { user } = useAuth()
-  const [isPro, setIsPro] = useState(false)
-  const maxClipSec =
-    user?.role === 'shogun' ? SHOGUN_MAX_VIDEO_SEC : isPro ? PRO_MAX_VIDEO_SEC : FREE_MAX_VIDEO_SEC
-  const [trimRequest, setTrimRequest] = useState<File | null>(null)
   const [bootstrapVideoFile, setBootstrapVideoFile] = useState<File | null>(null)
-  // Default ON: after upload/trim the clip auto-plays (muted) once boot hits
-  // Ready, instead of waiting on the ▶ tap. QA fixtures can still disable it
-  // via ?fixtureAutoplay=0.
-  const [autoPlayFixture, setAutoPlayFixture] = useState(true)
+  const [heroUploadError, setHeroUploadError] = useState<string | null>(null)
+  // Real athlete uploads always wait for an explicit Play tap. Automated QA
+  // fixtures may opt in with ?fixtureAutoplay=1.
+  const [autoPlayFixture, setAutoPlayFixture] = useState(false)
   const fixtureLoadedRef = useRef(false)
-
-  useEffect(() => {
-    if (!user || user.role === 'shogun') {
-      setIsPro(user?.role === 'shogun')
-      return
-    }
-    let cancelled = false
-    ;(async () => {
-      try {
-        const res = await fetch('/api/billing/status', { credentials: 'include' })
-        if (!res.ok) {
-          if (!cancelled) setIsPro(false)
-          return
-        }
-        const data = (await res.json()) as { active?: boolean }
-        if (!cancelled) setIsPro(Boolean(data.active))
-      } catch {
-        if (!cancelled) setIsPro(false)
-      }
-    })()
-    return () => {
-      cancelled = true
-    }
-  }, [user])
 
   useEffect(() => {
     if (process.env.NODE_ENV === 'production' && !new URLSearchParams(window.location.search).get('qaLoop')) return
@@ -162,19 +131,18 @@ export default function HomePage() {
   const clearBootstrapVideo = useCallback(() => setBootstrapVideoFile(null), [])
   const OFFLINE = process.env.NEXT_PUBLIC_OFFLINE_MODE === '1'
 
-  const onHeroFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const onHeroFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0]
     e.target.value = ''
     if (!f) return
-    // If the clip is longer than this tier allows, let the user pick which
-    // window to keep instead of rejecting it downstream.
-    const dur = await probeVideoDuration(f)
-    if (dur > maxClipSec) {
-      setTrimRequest(f)
+    setHeroUploadError(null)
+    // Fight Lab owns the one canonical trim flow so uploads from the hero,
+    // restored sessions, and internal entry points cannot diverge.
+    if (f.size > MAX_ORIGINAL_UPLOAD_BYTES) {
+      setHeroUploadError('File is over 500 MB. Export a shorter clip or lower camera resolution, then try again.')
       return
     }
     setBootstrapVideoFile(f)
-    // The Fight Lab below is the real preview → processing → results surface.
     scrollToFightLab()
   }
 
@@ -213,19 +181,6 @@ export default function HomePage() {
         onChange={onHeroFileChange}
       />
 
-      {trimRequest && (
-        <VideoTrimmer
-          file={trimRequest}
-          maxSec={maxClipSec}
-          onConfirm={(trimmed) => {
-            setTrimRequest(null)
-            setBootstrapVideoFile(trimmed)
-            scrollToFightLab()
-          }}
-          onCancel={() => setTrimRequest(null)}
-        />
-      )}
-
       {/* ---- ANALYZE · UPLOAD (design/musashi-reboot) ---- */}
       <div className="px-5 pb-7 pt-[26px]">
         {OFFLINE && (
@@ -257,10 +212,20 @@ export default function HomePage() {
           <div className="text-center">
             <div className="text-[15px] font-semibold text-ms-bone">Tap to upload your clip</div>
             <div className="mt-[5px] font-jbmono text-[11px] text-ms-faint">
-              MP4 · MOV · WEBM — free {FREE_MAX_VIDEO_SEC}s · Pro {PRO_MAX_VIDEO_SEC}s
+              MP4 · MOV · WEBM — free {FREE_MAX_VIDEO_SEC}s window · Pro {PRO_MAX_VIDEO_SEC}s
             </div>
           </div>
         </label>
+
+        {heroUploadError && (
+          <div
+            role="alert"
+            className="mt-3 rounded-xl border px-4 py-3 text-[12.5px] text-red-300"
+            style={{ borderColor: 'rgba(220,80,80,0.45)', background: 'rgba(220,80,80,0.08)' }}
+          >
+            {heroUploadError}
+          </div>
+        )}
 
         {bootstrapVideoFile && (
           <div

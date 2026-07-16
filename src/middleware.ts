@@ -90,10 +90,13 @@ export function middleware(request: NextRequest) {
 
 export const config = {
   matcher: [
-    // Match all routes except static files
-    // R2 Worker fallback streams this authenticated route directly to the
-    // bucket. Excluding it avoids Next middleware's 10 MB request-body clone;
-    // the route itself still requires the owner session before accepting bytes.
-    '/((?!_next/static|_next/image|favicon.ico|api/uploads/[^/]+/content$).*)',
+    // Match all routes except static files and large binary upload paths.
+    // Next 15.5 clones request bodies for middleware (default 10MB) and truncates
+    // the rest → FormData boundary errors / Gemini upload 413. These routes
+    // enforce auth inside the handler; exclude them from the body clone.
+    //   - api/uploads/.../content — mock/R2 PUT of clip bytes
+    //   - api/fight — Gemini tape upload (multipart) + fight actions
+    //   - api/fight/cloud-pose — video proxy to Modal
+    '/((?!_next/static|_next/image|favicon.ico|api/uploads/[^/]+/content$|api/fight$|api/fight/cloud-pose$).*)',
   ],
 }

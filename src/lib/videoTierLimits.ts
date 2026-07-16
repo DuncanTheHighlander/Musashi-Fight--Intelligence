@@ -38,8 +38,8 @@ export const checkClipDurationForTier = (
       code: 'VIDEO_DURATION_EXCEEDED',
       maxSec,
       message: isPro
-        ? `Clip is ${durationSec.toFixed(1)}s — Pro allows up to ${maxSec}s. Trim your clip.`
-        : `Clip is ${durationSec.toFixed(1)}s — Free allows up to ${maxSec}s. Trim or upgrade to Pro (30s).`,
+        ? `Analysis window is ${durationSec.toFixed(1)}s — Pro allows up to ${maxSec}s. Pick a shorter window.`
+        : `Analysis window is ${durationSec.toFixed(1)}s — Free allows up to ${maxSec}s. Pick a shorter window or upgrade to Pro (30s).`,
     }
   }
   return { ok: true }

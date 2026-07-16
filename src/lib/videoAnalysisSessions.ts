@@ -185,6 +185,39 @@ export const reserveVideoAnalysisCredit = async (
   return getVideoCreditBalance(userId, role)
 }
 
+/**
+ * The browser supplies only a provisional window for reservation. After the
+ * server normalizer probes the source and creates the capped MP4, replace that
+ * value with the authoritative effective duration before the credit commits.
+ */
+export const setReservedVideoAnalysisDuration = async (
+  userId: string,
+  role: MusashiRole,
+  input: { sessionId: string; effectiveDurationSec: number },
+): Promise<void> => {
+  const sessionId = String(input.sessionId || '').trim()
+  const effectiveDurationSec = Number(input.effectiveDurationSec)
+  validateSessionInput(sessionId, effectiveDurationSec)
+  if (isAuthBypass()) return
+
+  const limits = await resolveVideoTierLimits(userId, role)
+  if (effectiveDurationSec > limits.maxDurationSec + VIDEO_DURATION_TOLERANCE_SEC) {
+    throw new Error('VIDEO_DURATION_EXCEEDED')
+  }
+
+  const result = await getDb()
+    .prepare(
+      `UPDATE musashi_video_analysis_sessions
+          SET clip_duration_sec = ?
+        WHERE id = ? AND user_id = ? AND state = 'reserved' AND expires_at > ?`,
+    )
+    .bind(effectiveDurationSec, sessionId, userId, new Date().toISOString())
+    .run()
+  if (Number((result as { meta?: { changes?: number } }).meta?.changes || 0) !== 1) {
+    throw new Error('VIDEO_ANALYSIS_SESSION_EXPIRED')
+  }
+}
+
 /** Commit only after the provider returns a usable native-video file. */
 export const commitVideoAnalysisCredit = async (
   userId: string,

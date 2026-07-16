@@ -16,6 +16,18 @@ export async function GET(req: Request) {
       return NextResponse.json({ complete: false, reason: 'unauthenticated' }, { status: 401 })
     }
 
+    // Admins skip fighter/coach onboarding and go straight to the admin panel.
+    if (user.role === 'shogun') {
+      return NextResponse.json({
+        complete: true,
+        hasFighterProfile: true,
+        hasCoachProfile: true,
+        needsProfileNudge: false,
+        redirectTo: '/shogun',
+        reason: 'shogun',
+      })
+    }
+
     const db = getDb()
     const fighter = await db
       .prepare('SELECT display_name FROM fighter_profiles WHERE user_id = ? LIMIT 1')

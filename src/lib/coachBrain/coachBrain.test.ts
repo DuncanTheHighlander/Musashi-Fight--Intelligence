@@ -7,6 +7,7 @@ import {
   getCoachBrainFile,
   getGlobalCoachRules,
   getSportBrain,
+  isVisionFirstSport,
   resolveSportKey,
 } from './coachBrain'
 import { COACH_BRAIN_FILES } from './brains.generated'
@@ -38,6 +39,28 @@ describe('resolveSportKey (sport router aliases)', () => {
     expect(resolveSportKey('sumo')).toBeNull()
     expect(resolveSportKey('')).toBeNull()
     expect(resolveSportKey(undefined)).toBeNull()
+  })
+})
+
+describe('isVisionFirstSport', () => {
+  it('is true for BJJ, wrestling, and judo (and aliases)', () => {
+    expect(isVisionFirstSport('bjj')).toBe(true)
+    expect(isVisionFirstSport('bjj_grappling')).toBe(true)
+    expect(isVisionFirstSport('grappling')).toBe(true)
+    expect(isVisionFirstSport('wrestling')).toBe(true)
+    expect(isVisionFirstSport('judo')).toBe(true)
+    expect(isVisionFirstSport('Jiu-Jitsu')).toBe(true)
+  })
+
+  it('is false for striking, MMA, and unknown', () => {
+    expect(isVisionFirstSport('boxing')).toBe(false)
+    expect(isVisionFirstSport('kickboxing')).toBe(false)
+    expect(isVisionFirstSport('muay_thai')).toBe(false)
+    expect(isVisionFirstSport('mma')).toBe(false)
+    expect(isVisionFirstSport('karate')).toBe(false)
+    expect(isVisionFirstSport('sumo')).toBe(false)
+    expect(isVisionFirstSport('')).toBe(false)
+    expect(isVisionFirstSport(null)).toBe(false)
   })
 })
 

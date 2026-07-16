@@ -55,6 +55,10 @@ function WelcomeContent() {
     if (authLoading || !user) return
     let cancelled = false
     ;(async () => {
+      if (user.role === 'shogun') {
+        if (!cancelled) router.replace('/shogun')
+        return
+      }
       const dest = await resolvePostAuthPath(redirectParam)
       if (!cancelled) router.replace(dest)
     })()
@@ -69,8 +73,8 @@ function WelcomeContent() {
     setLoading(true)
     try {
       await login(email, password)
-      const dest = await resolvePostAuthPath(redirectParam)
-      router.push(dest)
+      // Admin redirect is handled by the session useEffect + onboarding-status
+      // (shogun → /shogun). Non-admin uses resolvePostAuthPath there as well.
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Login failed')
     } finally {
@@ -179,14 +183,14 @@ function WelcomeContent() {
               <CardContent>
                 <form className="space-y-4" onSubmit={onSignIn}>
                   <div className="space-y-2">
-                    <Label htmlFor="welcome-email">Email or Shogun ID</Label>
+                    <Label htmlFor="welcome-email">Email</Label>
                     <Input
                       id="welcome-email"
-                      type="text"
+                      type="email"
                       inputMode="email"
                       value={email}
                       onChange={(e) => setEmail(e.target.value)}
-                      placeholder="you@example.com or shogun"
+                      placeholder="you@example.com"
                       autoComplete="username"
                       className="h-10"
                       required
@@ -307,7 +311,7 @@ function WelcomeContent() {
               </CardContent>
               <CardFooter>
                 <p className="w-full text-center text-xs text-muted-foreground">
-                  Clips over {FREE_MAX_VIDEO_SEC}s are trimmed in-app before analysis.
+                  Clips over {FREE_MAX_VIDEO_SEC}s: pick a {FREE_MAX_VIDEO_SEC}s window — original file uploads as-is.
                 </p>
               </CardFooter>
             </>

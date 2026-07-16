@@ -20,4 +20,6 @@ interface CloudflareEnv {
   SECRET_STRIPE: SecretsStoreSecret
   /** Secrets Store: account secret "Supabase" */
   SECRET_SUPABASE: SecretsStoreSecret
+  /** Secrets Store: account secret "ResendEmail" → EMAIL_API_KEY */
+  SECRET_EMAIL: SecretsStoreSecret
 }

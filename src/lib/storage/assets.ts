@@ -8,7 +8,7 @@ import type {
   MarketplaceAssetStatus,
 } from '@/lib/marketplace/types'
 import { newId } from '@/lib/marketplace/types'
-import { mockObjectExists, mockObjectSize } from './mockStorage'
+import { mockObjectExists, mockObjectSize, readMockObject, writeMockObject } from './mockStorage'
 import {
   assertStorageConfigured,
   createSignedReadUrl,
@@ -17,7 +17,7 @@ import {
   resolveStorageMode,
   type SignedR2Url,
 } from './r2'
-import { getWorkerUploadsBucket } from './workerR2'
+import { getWorkerUploadsBucket, putWorkerR2Object } from './workerR2'
 
 export type CreateUploadTicketInput = {
   userId: string
@@ -56,6 +56,9 @@ export type GetAssetInput = {
 
 const MAX_JOB_VIDEO_BYTES = 500 * 1024 * 1024
 const MAX_PROFILE_MEDIA_BYTES = 10 * 1024 * 1024
+// Stay below Cloudflare's documented 100 MB Free/Pro Worker request ceiling.
+// Larger originals require a browser-direct presigned R2 URL.
+export const MAX_WORKER_PROXY_UPLOAD_BYTES = 90 * 1024 * 1024
 
 const JOB_VIDEO_TYPES = new Set(['video/mp4', 'video/quicktime', 'video/webm'])
 const DELIVERABLE_TYPES = new Set([
@@ -89,15 +92,39 @@ function sanitizeFileName(name: string): string {
   return base || 'file'
 }
 
+/** Browsers often send empty or application/octet-stream for .mp4/.mov — coerce from the name. */
+function normalizeVideoContentType(contentType: string, originalName: string): string {
+  const raw = String(contentType || '')
+    .toLowerCase()
+    .split(';')[0]
+    .trim()
+  if (JOB_VIDEO_TYPES.has(raw)) return raw
+  const lower = String(originalName || '').toLowerCase()
+  if (lower.endsWith('.mov') || lower.endsWith('.qt')) return 'video/quicktime'
+  if (lower.endsWith('.webm')) return 'video/webm'
+  if (lower.endsWith('.mp4') || lower.endsWith('.m4v') || !raw || raw === 'application/octet-stream') {
+    return 'video/mp4'
+  }
+  return raw
+}
+
 function validateUploadInput(input: CreateUploadTicketInput): void {
-  const contentType = String(input.contentType || '').toLowerCase().split(';')[0].trim()
+  let contentType = String(input.contentType || '').toLowerCase().split(';')[0].trim()
   const sizeBytes = Math.trunc(Number(input.sizeBytes) || 0)
   if (sizeBytes <= 0) throw new Error('sizeBytes required')
   if (!input.originalName?.trim()) throw new Error('originalName required')
 
   switch (input.purpose) {
     case 'job_video':
+      contentType = normalizeVideoContentType(contentType, input.originalName)
+      input.contentType = contentType
       if (!JOB_VIDEO_TYPES.has(contentType)) throw new Error('Unsupported content type for job video')
+      if (sizeBytes > MAX_JOB_VIDEO_BYTES) throw new Error('File too large (max 500 MB)')
+      break
+    case 'analysis_clip':
+      contentType = normalizeVideoContentType(contentType, input.originalName)
+      input.contentType = contentType
+      if (!JOB_VIDEO_TYPES.has(contentType)) throw new Error('Unsupported content type for analysis clip')
       if (sizeBytes > MAX_JOB_VIDEO_BYTES) throw new Error('File too large (max 500 MB)')
       break
     case 'deliverable':
@@ -111,10 +138,6 @@ function validateUploadInput(input: CreateUploadTicketInput): void {
     case 'profile_media':
       if (!PROFILE_TYPES.has(contentType)) throw new Error('Unsupported content type for profile media')
       if (sizeBytes > MAX_PROFILE_MEDIA_BYTES) throw new Error('File too large (max 10 MB)')
-      break
-    case 'analysis_clip':
-      if (!JOB_VIDEO_TYPES.has(contentType)) throw new Error('Unsupported content type for analysis clip')
-      if (sizeBytes > MAX_JOB_VIDEO_BYTES) throw new Error('File too large (max 500 MB)')
       break
     default:
       throw new Error('Invalid purpose')
@@ -144,6 +167,9 @@ export async function createUploadTicket(
   const canPresign = mode === 'r2' && isR2SigningConfigured()
   const workerBucket = mode === 'r2' && !canPresign ? await getWorkerUploadsBucket() : null
   if (mode === 'r2' && !canPresign && !workerBucket) assertStorageConfigured()
+  if (mode === 'r2' && !canPresign && input.sizeBytes > MAX_WORKER_PROXY_UPLOAD_BYTES) {
+    throw new Error('DIRECT_R2_REQUIRED')
+  }
   const bucket = mode === 'r2' && canPresign ? assertStorageConfigured().bucket : mode === 'r2' ? 'musashi-uploads' : mockBucketName()
 
   await db
@@ -174,7 +200,11 @@ export async function createUploadTicket(
     signed = await createSignedUploadUrl({ key: objectKey, contentType })
   } else if (mode === 'r2') {
     signed = {
-      url: `${String(input.origin || '').replace(/\/$/, '')}/api/uploads/${id}/content`,
+      // Worker-backed uploads must stay on the app's current origin so the
+      // browser includes its authenticated session. A relative URL also
+      // avoids trusting forwarded/request origins when the app is behind a
+      // proxy or custom hostname.
+      url: `/api/uploads/${id}/content`,
       method: 'PUT',
       headers: { 'Content-Type': contentType },
       expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
@@ -261,17 +291,50 @@ export async function completeUpload(
   if (!asset) throw new Error('NOT_FOUND')
   if (asset.owner_user_id !== input.userId) throw new Error('FORBIDDEN')
   if (asset.status === 'deleted') throw new Error('ASSET_DELETED')
-  if (asset.status === 'uploaded') return asset
+  if (asset.status !== 'pending_upload' && asset.status !== 'uploaded') {
+    throw new Error('ASSET_NOT_PENDING_UPLOAD')
+  }
+
+  const expectedSizeBytes = Math.trunc(Number(asset.size_bytes))
+  if (!Number.isFinite(expectedSizeBytes) || expectedSizeBytes <= 0) {
+    throw new Error('UPLOAD_SIZE_MISMATCH')
+  }
+
+  // The ticketed size is server-owned. A completion request may echo it, but
+  // it cannot replace it with a different value.
+  if (input.sizeBytes !== undefined) {
+    const reportedSizeBytes = Math.trunc(Number(input.sizeBytes))
+    if (!Number.isFinite(reportedSizeBytes) || reportedSizeBytes !== expectedSizeBytes) {
+      throw new Error('UPLOAD_SIZE_MISMATCH')
+    }
+  }
 
   const mode = resolveStorageMode()
-  let sizeBytes = Math.trunc(Number(input.sizeBytes) || asset.size_bytes)
+  let storedSizeBytes = 0
   if (mode === 'mock') {
     if (!mockObjectExists(asset.object_key)) throw new Error('UPLOAD_INCOMPLETE')
-    sizeBytes = mockObjectSize(asset.object_key) || sizeBytes
-  } else if (!isR2SigningConfigured()) {
-    const object = await getWorkerUploadsBucket().then((bucket) => bucket?.head(asset.object_key))
+    storedSizeBytes = Math.trunc(Number(mockObjectSize(asset.object_key)))
+  } else {
+    // Completion is authoritative only after a storage-side HEAD. This is
+    // required for both Worker-proxied and browser-direct presigned PUTs.
+    const bucket = await getWorkerUploadsBucket()
+    if (!bucket) throw new Error('UPLOAD_VERIFICATION_UNAVAILABLE')
+    const object = await bucket.head(asset.object_key)
     if (!object) throw new Error('UPLOAD_INCOMPLETE')
-    sizeBytes = object.size || sizeBytes
+    storedSizeBytes = Math.trunc(Number(object.size))
+  }
+
+  if (!Number.isFinite(storedSizeBytes) || storedSizeBytes <= 0) {
+    throw new Error('UPLOAD_INCOMPLETE')
+  }
+  if (storedSizeBytes !== expectedSizeBytes) {
+    throw new Error('UPLOAD_SIZE_MISMATCH')
+  }
+
+  // Idempotency is allowed only after re-verifying that the durable object is
+  // still present and exactly matches the server-issued ticket.
+  if (asset.status === 'uploaded') {
+    return asset
   }
 
   const now = new Date().toISOString()
@@ -285,7 +348,7 @@ export async function completeUpload(
               updated_at = ?
         WHERE id = ?`,
     )
-    .bind(sizeBytes, input.sha256 ?? null, now, now, input.assetId)
+    .bind(expectedSizeBytes, input.sha256 ?? null, now, now, input.assetId)
     .run()
 
   const updated = await getAssetRow(db, input.assetId)
@@ -314,6 +377,183 @@ export async function getReadableAsset(
     return { asset, readUrl }
   }
   return { asset, readUrl: `/api/uploads/${asset.id}/content` }
+}
+
+/** Server-side bytes for an uploaded asset (Gemini tape upload without re-POSTing FormData). */
+export async function readUploadedAssetBytes(
+  db: D1Database,
+  input: GetAssetInput,
+): Promise<{ bytes: Buffer; contentType: string; originalName: string; sizeBytes: number }> {
+  const { asset, readUrl } = await getReadableAsset(db, input)
+  const mode = resolveStorageMode()
+
+  if (mode === 'mock') {
+    const bytes = readMockObject(asset.object_key)
+    return {
+      bytes,
+      contentType: asset.content_type,
+      originalName: asset.original_name,
+      sizeBytes: bytes.length,
+    }
+  }
+
+  if (mode === 'r2' && !isR2SigningConfigured()) {
+    const object = await getWorkerUploadsBucket().then((bucket) => bucket?.get(asset.object_key))
+    if (!object?.body) throw new Error('OBJECT_NOT_FOUND')
+    const ab = await new Response(object.body).arrayBuffer()
+    const bytes = Buffer.from(ab)
+    return {
+      bytes,
+      contentType: object.httpMetadata?.contentType || asset.content_type,
+      originalName: asset.original_name,
+      sizeBytes: bytes.length,
+    }
+  }
+
+  const res = await fetch(readUrl)
+  if (!res.ok) throw new Error(`ASSET_READ_FAILED:${res.status}`)
+  const ab = await res.arrayBuffer()
+  const bytes = Buffer.from(ab)
+  return {
+    bytes,
+    contentType: res.headers.get('content-type') || asset.content_type,
+    originalName: asset.original_name,
+    sizeBytes: bytes.length,
+  }
+}
+
+/**
+ * Server-side stream for a completed asset. Unlike readUploadedAssetBytes this
+ * never copies a phone video into Worker memory, which is essential for the
+ * R2 -> normalizer -> Gemini ingestion path.
+ */
+export async function readUploadedAssetStream(
+  db: D1Database,
+  input: GetAssetInput,
+): Promise<{
+  asset: MarketplaceAssetRow
+  body: ReadableStream<Uint8Array>
+  contentType: string
+  originalName: string
+  sizeBytes: number
+}> {
+  const { asset, readUrl } = await getReadableAsset(db, input)
+  const mode = resolveStorageMode()
+
+  if (mode === 'mock') {
+    const bytes = readMockObject(asset.object_key)
+    return {
+      asset,
+      body: new Blob([Uint8Array.from(bytes)]).stream(),
+      contentType: asset.content_type,
+      originalName: asset.original_name,
+      sizeBytes: bytes.length,
+    }
+  }
+
+  if (mode === 'r2' && !isR2SigningConfigured()) {
+    const object = await getWorkerUploadsBucket().then((bucket) => bucket?.get(asset.object_key))
+    if (!object?.body) throw new Error('OBJECT_NOT_FOUND')
+    return {
+      asset,
+      body: object.body as ReadableStream<Uint8Array>,
+      contentType: object.httpMetadata?.contentType || asset.content_type,
+      originalName: asset.original_name,
+      sizeBytes: object.size || asset.size_bytes,
+    }
+  }
+
+  const response = await fetch(readUrl)
+  if (!response.ok || !response.body) throw new Error(`ASSET_READ_FAILED:${response.status}`)
+  return {
+    asset,
+    body: response.body,
+    contentType: response.headers.get('content-type') || asset.content_type,
+    originalName: asset.original_name,
+    sizeBytes: Number(response.headers.get('content-length')) || asset.size_bytes,
+  }
+}
+
+/**
+ * Persist the FFmpeg-normalized tape as a distinct R2 asset. The original
+ * upload remains immutable and is the canonical user source; downstream AI
+ * always consumes this H.264/AAC derivative.
+ */
+export async function storeNormalizedAnalysisAsset(
+  db: D1Database,
+  input: {
+    sourceAssetId: string
+    userId: string
+    body: ReadableStream<Uint8Array>
+    expectedSizeBytes: number
+  },
+): Promise<MarketplaceAssetRow> {
+  const source = await getAssetRow(db, input.sourceAssetId)
+  if (!source) throw new Error('NOT_FOUND')
+  if (source.owner_user_id !== input.userId) throw new Error('FORBIDDEN')
+  if (source.purpose !== 'analysis_clip' || source.status !== 'uploaded') {
+    throw new Error('ORIGINAL_ASSET_NOT_READY')
+  }
+
+  const id = newId('asset')
+  const now = new Date().toISOString()
+  const objectKey = buildObjectKey(input.userId, 'analysis_clip', `${source.original_name}.normalized.mp4`)
+  const contentType = 'video/mp4'
+  const mode = resolveStorageMode()
+  let storedSize = 0
+
+  if (mode === 'mock') {
+    const bytes = new Uint8Array(await new Response(input.body).arrayBuffer())
+    writeMockObject(objectKey, bytes)
+    storedSize = bytes.byteLength
+  } else {
+    const bucket = await getWorkerUploadsBucket()
+    if (!bucket) throw new Error('NORMALIZED_STORAGE_UNAVAILABLE')
+    try {
+      await putWorkerR2Object(bucket, {
+        key: objectKey,
+        body: input.body,
+        sizeBytes: input.expectedSizeBytes,
+        contentType,
+      })
+    } catch {
+      throw new Error('NORMALIZED_STORAGE_UNAVAILABLE')
+    }
+    const head = await bucket.head(objectKey)
+    storedSize = Number(head?.size || 0)
+  }
+
+  if (!Number.isFinite(storedSize) || storedSize <= 0) {
+    throw new Error('NORMALIZED_STORAGE_INCOMPLETE')
+  }
+  if (Number.isFinite(input.expectedSizeBytes) && input.expectedSizeBytes > 0 && storedSize !== input.expectedSizeBytes) {
+    throw new Error('NORMALIZED_STORAGE_SIZE_MISMATCH')
+  }
+
+  await db
+    .prepare(
+      `INSERT INTO marketplace_assets (
+         id, owner_user_id, job_id, dispute_id, purpose, bucket, object_key,
+         original_name, content_type, size_bytes, status, created_at, uploaded_at, updated_at
+       ) VALUES (?, ?, NULL, NULL, 'analysis_clip', ?, ?, ?, ?, ?, 'uploaded', ?, ?, ?)`,
+    )
+    .bind(
+      id,
+      input.userId,
+      source.bucket,
+      objectKey,
+      `${source.original_name}.normalized.mp4`.slice(0, 180),
+      contentType,
+      storedSize,
+      now,
+      now,
+      now,
+    )
+    .run()
+
+  const stored = await getAssetRow(db, id)
+  if (!stored) throw new Error('NORMALIZED_STORAGE_INCOMPLETE')
+  return stored
 }
 
 export async function markAssetFailed(db: D1Database, assetId: string, userId: string): Promise<void> {

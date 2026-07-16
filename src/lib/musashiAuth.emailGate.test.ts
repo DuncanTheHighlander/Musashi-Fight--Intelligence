@@ -60,9 +60,17 @@ describe('email verification gate', () => {
     delete process.env.MUSASHI_REQUIRE_EMAIL_VERIFIED
     vi.stubEnv('NODE_ENV', 'production')
     vi.stubEnv('EMAIL_API_KEY', '')
+    vi.stubEnv('EMAIL_FROM_ADDRESS', '')
+    vi.stubEnv('EMAIL_SERVICE_URL', '')
     expect(isEmailVerificationRequired()).toBe(false)
 
     vi.stubEnv('EMAIL_API_KEY', 're_live_configured')
+    expect(isEmailVerificationRequired()).toBe(true)
+
+    // Secrets Store path: key is async, but from+service vars mean provider is wired
+    vi.stubEnv('EMAIL_API_KEY', '')
+    vi.stubEnv('EMAIL_FROM_ADDRESS', 'noreply@musashi.ai')
+    vi.stubEnv('EMAIL_SERVICE_URL', 'https://api.resend.com')
     expect(isEmailVerificationRequired()).toBe(true)
   })
 })

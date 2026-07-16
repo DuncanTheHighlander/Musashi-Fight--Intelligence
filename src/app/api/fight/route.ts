@@ -8,11 +8,13 @@ import {
   fightActionToQuotaBucket,
   extractChatClipKey,
   enforceClipQuestionLimit,
+  resolveVideoTierLimits,
 } from '@/lib/musashiUsage'
 import {
   commitVideoAnalysisCredit,
   releaseVideoAnalysisCredit,
   reserveVideoAnalysisCredit,
+  setReservedVideoAnalysisDuration,
 } from '@/lib/videoAnalysisSessions'
 import { requireUser, type MusashiUser } from '@/lib/musashiAuth'
 import { composeSystemPrompt, DEFAULT_PROMPTS } from '@/lib/aiClient'
@@ -63,6 +65,17 @@ import { upsertRetrievalDoc } from '@/lib/retrieval/d1Store'
 import { embedText } from '@/lib/ai/gemini-embed'
 import { resolvedModels } from '@/lib/gemini/models'
 import { getDbOrNull } from '@/lib/db'
+import { getDb } from '@/lib/marketplace/types'
+import {
+  readUploadedAssetStream,
+  storeNormalizedAnalysisAsset,
+} from '@/lib/storage/assets'
+import {
+  asVideoIngestionError,
+  normalizeVideoOnServer,
+  resolveRequestedVideoDurationSec,
+  VideoIngestionError,
+} from '@/lib/videoIngestion'
 import {
   buildGeminiReflexFrameRequest,
   buildReflexFramePrompt,
@@ -70,8 +83,12 @@ import {
   parseReflexFrameJson,
   type ReflexFrameContext,
 } from '@/lib/gemini/reflex-frame'
+import {
+  buildGeminiVideoFilePart,
+  normalizeClipWindow,
+} from '@/lib/gemini/videoFilePart'
 
-export const maxDuration = 60
+export const maxDuration = 300
 
 const summarizePatternEvidence = (patterns: unknown): string => {
   if (!patterns) return ''
@@ -1454,7 +1471,11 @@ const handleChat = async (body: any, user: any) => {
         
         const flashParts: any[] = []
         if (context.videoFileUri && isValidFileUri(context.videoFileUri)) {
-          flashParts.push({ fileData: { fileUri: context.videoFileUri, mimeType: context.videoMimeType || 'video/mp4' } })
+          flashParts.push(buildGeminiVideoFilePart(
+            context.videoFileUri,
+            context.videoMimeType || 'video/mp4',
+            { startSec: context.startSec, endSec: context.endSec },
+          ))
         } else if (context.videoData) {
           flashParts.push({ inlineData: { mimeType: context.videoMimeType || 'video/mp4', data: context.videoData } })
         }
@@ -1494,7 +1515,11 @@ const handleChat = async (body: any, user: any) => {
         let factualLedgerChat: FactualLedger | null = null
         const ledgerVideoParts: any[] = []
         if (context.videoFileUri && isValidFileUri(context.videoFileUri)) {
-          ledgerVideoParts.push({ fileData: { fileUri: context.videoFileUri, mimeType: context.videoMimeType || 'video/mp4' } })
+          ledgerVideoParts.push(buildGeminiVideoFilePart(
+            context.videoFileUri,
+            context.videoMimeType || 'video/mp4',
+            { startSec: context.startSec, endSec: context.endSec },
+          ))
         } else if (context.videoData) {
           ledgerVideoParts.push({ inlineData: { mimeType: context.videoMimeType || 'video/mp4', data: context.videoData } })
         }
@@ -1600,7 +1625,11 @@ const handleChat = async (body: any, user: any) => {
 
         const deepParts: any[] = []
         if (context.videoFileUri && isValidFileUri(context.videoFileUri)) {
-          deepParts.push({ fileData: { fileUri: context.videoFileUri, mimeType: context.videoMimeType || 'video/mp4' } })
+          deepParts.push(buildGeminiVideoFilePart(
+            context.videoFileUri,
+            context.videoMimeType || 'video/mp4',
+            { startSec: context.startSec, endSec: context.endSec },
+          ))
         } else if (context.videoData) {
           deepParts.push({ inlineData: { mimeType: context.videoMimeType || 'video/mp4', data: context.videoData } })
         }
@@ -1749,15 +1778,19 @@ const handleChat = async (body: any, user: any) => {
 
       if (context?.nativeVideo && context?.videoFileUri && isValidFileUri(context.videoFileUri)) {
         const fps = context.requestedFPS || 5
-        firstUserParts.push({
-          fileData: {
-            fileUri: context.videoFileUri,
-            mimeType: context.videoMimeType || 'video/mp4',
-          },
-        })
+        const window = normalizeClipWindow(context.startSec, context.endSec)
+        firstUserParts.push(buildGeminiVideoFilePart(
+          context.videoFileUri,
+          context.videoMimeType || 'video/mp4',
+          { startSec: context.startSec, endSec: context.endSec },
+        ))
+        const windowHint = window
+          ? `- Analyzing the selected window ${window.startSec.toFixed(1)}s–${window.endSec.toFixed(1)}s (${(window.endSec - window.startSec).toFixed(1)}s)\n`
+          : ''
         firstUserParts.push({
           text: `\n🎬 NATIVE VIDEO ANALYSIS MODE:\n` +
             `- Processing ${context.clipDuration?.toFixed(1)}s video clip with Gemini's native multimodal understanding\n` +
+            windowHint +
             `- Sample the video at approximately ${fps} frames per second for detailed motion capture\n` +
             `- You are analyzing the COMPLETE video with full temporal understanding\n` +
             `- Analyze: Every frame, complete motion sequences, technique execution, footwork, hand positioning, body mechanics, tactical flow, timing, rhythm, and fighting patterns\n` +
@@ -2658,28 +2691,68 @@ const handlePresets = async (user: any) => {
 }
 
 // Option B: Handle video file upload to Gemini Files API
-const handleVideoUpload = async (formData: FormData, user: any) => {
-  const videoFile = formData.get('video') as File
+function inferGeminiVideoMime(fileName: string, declared?: string | null): string {
+  const raw = String(declared || '')
+    .toLowerCase()
+    .split(';')[0]
+    .trim()
+  if (raw === 'video/mp4' || raw === 'video/quicktime' || raw === 'video/webm') return raw
+  const lower = String(fileName || '').toLowerCase()
+  if (lower.endsWith('.mov') || lower.endsWith('.qt')) return 'video/quicktime'
+  if (lower.endsWith('.webm')) return 'video/webm'
+  return 'video/mp4'
+}
+
+const asUploadIngestionFailure = (error: unknown): VideoIngestionError => {
+  const known = asVideoIngestionError(error)
+  if (known) return known
+  const code = error instanceof Error ? error.message : String(error || '')
+  if (/^(NOT_FOUND|ASSET_NOT_READY|OBJECT_NOT_FOUND|UPLOAD_INCOMPLETE|ORIGINAL_ASSET_NOT_READY)/.test(code)) {
+    return new VideoIngestionError('ORIGINAL_ASSET_NOT_READY', code)
+  }
+  if (/^NORMALIZED_STORAGE_UNAVAILABLE/.test(code)) {
+    return new VideoIngestionError('NORMALIZED_STORAGE_UNAVAILABLE', code)
+  }
+  if (/^NORMALIZED_STORAGE_INCOMPLETE/.test(code)) {
+    return new VideoIngestionError('NORMALIZED_STORAGE_INCOMPLETE', code)
+  }
+  if (/^NORMALIZED_STORAGE_SIZE_MISMATCH/.test(code)) {
+    return new VideoIngestionError('NORMALIZED_STORAGE_SIZE_MISMATCH', code)
+  }
+  return new VideoIngestionError('VIDEO_ANALYSIS_REJECTED', code.slice(0, 180))
+}
+
+const handleVideoUpload = async (video: {
+  body: ReadableStream<Uint8Array>
+  sizeBytes: number
+  mimeType: string
+  fileName: string
+}) => {
   const geminiKey = await getServerSecret('GEMINI_API_KEY')
-  
-  logger.info('Video upload request', { fileName: videoFile?.name, fileSize: videoFile?.size, hasGeminiKey: !!geminiKey })
-  
-  if (!videoFile) {
-    throw new Error('No video file provided')
+  const mimeType = inferGeminiVideoMime(video.fileName, video.mimeType)
+  const fileSize = video.sizeBytes
+
+  logger.info('Video upload request', {
+    fileName: video.fileName,
+    fileSize,
+    mimeType,
+    hasGeminiKey: !!geminiKey,
+  })
+
+  if (!fileSize) {
+    throw new VideoIngestionError('GEMINI_UPLOAD_FAILED', 'normalized video is empty')
   }
-  
+
   if (!geminiKey || geminiKey === 'your-gemini-api-key-here') {
-    throw new Error('GEMINI_API_KEY is not configured. Set a valid key in .env.local (get one at https://aistudio.google.com/app/apikey)')
+    throw new VideoIngestionError('GEMINI_UPLOAD_FAILED', 'Gemini is not configured')
   }
-  
+
   try {
     // Step 1: Initiate file upload
-    const fileSize = videoFile.size
-    const mimeType = videoFile.type
     const displayName = `fight-video-${Date.now()}`
-    
+
     console.log('[Upload] File size:', fileSize, 'mimeType:', mimeType)
-    
+
     const initResponse = await fetch(`https://generativelanguage.googleapis.com/upload/v1beta/files?key=${geminiKey}`, {
       method: 'POST',
       headers: {
@@ -2695,7 +2768,7 @@ const handleVideoUpload = async (formData: FormData, user: any) => {
         }
       })
     })
-    
+
 
     if (!initResponse.ok) {
       const errorText = await initResponse.text()
@@ -2705,72 +2778,78 @@ const handleVideoUpload = async (formData: FormData, user: any) => {
       }
       throw new Error(`Failed to initiate file upload: ${initResponse.status} ${errorText}`)
     }
-    
+
     const uploadUrl = initResponse.headers.get('X-Goog-Upload-URL')
     if (!uploadUrl) {
       throw new Error('No upload URL received')
     }
-    
+
     // Step 2: Upload the video file
-    const uploadBody = videoFile.stream()
-    const uploadResponse = await fetch(uploadUrl, {
+      const uploadResponse = await fetch(uploadUrl, {
       method: 'POST',
       headers: {
         'Content-Length': fileSize.toString(),
         'X-Goog-Upload-Offset': '0',
         'X-Goog-Upload-Command': 'upload, finalize'
       },
-      // Stream the file instead of buffering it (prevents ArrayBuffer allocation failures)
-      body: uploadBody as any,
+        // Keep the normalized R2 object streamed all the way to Gemini; phone
+        // uploads must never be copied into Worker memory.
+        body: video.body as any,
       // Node/undici requires duplex for streamed request bodies
       duplex: 'half' as any,
     } as any)
-    
+
     if (!uploadResponse.ok) {
       const errorBody = await uploadResponse.text().catch(() => '')
       console.error('[Upload] Upload failed:', uploadResponse.status, errorBody)
-      throw new Error(`Failed to upload video file: ${uploadResponse.status} ${errorBody.slice(0, 200)}`)
+      throw new VideoIngestionError('GEMINI_UPLOAD_FAILED', `status ${uploadResponse.status}: ${errorBody.slice(0, 160)}`)
     }
-    
+
     const uploadData = (await safeParseResponse(uploadResponse)) as { file?: { uri?: string; name?: string; state?: string } }
     console.log('[Upload] Upload response:', JSON.stringify(uploadData, null, 2))
     const fileUri = uploadData.file?.uri
     const fileName = uploadData.file?.name
-    
+
     if (!fileUri) {
-      throw new Error('No file URI received')
+      throw new VideoIngestionError('GEMINI_UPLOAD_FAILED', 'no file URI returned')
     }
-    
+    if (!fileName) {
+      throw new VideoIngestionError('GEMINI_UPLOAD_FAILED', 'no Gemini file id returned')
+    }
+
     console.log('[Upload] Success! fileUri:', fileUri)
-    
+
     // Poll for file processing completion (Gemini needs time to process videos)
     if (fileName) {
       let fileState = uploadData.file?.state || 'PROCESSING'
       let attempts = 0
-      const maxAttempts = 30 // Max 30 seconds wait
-      
+      const maxAttempts = 90 // Gemini video processing may take a few minutes.
+
       while (fileState === 'PROCESSING' && attempts < maxAttempts) {
-        await new Promise(resolve => setTimeout(resolve, 1000))
+        await new Promise(resolve => setTimeout(resolve, 2000))
         attempts++
-        
+
         try {
           const statusResponse = await fetch(
             `https://generativelanguage.googleapis.com/v1beta/${fileName}?key=${geminiKey}`
           )
           if (statusResponse.ok) {
             const statusData = (await safeParseResponse(statusResponse)) as { state?: string }
-            fileState = statusData.state || 'ACTIVE'
+            fileState = statusData.state || 'PROCESSING'
           }
-        } catch {
-          // Continue polling on error
+        } catch (error) {
+          console.warn('[Upload] Gemini processing poll failed:', error)
         }
       }
-      
+
       if (fileState === 'FAILED') {
-        throw new Error('Video processing failed on Gemini servers')
+        throw new VideoIngestionError('GEMINI_PROCESSING_FAILED')
+      }
+      if (fileState !== 'ACTIVE') {
+        throw new VideoIngestionError('GEMINI_PROCESSING_TIMEOUT')
       }
     }
-    
+
     return {
       fileUri,
       displayName,
@@ -2778,10 +2857,11 @@ const handleVideoUpload = async (formData: FormData, user: any) => {
       fileSize,
       ready: true
     }
-    
+
   } catch (error) {
+    if (error instanceof VideoIngestionError) throw error
     const msg = error instanceof Error ? error.message : 'Unknown error'
-    throw new Error(`Video upload failed: ${msg}`)
+    throw new VideoIngestionError('GEMINI_UPLOAD_FAILED', msg.slice(0, 180))
   }
 }
 
@@ -2791,7 +2871,19 @@ const handleVideoUpload = async (formData: FormData, user: any) => {
  * Returns a streaming Response (bypasses NextResponse.json wrapper).
  */
 const handleAnalyzeVideoStream = async (body: any): Promise<Response> => {
-  const { videoFileUri, videoMimeType, clipDuration, focusTarget, poseEvidence, discipline, clipType, poseEngine } = body
+  const {
+    videoFileUri,
+    videoMimeType,
+    clipDuration,
+    focusTarget,
+    poseEvidence,
+    discipline,
+    clipType,
+    poseEngine,
+    startSec,
+    endSec,
+  } = body
+  const streamWindow = { startSec, endSec }
   const geminiKey = await getServerSecret('GEMINI_API_KEY')
 
   const encoder = new TextEncoder()
@@ -2843,7 +2935,7 @@ const handleAnalyzeVideoStream = async (body: any): Promise<Response> => {
               contents: [{
                 role: 'user',
                 parts: [
-                  { fileData: { fileUri: videoFileUri, mimeType: videoMimeType || 'video/mp4' } },
+                  buildGeminiVideoFilePart(videoFileUri, videoMimeType || 'video/mp4', streamWindow),
                   {
                     text: useGrappling
                       ? buildGrapplingEvidenceLedgerPrompt({ clipDuration, focusTarget })
@@ -2881,7 +2973,7 @@ const handleAnalyzeVideoStream = async (body: any): Promise<Response> => {
                 contents: [{
                   role: 'user',
                   parts: [
-                    { fileData: { fileUri: videoFileUri, mimeType: videoMimeType || 'video/mp4' } },
+                    buildGeminiVideoFilePart(videoFileUri, videoMimeType || 'video/mp4', streamWindow),
                     {
                       text: useGrappling
                         ? buildGrapplingEvidenceLedgerPrompt({ clipDuration, focusTarget, attempt: 'emergency' })
@@ -2916,8 +3008,8 @@ const handleAnalyzeVideoStream = async (body: any): Promise<Response> => {
 
         // Verification pass: re-watch tape and correct the candidate ledger before coaching + retrieval.
         try {
-          const verifyParts: Array<{ fileData?: { fileUri: string; mimeType: string }; text?: string }> = [
-            { fileData: { fileUri: videoFileUri, mimeType: videoMimeType || 'video/mp4' } },
+          const verifyParts: Array<ReturnType<typeof buildGeminiVideoFilePart> | { text: string }> = [
+            buildGeminiVideoFilePart(videoFileUri, videoMimeType || 'video/mp4', streamWindow),
             {
               text: useGrappling
                 ? buildGrapplingVerificationPrompt(factualLedger, { clipDuration })
@@ -3343,29 +3435,135 @@ export async function POST(req: Request) {
     // Route to appropriate handler
     switch (action) {
       case 'upload_video':
-        if (!formData) throw new Error('FormData required for upload_video')
         {
-          const sessionId = String(formData.get('videoAnalysisSessionId') || '').trim()
-          const clipDurationSec = Number(formData.get('clipDurationSec') || formData.get('clipDuration') || 0)
+          const assetId = String(
+            (formData ? formData.get('assetId') : null) || body?.assetId || '',
+          ).trim()
+          const sessionId = String(
+            (formData ? formData.get('videoAnalysisSessionId') : null) ||
+              body?.videoAnalysisSessionId ||
+              '',
+          ).trim()
+          const requestedSourceStartSec = Number(
+            (formData ? formData.get('sourceStartSec') : null) ?? body?.sourceStartSec ?? 0,
+          )
+          const requestedDurationSec =
+            (formData ? formData.get('requestedDurationSec') : null) ??
+            body?.requestedDurationSec
+          // The client may suggest where the source window starts, but cannot
+          // raise the tier duration cap. Modal clamps this again to the actual
+          // source duration before it invokes FFmpeg.
+          const sourceStartSec =
+            Number.isFinite(requestedSourceStartSec) && requestedSourceStartSec >= 0
+              ? Math.min(requestedSourceStartSec, 86_400)
+              : 0
+          const requestId =
+            typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+              ? crypto.randomUUID()
+              : `ingestion-${Date.now()}-${Math.random().toString(36).slice(2)}`
           let reserved = false
           try {
-            await reserveVideoAnalysisCredit(user.id, user.role, { sessionId, clipDurationSec })
+            if (!assetId) {
+              throw new VideoIngestionError('ORIGINAL_ASSET_NOT_READY', 'R2 asset id is required')
+            }
+
+            // The authenticated tier remains the server-owned ceiling, but a
+            // shorter athlete-selected interval must not be lengthened to that
+            // ceiling. Modal applies the final source-duration cap after it
+            // probes the actual media.
+            const limits = await resolveVideoTierLimits(user.id, user.role)
+            const normalizedMaxSec = resolveRequestedVideoDurationSec(
+              requestedDurationSec,
+              limits.maxDurationSec,
+            )
+            await reserveVideoAnalysisCredit(user.id, user.role, {
+              sessionId,
+              clipDurationSec: normalizedMaxSec,
+            })
             reserved = true
-            const upload = await handleVideoUpload(formData, user)
+
+            let original
+            try {
+              original = await readUploadedAssetStream(getDb(), {
+                assetId,
+                userId: user.id,
+                isAdmin: user.role === 'shogun',
+              })
+            } catch (error) {
+              throw new VideoIngestionError(
+                'ORIGINAL_ASSET_NOT_READY',
+                error instanceof Error ? error.message : 'original R2 object unavailable',
+              )
+            }
+
+            const normalized = await normalizeVideoOnServer({
+              source: original.body,
+              sourceName: original.originalName,
+              sourceMimeType: original.contentType,
+              maxSec: normalizedMaxSec,
+              sourceStartSec,
+              requestId,
+            })
+
+            let normalizedAsset
+            try {
+              normalizedAsset = await storeNormalizedAnalysisAsset(getDb(), {
+                sourceAssetId: assetId,
+                userId: user.id,
+                body: normalized.body,
+                expectedSizeBytes: normalized.sizeBytes,
+              })
+            } catch (error) {
+              throw asUploadIngestionFailure(error)
+            }
+
+            await setReservedVideoAnalysisDuration(user.id, user.role, {
+              sessionId,
+              effectiveDurationSec: normalized.effectiveDurationSec,
+            })
+
+            const normalizedStream = await readUploadedAssetStream(getDb(), {
+              assetId: normalizedAsset.id,
+              userId: user.id,
+              isAdmin: user.role === 'shogun',
+            })
+            const upload = await handleVideoUpload({
+              body: normalizedStream.body,
+              sizeBytes: normalizedStream.sizeBytes,
+              mimeType: normalizedStream.contentType,
+              fileName: normalizedStream.originalName,
+            })
             const credits = await commitVideoAnalysisCredit(user.id, user.role, {
               sessionId,
               clipKey: String(upload.fileUri || ''),
             })
-            result = { ...upload, credits, videoAnalysisSessionId: sessionId }
+            result = {
+              ...upload,
+              credits,
+              videoAnalysisSessionId: sessionId,
+              requestId,
+              normalizedAssetId: normalizedAsset.id,
+              requestedDurationSec: normalizedMaxSec,
+              effectiveDurationSec: normalized.effectiveDurationSec,
+            }
           } catch (error) {
+            const failure = asUploadIngestionFailure(error)
+            console.warn('[video-ingestion] upload failed', {
+              requestId,
+              code: failure.code,
+              detail: failure.detail,
+            })
             if (reserved) {
               await releaseVideoAnalysisCredit(
                 user.id,
                 sessionId,
-                error instanceof Error ? error.message : 'VIDEO_ANALYSIS_FAILED',
+                failure.code,
               )
             }
-            return aiErrorResponse(error)
+            return NextResponse.json(
+              { error: failure.message, code: failure.code, requestId },
+              { status: 502 },
+            )
           }
         }
         break

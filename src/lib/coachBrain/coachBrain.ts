@@ -55,6 +55,19 @@ export function resolveSportKey(input?: string | null): SportKey | null {
   return SPORT_ALIASES[norm] ?? null
 }
 
+/** Sports that coach from VIDEO first (skeleton off; pose is assist-only). */
+const VISION_FIRST_SPORTS = new Set<SportKey>(['bjj_grappling', 'wrestling', 'judo'])
+
+/**
+ * True when the selected sport should use the vision-first pipeline:
+ * attach tape → Gemini watches → Coach Cards fill. Pose/skeleton is optional.
+ * MMA stays hybrid (false). Striking sports stay pose-first (false).
+ */
+export function isVisionFirstSport(discipline?: string | null): boolean {
+  const key = resolveSportKey(discipline)
+  return key != null && VISION_FIRST_SPORTS.has(key)
+}
+
 export function getCoachBrainFile(path: string): string | null {
   return COACH_BRAIN_FILES[path] ?? null
 }

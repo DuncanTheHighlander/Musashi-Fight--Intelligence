@@ -84,6 +84,7 @@ secret_name = "Supabase"
 MUSASHI_MARKETPLACE_PAYMENTS = "stripe"
 MUSASHI_STORAGE_MODE = "r2"
 GEMINI_EMBED_DIMENSION = "1536"
+MUSASHI_VIDEO_NORMALIZER_URL = "https://duncanazsmith--musashi-pose-api-normalize-video.modal.run"
 NODE_ENV = "production"
 # AI coaching requires verified email in production (assertEmailVerified). Override: MUSASHI_REQUIRE_EMAIL_VERIFIED=0
 # Email provider (Resend). EMAIL_API_KEY is a Worker secret — `wrangler secret put EMAIL_API_KEY`.
