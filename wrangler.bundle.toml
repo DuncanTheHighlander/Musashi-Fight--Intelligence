@@ -85,4 +85,7 @@ MUSASHI_DISABLE_AUTH = "0"
 # AI coaching requires verified email in production (assertEmailVerified). Override: MUSASHI_REQUIRE_EMAIL_VERIFIED=0
 # Resend: Secrets Store SECRET_EMAIL (ResendEmail), or legacy Worker secret EMAIL_API_KEY.
 EMAIL_SERVICE_URL = "https://api.resend.com"
-EMAIL_FROM_ADDRESS = "noreply@musashi.ai"
+# Resend account has NO verified domain (checked 2026-07-17): onboarding@resend.dev
+# is the only allowed sender, and it delivers ONLY to the Resend account owner's
+# email. Verify a real domain at resend.com/domains, then switch this back.
+EMAIL_FROM_ADDRESS = "onboarding@resend.dev"
