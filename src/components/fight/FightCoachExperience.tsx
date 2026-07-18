@@ -19,7 +19,6 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
 import { useToast } from '@/hooks/use-toast'
-import { ToastAction } from '@/components/ui/toast'
 import { CompactFocusToggle } from '@/components/fight/FocusToggle'
 import { PoseQualityBadge } from '@/components/fight/PoseQualityBadge'
 import RotatingWisdom from '@/components/fight/RotatingWisdom'
@@ -570,6 +569,8 @@ export default function FightCoachExperience({
   // User must click "Start Coaching" to begin and can stop anytime.
   const [coachingEnabled, setCoachingEnabled] = useState(false)
   const [coachingConfirmOpen, setCoachingConfirmOpen] = useState(false)
+  // Opens when a free account exhausts its 3 lifetime video analyses.
+  const [upgradeDialogOpen, setUpgradeDialogOpen] = useState(false)
   const [llmCallCount, setLlmCallCount] = useState(0)
   const LLM_CALL_CAP = 20 // ~$1 worst case at $0.05/call
   // Hardware profile — resolved on the client after mount so SSR and the first
@@ -2712,18 +2713,17 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
           nativeUploadErrorRef.current = statusMessage
           setIngestionStage('failed')
           setInitialAnalysisStatus(statusMessage)
-          // Always surface the upgrade path, even in silent-toast flows — the
-          // athlete needs to know why analysis stopped and what unlocks it.
-          toast({
-            title: isFree ? 'Free limit reached — Pro unlocks more' : 'Weekly video limit reached',
-            description: errData.hint || errData.error || 'Upgrade to Pro for weekly 30-second clips.',
-            variant: 'destructive',
-            action: (
-              <ToastAction altText="Upgrade to Pro" onClick={() => window.location.assign('/pricing')}>
-                Upgrade
-              </ToastAction>
-            ),
-          })
+          if (isFree) {
+            // Full-screen upgrade prompt, even in silent-toast flows — the
+            // athlete needs to know why analysis stopped and what unlocks it.
+            setUpgradeDialogOpen(true)
+          } else {
+            toast({
+              title: 'Weekly video limit reached',
+              description: errData.hint || errData.error || 'Your Pro allowance resets weekly.',
+              variant: 'destructive',
+            })
+          }
           return null
         }
         throw new Error(errData.error || `Upload failed with status ${res.status}`)
@@ -2865,22 +2865,15 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
     const sourceFile = fileOverride ?? videoFile
     if (!sourceFile) return
     if (!geminiFileUri && videoCredits && videoCredits.remaining <= 0) {
-      toast({
-        title: videoCredits.tier === 'free' ? 'Free limit reached — Pro unlocks more' : 'AI video credits used',
-        description: videoCredits.tier === 'free'
-          ? 'Free includes 3 successful AI video analyses. Upgrade to Pro for weekly 30s clips — local playback and skeleton tracking still work.'
-          : 'Your current video-analysis allowance is used. Please try again after it resets.',
-        variant: 'destructive',
-        ...(videoCredits.tier === 'free'
-          ? {
-              action: (
-                <ToastAction altText="Upgrade to Pro" onClick={() => window.location.assign('/pricing')}>
-                  Upgrade
-                </ToastAction>
-              ),
-            }
-          : {}),
-      })
+      if (videoCredits.tier === 'free') {
+        setUpgradeDialogOpen(true)
+      } else {
+        toast({
+          title: 'AI video credits used',
+          description: 'Your current video-analysis allowance is used. Please try again after it resets.',
+          variant: 'destructive',
+        })
+      }
       return
     }
 
@@ -4033,6 +4026,31 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
           onCancel={() => setTrimSelection(null)}
         />
       ) : null}
+      {/* Paywall — a free account used its 3 lifetime AI video analyses. */}
+      <AlertDialog open={upgradeDialogOpen} onOpenChange={setUpgradeDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>You&apos;ve used your 3 free analyses</AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-3">
+                <p>Go Pro to keep the AI coaching coming:</p>
+                <ul className="list-disc space-y-1 pl-5 text-left">
+                  <li><span className="font-medium text-foreground">10 AI video analyses</span> every week</li>
+                  <li><span className="font-medium text-foreground">30-second clips</span> — triple the free length</li>
+                  <li>Full Coach Cards, focus coaching, and clip chat on every upload</li>
+                </ul>
+                <p>Local playback and skeleton tracking stay free forever.</p>
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Not now</AlertDialogCancel>
+            <AlertDialogAction onClick={() => window.location.assign('/pricing')}>
+              See Pro plans
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
       {/* Clip context step — starts the correct pipeline after a fresh upload. */}
       <Dialog open={sportPickerOpen} onOpenChange={handleSportPickerOpenChange}>
         <DialogContent className="max-w-lg max-h-[85vh] overflow-y-auto">
