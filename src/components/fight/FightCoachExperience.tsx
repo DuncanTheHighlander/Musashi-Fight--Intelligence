@@ -19,6 +19,7 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
 import { useToast } from '@/hooks/use-toast'
+import { ToastAction } from '@/components/ui/toast'
 import { CompactFocusToggle } from '@/components/fight/FocusToggle'
 import { PoseQualityBadge } from '@/components/fight/PoseQualityBadge'
 import RotatingWisdom from '@/components/fight/RotatingWisdom'
@@ -2702,7 +2703,29 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
       })
 
       if (!res.ok) {
-        const errData = await res.json().catch(() => ({ error: `Server error ${res.status}` })) as { error?: string }
+        const errData = await res.json().catch(() => ({ error: `Server error ${res.status}` })) as { error?: string; code?: string; hint?: string }
+        if (res.status === 402 && (errData.code === 'FREE_VIDEO_QUOTA' || errData.code === 'WEEKLY_VIDEO_QUOTA')) {
+          const isFree = errData.code === 'FREE_VIDEO_QUOTA'
+          const statusMessage = isFree
+            ? 'Free limit reached: 3 AI video analyses. Upgrade to Pro for weekly 30s clips.'
+            : 'Weekly Pro video allowance used — it resets weekly.'
+          nativeUploadErrorRef.current = statusMessage
+          setIngestionStage('failed')
+          setInitialAnalysisStatus(statusMessage)
+          // Always surface the upgrade path, even in silent-toast flows — the
+          // athlete needs to know why analysis stopped and what unlocks it.
+          toast({
+            title: isFree ? 'Free limit reached — Pro unlocks more' : 'Weekly video limit reached',
+            description: errData.hint || errData.error || 'Upgrade to Pro for weekly 30-second clips.',
+            variant: 'destructive',
+            action: (
+              <ToastAction altText="Upgrade to Pro" onClick={() => window.location.assign('/pricing')}>
+                Upgrade
+              </ToastAction>
+            ),
+          })
+          return null
+        }
         throw new Error(errData.error || `Upload failed with status ${res.status}`)
       }
 
@@ -2843,11 +2866,20 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
     if (!sourceFile) return
     if (!geminiFileUri && videoCredits && videoCredits.remaining <= 0) {
       toast({
-        title: 'AI video credits used',
+        title: videoCredits.tier === 'free' ? 'Free limit reached — Pro unlocks more' : 'AI video credits used',
         description: videoCredits.tier === 'free'
-          ? 'Free includes 3 successful AI video analyses. Local playback and skeleton tracking still work.'
+          ? 'Free includes 3 successful AI video analyses. Upgrade to Pro for weekly 30s clips — local playback and skeleton tracking still work.'
           : 'Your current video-analysis allowance is used. Please try again after it resets.',
         variant: 'destructive',
+        ...(videoCredits.tier === 'free'
+          ? {
+              action: (
+                <ToastAction altText="Upgrade to Pro" onClick={() => window.location.assign('/pricing')}>
+                  Upgrade
+                </ToastAction>
+              ),
+            }
+          : {}),
       })
       return
     }

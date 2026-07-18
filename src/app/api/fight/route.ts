@@ -3557,6 +3557,20 @@ export async function POST(req: Request) {
               effectiveDurationSec: normalized.effectiveDurationSec,
             }
           } catch (error) {
+            const quotaCode = error instanceof Error ? error.message : ''
+            if (
+              quotaCode === 'FREE_VIDEO_QUOTA' ||
+              quotaCode === 'WEEKLY_VIDEO_QUOTA' ||
+              quotaCode === 'VIDEO_DURATION_EXCEEDED'
+            ) {
+              // Quota rejections are expected product states (402 + upgrade
+              // hint), not ingestion failures — asUploadIngestionFailure would
+              // mask them as generic 502s and hide the upgrade prompt.
+              if (reserved) {
+                await releaseVideoAnalysisCredit(user.id, sessionId, quotaCode)
+              }
+              return aiErrorResponse(error)
+            }
             const failure = asUploadIngestionFailure(error)
             console.warn('[video-ingestion] upload failed', {
               requestId,
