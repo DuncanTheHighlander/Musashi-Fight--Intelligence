@@ -186,7 +186,11 @@ function WelcomeContent() {
                     <Label htmlFor="welcome-email">Email</Label>
                     <Input
                       id="welcome-email"
-                      type="email"
+                      // type="text" so the admin bootstrap login ("shogun") can
+                      // submit — type="email" makes the browser block it before
+                      // the server ever sees it. inputMode keeps the email
+                      // keyboard on phones; the server validates real emails.
+                      type="text"
                       inputMode="email"
                       value={email}
                       onChange={(e) => setEmail(e.target.value)}
