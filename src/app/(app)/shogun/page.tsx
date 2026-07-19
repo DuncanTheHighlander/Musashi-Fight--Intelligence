@@ -45,6 +45,22 @@ type PromptsBundle = {
   }>
 }
 
+type OverviewUser = {
+  id: string
+  email: string
+  role: string
+  created_at: string
+  email_verified_at: string | null
+  videos_analyzed: number
+  last_analysis_at: string | null
+  is_pro: number
+}
+
+type OverviewData = {
+  totals: { users: number; verified: number; pro: number; videosAnalyzed: number; activeLast7d: number }
+  users: OverviewUser[]
+}
+
 const toNumberOrNull = (v: string): number | null => {
   const s = v.trim()
   if (!s) return null
@@ -129,6 +145,7 @@ export default function ShogunPage() {
 
   const [users, setUsers] = useState<LimitsRow[]>([])
   const [selectedUserId, setSelectedUserId] = useState<string>('')
+  const [overview, setOverview] = useState<OverviewData | null>(null)
 
   const [dailyAnalyze, setDailyAnalyze] = useState('')
   const [dailyChat, setDailyChat] = useState('')
@@ -185,6 +202,13 @@ export default function ShogunPage() {
     }
   }, [selectedUserId])
 
+  const loadOverview = useCallback(async () => {
+    const res = await fetch('/api/shogun/overview', { method: 'GET' })
+    if (!res.ok) return
+    const data: any = await parseApiResponse(res)
+    if (data?.totals && Array.isArray(data?.users)) setOverview(data as OverviewData)
+  }, [])
+
   const loadPrompt = useCallback(async (key: PromptKey) => {
     const defaults = defaultsForPromptKey(key)
     setPromptName(defaults.name)
@@ -224,6 +248,7 @@ export default function ShogunPage() {
       try {
         await loadMe()
         await loadUsers()
+        await loadOverview()
         await loadPrompt(selectedPromptKey)
       } catch (e) {
         setError(e instanceof Error ? e.message : 'Failed to load')
@@ -232,7 +257,7 @@ export default function ShogunPage() {
       }
     }
     void run()
-  }, [loadMe, loadPrompt, loadUsers, selectedPromptKey])
+  }, [loadMe, loadPrompt, loadUsers, loadOverview, selectedPromptKey])
 
   useEffect(() => {
     if (!selectedUser) return
@@ -428,11 +453,74 @@ export default function ShogunPage() {
 
         {error && <div className="mb-4 text-sm text-destructive">{error}</div>}
 
-        <Tabs defaultValue="limits">
+        <Tabs defaultValue="overview">
           <TabsList>
+            <TabsTrigger value="overview">Overview</TabsTrigger>
             <TabsTrigger value="limits">Limits</TabsTrigger>
             <TabsTrigger value="prompts">Prompts</TabsTrigger>
           </TabsList>
+
+          <TabsContent value="overview">
+            <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-5">
+              {[
+                { label: 'Users', value: overview?.totals.users },
+                { label: 'Verified', value: overview?.totals.verified },
+                { label: 'Pro', value: overview?.totals.pro },
+                { label: 'Videos analyzed', value: overview?.totals.videosAnalyzed },
+                { label: 'Active (7d)', value: overview?.totals.activeLast7d },
+              ].map((stat) => (
+                <Card key={stat.label}>
+                  <CardContent className="p-4">
+                    <div className="text-2xl font-bold tabular-nums">{stat.value ?? '—'}</div>
+                    <div className="text-xs text-muted-foreground">{stat.label}</div>
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
+            <Card>
+              <CardHeader>
+                <CardTitle>Users</CardTitle>
+                <CardDescription>Every account, newest first — tier and successful AI video analyses.</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Email</TableHead>
+                      <TableHead>Role</TableHead>
+                      <TableHead>Tier</TableHead>
+                      <TableHead>Verified</TableHead>
+                      <TableHead className="text-right">Videos</TableHead>
+                      <TableHead>Last analysis</TableHead>
+                      <TableHead>Joined</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {(overview?.users || []).map((u) => (
+                      <TableRow key={u.id}>
+                        <TableCell>{u.email}</TableCell>
+                        <TableCell>
+                          <Badge variant={u.role === 'shogun' ? 'default' : 'secondary'}>{u.role}</Badge>
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant={u.is_pro ? 'default' : 'outline'}>{u.is_pro ? 'Pro' : 'Free'}</Badge>
+                        </TableCell>
+                        <TableCell>{u.email_verified_at ? 'Yes' : 'No'}</TableCell>
+                        <TableCell className="text-right tabular-nums">{u.videos_analyzed}</TableCell>
+                        <TableCell className="text-muted-foreground">
+                          {u.last_analysis_at ? new Date(u.last_analysis_at).toLocaleDateString() : '—'}
+                        </TableCell>
+                        <TableCell className="text-muted-foreground">
+                          {u.created_at ? new Date(u.created_at).toLocaleDateString() : '—'}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+                {!overview && <div className="py-4 text-sm text-muted-foreground">Loading stats…</div>}
+              </CardContent>
+            </Card>
+          </TabsContent>
 
           <TabsContent value="limits">
             <div className="grid gap-4 md:grid-cols-2">
