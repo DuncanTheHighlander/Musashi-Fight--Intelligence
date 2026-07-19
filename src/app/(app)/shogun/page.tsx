@@ -398,6 +398,34 @@ export default function ShogunPage() {
           </div>
         </div>
 
+        {/* Admin destinations — every admin tool reachable from this hub. */}
+        <div className="mb-6 grid grid-cols-1 gap-3 sm:grid-cols-3">
+          <Button asChild variant="outline" className="h-auto justify-start px-4 py-3">
+            <Link href="/review">
+              <span className="flex flex-col items-start text-left">
+                <span className="font-medium">AI Review &amp; Labeling</span>
+                <span className="text-xs text-muted-foreground">Correct the coach, label clips, build training data</span>
+              </span>
+            </Link>
+          </Button>
+          <Button asChild variant="outline" className="h-auto justify-start px-4 py-3">
+            <Link href="/admin/reports">
+              <span className="flex flex-col items-start text-left">
+                <span className="font-medium">Content Reports</span>
+                <span className="text-xs text-muted-foreground">User-reported content moderation queue</span>
+              </span>
+            </Link>
+          </Button>
+          <Button asChild variant="outline" className="h-auto justify-start px-4 py-3">
+            <Link href="/library">
+              <span className="flex flex-col items-start text-left">
+                <span className="font-medium">Knowledge Review</span>
+                <span className="text-xs text-muted-foreground">Approve user-submitted library documents</span>
+              </span>
+            </Link>
+          </Button>
+        </div>
+
         {error && <div className="mb-4 text-sm text-destructive">{error}</div>}
 
         <Tabs defaultValue="limits">
