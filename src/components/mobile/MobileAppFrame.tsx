@@ -24,7 +24,7 @@ export function MobileAppFrame({ children }: { children: React.ReactNode }) {
   const initials = source.slice(0, 2).toUpperCase()
 
   return (
-    <MobileShell userInitials={initials}>
+    <MobileShell userInitials={initials} isAdmin={user?.role === 'shogun'}>
       <ProfileCompletionBanner />
       {children}
     </MobileShell>
