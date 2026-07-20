@@ -52,7 +52,7 @@ export async function parseApiResponse<T = any>(res: Response): Promise<T> {
   return parseApiResponseText<T>(res, text)
 }
 
-export type ApiGuardStatus = 401 | 402 | 429 | 503
+export type ApiGuardStatus = 401 | 402 | 403 | 429 | 503
 
 export type ApiGuardBody = {
   code?: string
@@ -64,7 +64,7 @@ export type ParsedFetchResult<T> =
   | { kind: 'ok'; status: number; data: T }
   | { kind: 'guard'; status: ApiGuardStatus; body: ApiGuardBody | null; retryAfter?: number }
 
-const GUARD_STATUSES = new Set<number>([401, 402, 429, 503])
+const GUARD_STATUSES = new Set<number>([401, 402, 403, 429, 503])
 
 /**
  * Fetch + parse in one pass. Safe to share via dedupeInflight — concurrent

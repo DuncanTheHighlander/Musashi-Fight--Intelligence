@@ -14,6 +14,8 @@ export type CoachingQuotaState =
   | { kind: 'rate_limited'; retryAfterSec?: number }
   | { kind: 'quota_exhausted' }
   | { kind: 'kill_switch'; hint?: string }
+  | { kind: 'consent_required'; hint?: string }
+  | { kind: 'email_not_verified'; hint?: string }
 
 export type CoachingPanelProps = Readonly<{
   payload: CoachingPayload | null
@@ -69,6 +71,24 @@ function QuotaStateCard({ state }: { state: CoachingQuotaState }) {
           ? state.hint
           : 'An admin has paused live AI calls. The CV pipeline and overlays still work — coaching will return shortly.',
       cta: null as null | { href: string; label: string },
+      accent: 'amber',
+    },
+    consent_required: {
+      title: 'AI consent required',
+      body:
+        state.kind === 'consent_required' && state.hint
+          ? state.hint
+          : 'You must agree that your footage may be used to improve Musashi AI coaching before analysis is available.',
+      cta: { href: '/onboarding', label: 'Review and agree' } as { href: string; label: string },
+      accent: 'amber',
+    },
+    email_not_verified: {
+      title: 'Verify your email',
+      body:
+        state.kind === 'email_not_verified' && state.hint
+          ? state.hint
+          : 'Confirm your email address before using AI coaching. Open Profile to resend the verification link.',
+      cta: { href: '/welcome', label: 'Open account' } as { href: string; label: string },
       accent: 'amber',
     },
   } as const

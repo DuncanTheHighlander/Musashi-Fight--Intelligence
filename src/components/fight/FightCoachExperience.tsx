@@ -221,6 +221,8 @@ type AiQuotaState =
   | { kind: 'rate_limited'; retryAfterSec?: number }
   | { kind: 'quota_exhausted' }
   | { kind: 'kill_switch'; hint?: string }
+  | { kind: 'consent_required'; hint?: string }
+  | { kind: 'email_not_verified'; hint?: string }
 
 const EMPTY_PLAYBACK_SNAPSHOT: PlaybackSnapshot = {
   currentTime: 0,
@@ -1982,7 +1984,11 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
         if (result.status === 401) setAiQuotaState({ kind: 'auth' })
         else if (result.status === 402) setAiQuotaState({ kind: 'quota_exhausted' })
         else if (result.status === 429) setAiQuotaState({ kind: 'rate_limited', retryAfterSec: result.retryAfter })
-        else if (result.status === 503 && guardBody?.code === 'AI_KILL_SWITCH') {
+        else if (result.status === 403 && guardBody?.code === 'CONSENT_REQUIRED') {
+          setAiQuotaState({ kind: 'consent_required', hint: guardBody.hint })
+        } else if (result.status === 403 && guardBody?.code === 'EMAIL_NOT_VERIFIED') {
+          setAiQuotaState({ kind: 'email_not_verified', hint: guardBody.hint })
+        } else if (result.status === 503 && guardBody?.code === 'AI_KILL_SWITCH') {
           setAiQuotaState({ kind: 'kill_switch', hint: guardBody.hint })
         }
         return false
@@ -2705,6 +2711,34 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
 
       if (!res.ok) {
         const errData = await res.json().catch(() => ({ error: `Server error ${res.status}` })) as { error?: string; code?: string; hint?: string }
+        if (res.status === 403 && errData.code === 'CONSENT_REQUIRED') {
+          const statusMessage =
+            errData.hint || 'You must accept AI coaching consent before analyzing clips.'
+          nativeUploadErrorRef.current = statusMessage
+          setIngestionStage('failed')
+          setInitialAnalysisStatus(statusMessage)
+          setAiQuotaState({ kind: 'consent_required', hint: errData.hint })
+          toast({
+            title: 'AI consent required',
+            description: statusMessage,
+            variant: 'destructive',
+          })
+          return null
+        }
+        if (res.status === 403 && errData.code === 'EMAIL_NOT_VERIFIED') {
+          const statusMessage =
+            errData.hint || 'Verify your email before using AI coaching.'
+          nativeUploadErrorRef.current = statusMessage
+          setIngestionStage('failed')
+          setInitialAnalysisStatus(statusMessage)
+          setAiQuotaState({ kind: 'email_not_verified', hint: errData.hint })
+          toast({
+            title: 'Email verification required',
+            description: statusMessage,
+            variant: 'destructive',
+          })
+          return null
+        }
         if (res.status === 402 && (errData.code === 'FREE_VIDEO_QUOTA' || errData.code === 'WEEKLY_VIDEO_QUOTA')) {
           const isFree = errData.code === 'FREE_VIDEO_QUOTA'
           const statusMessage = isFree
