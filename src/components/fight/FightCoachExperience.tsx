@@ -78,7 +78,7 @@ import {
   SHOGUN_MAX_VIDEO_SEC,
   VIDEO_DURATION_TOLERANCE_SEC,
 } from '@/lib/videoTierLimits'
-import { clipWindowDurationSec } from '@/lib/gemini/videoFilePart'
+import { clipWindowDurationSec, geminiVideoFpsForSport } from '@/lib/gemini/videoFilePart'
 import type {
   PoseFrame as FightLangPoseFrame,
   PoseLandmark as FightLangPoseLandmark,
@@ -957,6 +957,14 @@ export default function FightCoachExperience({
   const nativeUploadAbortRef = useRef<AbortController | null>(null)
   const [geminiFileUri, setGeminiFileUri] = useState<string | null>(null)
   const geminiFileUriRef = useRef<string | null>(null)
+  /** Normalized R2 asset for the inline-bytes fast path (<20MB, no Files ACTIVE wait). */
+  const normalizedAssetIdRef = useRef<string | null>(null)
+  const [normalizedAssetId, setNormalizedAssetId] = useState<string | null>(null)
+  /**
+   * All-at-once reveal: Play + Coach Cards + 👍/👎 unlock together when AI finishes.
+   * Do not set true until parallel initial analysis + Coach Cards resolve.
+   */
+  const [coachReady, setCoachReady] = useState(false)
   /** Prevents vision-first upload effect from retry-spamming after a failure. */
   const visionUploadAttemptedRef = useRef(false)
   /** Always points at the latest uploadVideoForNativeAnalysis (defined later in this component). */
@@ -1379,6 +1387,9 @@ export default function FightCoachExperience({
     setClipStorageStatus('idle')
     setGeminiFileUri(null)
     geminiFileUriRef.current = null
+    setNormalizedAssetId(null)
+    normalizedAssetIdRef.current = null
+    setCoachReady(false)
     visionUploadAttemptedRef.current = false
     if (videoObjectUrlRef.current) {
       try { URL.revokeObjectURL(videoObjectUrlRef.current) } catch { void 0 }
@@ -1813,8 +1824,10 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
       })
 
       // Vision-first / grappling Coach Cards need the actual video — skeleton has no hands.
-      // Upload once so analyze can forward videoFileUri (shared across cards + chat).
-      if ((visionFirst || grappling) && videoFileRef.current && !geminiFileUriRef.current) {
+      // Upload once so analyze can forward videoFileUri or normalizedAssetId (inline path).
+      const hasTape =
+        Boolean(geminiFileUriRef.current) || Boolean(normalizedAssetIdRef.current)
+      if ((visionFirst || grappling) && videoFileRef.current && !hasTape) {
         try {
           visionUploadAttemptedRef.current = true
           await uploadVideoForNativeAnalysisRef.current(undefined, { silentToast: !visionFirst })
@@ -1831,12 +1844,14 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
         }
       }
 
-      const visionFirstTape = visionFirst && Boolean(geminiFileUriRef.current)
+      const tapeAttached =
+        Boolean(geminiFileUriRef.current) || Boolean(normalizedAssetIdRef.current)
+      const visionFirstTape = visionFirst && tapeAttached
 
       // Pose gate: striking still needs frames. Vision-first with tape attached may proceed empty.
       if (!visionFirstTape && slice.length < 4) return false
 
-      if (visionFirst && !geminiFileUriRef.current) {
+      if (visionFirst && !tapeAttached) {
         toast({
           title: 'Preparing tape…',
           description: 'Wait for upload to finish, then hit Analyze again.',
@@ -1915,7 +1930,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
         focusTarget,
         selectedSportRef.current,
         selectedClipTypeRef.current,
-        geminiFileUriRef.current ?? '',
+        geminiFileUriRef.current ?? normalizedAssetIdRef.current ?? '',
         temporalBurst?.centerMs ?? '',
       ])}`
 
@@ -1943,11 +1958,6 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
             llm: { enabled: true },
             // Sport + clip context route the coach-brain sport file and context notes server-side.
             ...currentFightClipAiMetadata(),
-            // Which engine ACTUALLY produced the dense track feeding the ledger
-            // (reported by FightAnalyzer.onDenseTrackReady): rtmpose-cloud is
-            // the primary for uploads, mediapipe-local the preview/fallback.
-            // The coach brain converts this into caution wording. Before the
-            // deep track is ready, fall back to the live-path heuristic.
             pose: visionFirstTape
               ? { engine: 'vision-first', quality: 'video' }
               : poseEngineInfoRef.current
@@ -1967,13 +1977,18 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
             ...(geminiFileUriRef.current
               ? {
                   videoFileUri: geminiFileUriRef.current,
-                  // Gemini always receives the normalized H.264/AAC asset,
-                  // even when the phone source was a HEVC .mov.
                   videoMimeType: 'video/mp4',
                   startSec: analysisWindowRef.current.startSec,
                   endSec: analysisWindowRef.current.endSec,
                 }
-              : {}),
+              : normalizedAssetIdRef.current
+                ? {
+                    normalizedAssetId: normalizedAssetIdRef.current,
+                    videoMimeType: 'video/mp4',
+                    startSec: analysisWindowRef.current.startSec,
+                    endSec: analysisWindowRef.current.endSec,
+                  }
+                : {}),
           }),
         })
       )
@@ -2229,14 +2244,14 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
             // must say so instead of inventing clip content.
             evidence: {
               clipLoaded: Boolean(videoUrl),
-              videoAttached: Boolean(geminiFileUriRef.current),
+              videoAttached: Boolean(geminiFileUriRef.current || normalizedAssetIdRef.current),
               poseFrames: fightLangPoseFramesRef.current.length,
               ledgerEvents: Array.isArray((compiledLedger as { events?: unknown[] } | null)?.events)
                 ? ((compiledLedger as { events?: unknown[] }).events as unknown[]).length
                 : 0,
               playbackStarted: playbackUnlocked,
             },
-            nativeVideo: Boolean(geminiFileUriRef.current),
+            nativeVideo: Boolean(geminiFileUriRef.current || normalizedAssetIdRef.current),
             ...(geminiFileUriRef.current ? {
               videoFileUri: geminiFileUriRef.current,
               videoMimeType: 'video/mp4',
@@ -2244,7 +2259,15 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
               startSec: analysisWindowRef.current.startSec,
               endSec: analysisWindowRef.current.endSec,
               videoAnalysisSessionId: videoAnalysisSessionIdRef.current,
-              requestedFPS: 5,
+              requestedFPS: geminiVideoFpsForSport(selectedSportRef.current),
+            } : normalizedAssetIdRef.current ? {
+              normalizedAssetId: normalizedAssetIdRef.current,
+              videoMimeType: 'video/mp4',
+              clipDuration: selectedWindowDurationSec(),
+              startSec: analysisWindowRef.current.startSec,
+              endSec: analysisWindowRef.current.endSec,
+              videoAnalysisSessionId: videoAnalysisSessionIdRef.current,
+              requestedFPS: geminiVideoFpsForSport(selectedSportRef.current),
             } : {}),
             kinematics: kinematicsContext,
             analysis: {
@@ -2764,31 +2787,41 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
       }
 
       const data = await res.json() as {
-        fileUri?: string
+        fileUri?: string | null
         credits?: VideoCreditBalance
         effectiveDurationSec?: number
         normalizedAssetId?: string
+        inlineEligible?: boolean
+        ready?: boolean
       }
-      const fileUri = data.fileUri
+      const fileUri = data.fileUri || null
+      const normId = data.normalizedAssetId ? String(data.normalizedAssetId) : null
+      if (normId) {
+        normalizedAssetIdRef.current = normId
+        setNormalizedAssetId(normId)
+      }
 
-      if (!fileUri) {
+      // Inline path: ready without a Files API URI. Files path: require fileUri.
+      if (!fileUri && !(data.inlineEligible && normId)) {
         throw new Error('No file URI returned from server')
       }
 
-      setGeminiFileUri(fileUri)
-      geminiFileUriRef.current = fileUri
+      if (fileUri) {
+        setGeminiFileUri(fileUri)
+        geminiFileUriRef.current = fileUri
+      }
       const effectiveDurationSec = Number(data.effectiveDurationSec)
       if (Number.isFinite(effectiveDurationSec) && effectiveDurationSec > 0) {
         applyAnalysisWindow(0, effectiveDurationSec)
         setClipDurationSec(effectiveDurationSec)
       }
-      if (data.normalizedAssetId && videoFileRef.current === sourceFile) {
+      if (normId && videoFileRef.current === sourceFile) {
         // The server-normalized H.264/AAC asset is the playback source too.
         // This replaces an undecodable HEVC/VFR phone preview without ever
         // asking the browser to seek, canvas-render, or re-encode the file.
         const objectUrl = videoObjectUrlRef.current
         videoObjectUrlRef.current = null
-        setVideoUrl(`/api/uploads/${encodeURIComponent(data.normalizedAssetId)}/content`)
+        setVideoUrl(`/api/uploads/${encodeURIComponent(normId)}/content`)
         if (objectUrl) {
           try { URL.revokeObjectURL(objectUrl) } catch { void 0 }
         }
@@ -2797,17 +2830,23 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
       else void refreshVideoCredits()
       setUploadProgress(100)
       setIngestionStage('gemini_ready')
-      setInitialAnalysisStatus('Video ready. Starting full analysis...')
+      setInitialAnalysisStatus(
+        data.inlineEligible
+          ? 'Clip ready (fast path). Starting full analysis...'
+          : 'Video ready. Starting full analysis...',
+      )
 
       if (!silentToast) {
         toast({
           title: 'Video ready',
-          description: 'Video processed and ready for AI analysis'
+          description: data.inlineEligible
+            ? 'Small clip ready for instant AI analysis'
+            : 'Video processed and ready for AI analysis',
         })
       }
 
-      // Can now use fileUri in strategy endpoint
-      return fileUri
+      // Prefer Files URI when present; otherwise return a stable inline handle.
+      return fileUri || (normId ? `inline:${normId}` : null)
 
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown upload error'
@@ -2837,6 +2876,9 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
     setInitialAnalysisStatus('Quick scan — identifying fighters and key moments...')
 
     try {
+      const isInlineHandle = fileUri.startsWith('inline:')
+      const inlineAssetId = isInlineHandle ? fileUri.slice('inline:'.length) : null
+      const sportFps = geminiVideoFpsForSport(selectedSportRef.current)
       const response = await fetch('/api/fight', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -2848,13 +2890,18 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
             ...currentFightClipAiMetadata(),
             nativeVideo: true,
             initialVideoAnalysis: true,
-            videoFileUri: fileUri,
+            ...(isInlineHandle
+              ? { normalizedAssetId: inlineAssetId || normalizedAssetIdRef.current }
+              : { videoFileUri: fileUri }),
+            ...(normalizedAssetIdRef.current && !isInlineHandle
+              ? { normalizedAssetId: normalizedAssetIdRef.current }
+              : {}),
             videoMimeType: 'video/mp4',
             clipDuration: selectedWindowDurationSec(),
             startSec: analysisWindowRef.current.startSec,
             endSec: analysisWindowRef.current.endSec,
             videoAnalysisSessionId: videoAnalysisSessionIdRef.current,
-            requestedFPS: 5,
+            requestedFPS: sportFps,
             focusTarget,
           }
         })
@@ -2898,7 +2945,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
   const prepareClipForFullAnalysis = async (fileOverride?: File) => {
     const sourceFile = fileOverride ?? videoFile
     if (!sourceFile) return
-    if (!geminiFileUri && videoCredits && videoCredits.remaining <= 0) {
+    if (!geminiFileUri && !normalizedAssetId && videoCredits && videoCredits.remaining <= 0) {
       if (videoCredits.tier === 'free') {
         setUpgradeDialogOpen(true)
       } else {
@@ -2911,15 +2958,24 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
       return
     }
 
-    const fileUri = fileOverride ? await uploadVideoForNativeAnalysis(sourceFile) : (geminiFileUri || await uploadVideoForNativeAnalysis())
+    const existingHandle =
+      geminiFileUri ||
+      (normalizedAssetId ? `inline:${normalizedAssetId}` : null)
+    const fileUri = fileOverride
+      ? await uploadVideoForNativeAnalysis(sourceFile)
+      : (existingHandle || await uploadVideoForNativeAnalysis())
     if (!fileUri) return
 
-    const [initialOk, streamOk] = await Promise.all([
+    setCoachReady(false)
+    const [initialOk, coachCardsReady] = await Promise.all([
       runInitialClipAnalysis(fileUri, sourceFile),
-      runStreamingAnalysis(fileUri, sourceFile),
+      analyzeFightLangWindow({ mode: 'full' }),
     ])
-    setInitialAnalysisReady(initialOk || streamOk)
-    if (!initialOk && !streamOk) {
+    if (coachCardsReady || initialOk) {
+      setCoachReady(true)
+      setInitialAnalysisReady(true)
+      setBootPipelineReady(true)
+    } else {
       setInitialAnalysisStatus('Analysis did not complete. Retry Full Clip Analysis.')
     }
   }
@@ -2948,12 +3004,11 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
     try {
       const visionFirstBoot = isVisionFirstSport(selectedSportRef.current)
       if (visionFirstBoot) {
-        // BJJ/wrestling/judo do not depend on browser decode of the original
-        // phone clip. Send the R2 asset to the server normalizer first, then
-        // attach the resulting H.264/AAC tape before any player or AI work.
+        // BJJ/wrestling/judo: upload small artifact → parallel AI → all-at-once reveal.
         clipAnalysisPipelineStartedRef.current = true
         visionUploadAttemptedRef.current = true
-        setBootPipelineMessage('Uploading original video for your coach…')
+        setCoachReady(false)
+        setBootPipelineMessage('Preparing your coach…')
         const fileUri = await uploadVideoForNativeAnalysisRef.current?.(file, { silentToast: true })
         if (!fileUri) {
           visionUploadAttemptedRef.current = false
@@ -2961,7 +3016,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
         }
         if (!stillThisClip()) return
 
-        setBootPipelineMessage('Loading the normalized video…')
+        setBootPipelineMessage('Preparing your coach…')
         const normalizedDeadline = Date.now() + 45_000
         let normalizedVideo: HTMLVideoElement | null = null
         while (Date.now() < normalizedDeadline) {
@@ -2992,19 +3047,16 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
         }
 
         setIngestionStage('analyzing')
-        setBootPipelineMessage('Deep review — finding positions and key moments…')
-        const [initialOk, streamOk] = await Promise.all([
+        setBootPipelineMessage('Preparing your coach…')
+        // Parallel: initial clip analysis + deep Coach Cards — unlock only when both settle.
+        const [initialOk, coachCardsReady] = await Promise.all([
           runInitialClipAnalysis(fileUri, file),
-          runStreamingAnalysis(fileUri, file),
+          analyzeFightLangWindow({ mode: 'full' }),
         ])
         if (!stillThisClip()) return
-        if (!initialOk && !streamOk) {
-          throw new Error('The tape uploaded, but the first coaching analysis did not complete. Retry analysis.')
+        if (!initialOk && !coachCardsReady) {
+          throw new Error('The tape uploaded, but coaching analysis did not complete. Retry analysis.')
         }
-
-        setBootPipelineMessage('Building Coach Cards…')
-        const coachCardsReady = await analyzeFightLangWindow({ mode: 'full' })
-        if (!stillThisClip()) return
         if (!coachCardsReady) {
           throw new Error('The tape was reviewed, but Coach Cards were not returned. Retry analysis.')
         }
@@ -3012,12 +3064,13 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
         try { videoRef.current?.pause() } catch { void 0 }
         setInitialAnalysisReady(true)
         setIngestionStage('complete')
+        setCoachReady(true)
         setBootPipelineReady(true)
         setBootPipelineMessage('')
-        setBootVerificationSummary('Tape reviewed and Coach Cards prepared before playback.')
+        setBootVerificationSummary('Coach Cards prepared — Play unlocks with cards and ratings together.')
         toast({
           title: 'Ready — click play',
-          description: 'Your tape review and first Coach Cards are ready.',
+          description: 'Your coach is ready. Play, Coach Cards, and ratings unlock together.',
         })
         void persistClipSession(file, localSessionIdRef.current || `local-${Date.now()}`)
         return false
@@ -3184,16 +3237,53 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
       if (!ver.ok) {
         console.warn('[boot] verification failed', ver.warnings)
       }
-      // Final sanity gate: pause the element one last time, keep playback LOCKED.
-      // The user must click the explicit ▶ Play button in the overlay to unlock —
-      // only then does applyPlaybackLock(true) fire. This prevents the prior auto-play bug.
+      // Final sanity gate: pause the element. Keep playback LOCKED until AI finishes
+      // (All-at-once UX: Play + Coach Cards + 👍/👎 unlock together).
       try { videoRef.current?.pause() } catch { void 0 }
+
+      setCoachReady(false)
+      setBootPipelineMessage('Preparing your coach…')
+      setIngestionStage('analyzing')
+      clipAnalysisPipelineStartedRef.current = true
+      const tapeHandle = await uploadVideoForNativeAnalysisRef.current?.(file, { silentToast: true })
+      if (!tapeHandle) {
+        throw new Error(nativeUploadErrorRef.current || 'Could not prepare the clip for AI coaching.')
+      }
+      if (!stillThisClip()) return
+
+      // Striking Coach Cards need a few pose frames; wait after pre-scan.
+      const poseDeadline = Date.now() + 30_000
+      while (fightLangPoseFramesRef.current.length < 4 && Date.now() < poseDeadline && stillThisClip()) {
+        setBootPipelineMessage('Preparing your coach…')
+        await sleep(250)
+      }
+      if (!stillThisClip()) return
+      if (fightLangPoseFramesRef.current.length < 4) {
+        throw new Error('Pose mapping did not produce enough frames for Coach Cards. Retry analysis or pick a clearer clip.')
+      }
+
+      setBootPipelineMessage('Preparing your coach…')
+      const [initialOk, coachCardsReady] = await Promise.all([
+        runInitialClipAnalysis(tapeHandle, file),
+        analyzeFightLangWindow({ mode: 'full' }),
+      ])
+      if (!stillThisClip()) return
+      if (!coachCardsReady && !initialOk) {
+        throw new Error('Coaching analysis did not complete. Retry analysis.')
+      }
+      if (!coachCardsReady) {
+        throw new Error('Coach Cards were not returned. Retry analysis.')
+      }
+
+      setInitialAnalysisReady(true)
+      setIngestionStage('complete')
+      setCoachReady(true)
       setBootPipelineReady(true)
       setBootPipelineMessage('')
 
       const toastDesc = [
-        `Pre-scan (${BOOT_PIPELINE_PASSES} passes).`,
         ver.summary,
+        'Play, Coach Cards, and ratings unlock together.',
         ver.warnings[0],
       ]
         .filter(Boolean)
@@ -3214,6 +3304,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
       // Error path: keep playback LOCKED so the video never plays while systems are in a broken state.
       // The user can click "New Video" to retry or use the explicit retry button in the overlay.
       applyPlaybackLock(false)
+      setCoachReady(false)
       setBootPipelineReady(false)
       setBootPipelineMessage(
         e instanceof Error ? `Setup failed: ${e.message}` : 'Setup failed - pick a new clip to retry.'
@@ -3997,7 +4088,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
 
   const visionAnalyzeCtaLabel =
     resolveSportKey(selectedSport) === 'bjj_grappling' ? 'Analyze this roll' : 'Analyze this match'
-  const visionTapeReady = Boolean(geminiFileUri)
+  const visionTapeReady = Boolean(geminiFileUri || normalizedAssetId)
   // Keep clickable when tape isn't ready so a failed upload can be retried via Analyze.
   const visionAnalyzeDisabled = !videoFile || uploadingVideo || fightLangLoading
   const ingestionStageLabel: Record<VideoIngestionStage, string> = {
@@ -4196,7 +4287,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                 </Button>
               )}
               {videoUrl ? (
-                <Button size="sm" variant="outline" onClick={() => { pendingBootFileRef.current = null; setVideoUrl(null); setVideoFile(null); videoFileRef.current = null; geminiFileUriRef.current = null; setGeminiFileUri(null); setMessages([]); setFightLangCoaching(null); setAiQuotaState(null); setFightLangOverlayAnnotations(null); setCompiledLedger(null); setInitialAnalysisReady(false); setStreamAnalysisPhase('idle'); setStreamAnalysisText(''); setAutoRetrieval(null); setStreamEvidenceLedger(null); applyPlaybackLock(false); setBootPipelineReady(false); setBootPipelineMessage(''); setClipLoadSource('none'); clipLoadSourceRef.current = 'none'; }}>
+                <Button size="sm" variant="outline" onClick={() => { pendingBootFileRef.current = null; setVideoUrl(null); setVideoFile(null); videoFileRef.current = null; geminiFileUriRef.current = null; setGeminiFileUri(null); normalizedAssetIdRef.current = null; setNormalizedAssetId(null); setCoachReady(false); setMessages([]); setFightLangCoaching(null); setAiQuotaState(null); setFightLangOverlayAnnotations(null); setCompiledLedger(null); setInitialAnalysisReady(false); setStreamAnalysisPhase('idle'); setStreamAnalysisText(''); setAutoRetrieval(null); setStreamEvidenceLedger(null); applyPlaybackLock(false); setBootPipelineReady(false); setBootPipelineMessage(''); setClipLoadSource('none'); clipLoadSourceRef.current = 'none'; }}>
                   New Video
                 </Button>
               ) : (
@@ -4391,7 +4482,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                         playbackUnlocked && 'bg-emerald-500/15 text-emerald-200',
                       )}
                     >
-                      {!bootPipelineReady ? (
+                      {!bootPipelineReady || !coachReady ? (
                         <>
                           <Loader2 className="mr-1.5 h-3 w-3 animate-spin" aria-hidden />
                           Preparing
@@ -4582,25 +4673,25 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                     <div
                       className="absolute inset-0 z-[60] flex flex-col items-center justify-center gap-5 bg-black px-6 text-center"
                       style={{ pointerEvents: 'auto' }}
-                      onClick={(e) => { if (!bootPipelineReady) { e.preventDefault(); e.stopPropagation() } }}
-                      onMouseDown={(e) => { if (!bootPipelineReady) { e.preventDefault(); e.stopPropagation() } }}
-                      onKeyDown={(e) => { if (!bootPipelineReady) { e.preventDefault(); e.stopPropagation() } }}
+                      onClick={(e) => { if (!bootPipelineReady || !coachReady) { e.preventDefault(); e.stopPropagation() } }}
+                      onMouseDown={(e) => { if (!bootPipelineReady || !coachReady) { e.preventDefault(); e.stopPropagation() } }}
+                      onKeyDown={(e) => { if (!bootPipelineReady || !coachReady) { e.preventDefault(); e.stopPropagation() } }}
                     >
-                      {!bootPipelineReady ? (
+                      {!bootPipelineReady || !coachReady ? (
                         <>
                           {bootPipelineFailed
                             ? <AlertTriangle className="h-10 w-10 text-amber-400" />
                             : <Loader2 className="h-10 w-10 animate-spin text-primary" />}
                           <p className="font-display text-lg tracking-wide text-white">
-                            {clipLoadSource === 'restored' ? 'Restoring your last clip' : 'Preparing your clip'}
+                            {clipLoadSource === 'restored' ? 'Restoring your last clip' : 'Preparing your coach…'}
                           </p>
-                          <p className="max-w-xs text-sm text-white/75">{bootPipelineMessage || 'Starting…'}</p>
+                          <p className="max-w-xs text-sm text-white/75">{bootPipelineMessage || 'Preparing your coach…'}</p>
                           <div className="flex flex-wrap items-center justify-center gap-2 text-[10px] font-semibold uppercase tracking-wide">
                             {(['buffering', 'prescanning', 'ready'] as const).map((step) => {
                               const labels = {
                                 buffering: visionFirstActive ? '1 · Upload tape' : '1 · Buffer',
                                 prescanning: visionFirstActive ? '2 · Review tape' : `2 · Pre-scan ${preScanLabel}`,
-                                ready: visionFirstActive ? '3 · Coach Cards' : '3 · Ready',
+                                ready: '3 · Preparing coach',
                               } as const
                               const active =
                                 clipPipelineStep === step ||
@@ -5006,6 +5097,9 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                       videoFileRef.current = null
                       geminiFileUriRef.current = null
                       setGeminiFileUri(null)
+                      normalizedAssetIdRef.current = null
+                      setNormalizedAssetId(null)
+                      setCoachReady(false)
                       setMessages([])
                       setFightLangCoaching(null)
                       setFightLangOverlayAnnotations(null)
@@ -5030,25 +5124,25 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                 <Button size="sm" variant={reflexOn ? 'default' : 'ghost'} className="h-8 text-xs" onClick={() => setReflexOn((r) => !r)}>
                   {reflexOn ? 'Reflex ON' : 'Reflex'}
                 </Button>
-                {kinematicsUi?.range && (
+                {kinematicsUi?.range && !visionFirstActive && (
                   <span className="text-[11px] text-muted-foreground ml-auto">Range: {kinematicsUi.range.band}</span>
                 )}
               </div>
 
-              {/* AI Coaching Panel */}
+              {/* AI Coaching Panel — all-at-once: cards + ratings only after coachReady */}
               <div>
-                {fightLangLoading && (
+                {!coachReady && videoUrl && (fightLangLoading || uploadingVideo || initialAnalysisLoading || !bootPipelineReady) && (
                   <div className="mb-3 flex items-center gap-2 rounded-xl border border-cyan-500/30 bg-cyan-950/40 px-4 py-3">
                     <Loader2 className="h-4 w-4 animate-spin text-cyan-400" />
-                    <span className="text-sm font-medium text-cyan-100">AI analyzing your clip…</span>
+                    <span className="text-sm font-medium text-cyan-100">Preparing your coach…</span>
                   </div>
                 )}
                 <CoachingPanel
-                  payload={fightLangCoaching}
-                  llmIssues={fightLangLlmIssues ?? undefined}
-                  overlayCount={fightLangOverlayAnnotations?.length ?? 0}
+                  payload={coachReady ? fightLangCoaching : null}
+                  llmIssues={coachReady ? (fightLangLlmIssues ?? undefined) : undefined}
+                  overlayCount={coachReady ? (fightLangOverlayAnnotations?.length ?? 0) : 0}
                   quotaState={aiQuotaState}
-                  ratingContext={fightLangRatingContext}
+                  ratingContext={coachReady ? fightLangRatingContext : null}
                   clipDurationMs={
                     (() => {
                       const winMs = Math.round(selectedWindowDurationSec() * 1000)
@@ -5059,8 +5153,8 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                 />
               </div>
 
-              {/* Pipeline Stats (compact) */}
-              {pipelineStats && (
+              {/* Pipeline Stats (compact) — hide empty striking counters for vision-first */}
+              {pipelineStats && !visionFirstActive && (
                 <div className="rounded-xl border border-border/40 bg-card/30 p-3 text-[11px] text-muted-foreground">
                   <div className="grid grid-cols-2 gap-2">
                     <div><span className="font-medium text-foreground">Frames:</span> {pipelineStats.poseFrames}</div>
@@ -5125,7 +5219,9 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                       <div className="font-medium text-foreground">Skeleton</div>
                       <label className="flex items-center gap-2"><input type="checkbox" checked={skeletonVisible.A} onChange={(e) => setSkeletonVisible((p) => ({ ...p, A: e.target.checked }))} /><span className="inline-block h-2 w-2 rounded-full bg-blue-500" />Blue corner</label>
                       <label className="flex items-center gap-2"><input type="checkbox" checked={skeletonVisible.B} onChange={(e) => setSkeletonVisible((p) => ({ ...p, B: e.target.checked }))} /><span className="inline-block h-2 w-2 rounded-full bg-red-500" />Red corner</label>
-                      <label className="flex items-center gap-2"><input type="checkbox" checked={kinematicsHudOn} onChange={(e) => setKinematicsHudOn(e.target.checked)} />Kinematics HUD</label>
+                      {!visionFirstActive && (
+                        <label className="flex items-center gap-2"><input type="checkbox" checked={kinematicsHudOn} onChange={(e) => setKinematicsHudOn(e.target.checked)} />Kinematics HUD</label>
+                      )}
                       <div className="pt-1">
                         <div className="mb-1 text-[11px] text-muted-foreground">My corner (for coaching POV)</div>
                         <div className="flex gap-2">
@@ -5430,8 +5526,8 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                 </div>
               </div>
 
-              {/* Kinematics HUD */}
-              {kinematicsHudOn && kinematicsUi && (
+              {/* Kinematics HUD — striking only; vision-first sports have empty pose metrics */}
+              {kinematicsHudOn && kinematicsUi && !visionFirstActive && (
                 <div className="rounded-xl border border-border/40 bg-card/30 p-3">
                   <div className="text-xs font-medium mb-2">Kinematics</div>
                   <div className="grid grid-cols-2 gap-2 text-[11px]">

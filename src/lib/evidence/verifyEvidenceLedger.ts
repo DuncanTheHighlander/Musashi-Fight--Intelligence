@@ -20,7 +20,7 @@ import {
   fightLangToVerificationCandidate,
   type SessionEvidenceProvenance,
 } from '@/lib/evidence/sessionEvidence'
-import { buildGeminiVideoFilePart } from '@/lib/gemini/videoFilePart'
+import { buildGeminiVideoFilePart, buildGeminiVideoInlinePart } from '@/lib/gemini/videoFilePart'
 
 function extractJsonObject<T = Record<string, unknown>>(raw: string): T | null {
   const text = raw.trim()
@@ -47,22 +47,34 @@ function hasMeaningfulLedgerData(ledger: FactualLedger | null | undefined): bool
 }
 
 async function flashGenerate(args: {
-  videoFileUri: string
+  videoFileUri?: string
+  videoInlineBase64?: string
   videoMimeType: string
   prompt: string
   useGrapplingSchema?: boolean
   timeoutMs?: number
   startSec?: number | null
   endSec?: number | null
+  sport?: string | null
 }): Promise<FactualLedger | null> {
   const geminiKey = await getServerSecret('GEMINI_API_KEY')
   if (!geminiKey) return null
+  if (!args.videoInlineBase64 && !args.videoFileUri) return null
 
   const model = resolvedModels.flash()
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(geminiKey)}`
 
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), args.timeoutMs ?? 35_000)
+
+  const videoOpts = {
+    window: { startSec: args.startSec, endSec: args.endSec },
+    sport: args.sport,
+    mediaResolution: 'low' as const,
+  }
+  const videoPart = args.videoInlineBase64
+    ? buildGeminiVideoInlinePart(args.videoInlineBase64, args.videoMimeType, videoOpts)
+    : buildGeminiVideoFilePart(args.videoFileUri!, args.videoMimeType, videoOpts)
 
   try {
     const resp = await fetch(url, {
@@ -73,13 +85,7 @@ async function flashGenerate(args: {
         contents: [
           {
             role: 'user',
-            parts: [
-              buildGeminiVideoFilePart(args.videoFileUri, args.videoMimeType, {
-                startSec: args.startSec,
-                endSec: args.endSec,
-              }),
-              { text: args.prompt },
-            ],
+            parts: [videoPart, { text: args.prompt }],
           },
         ],
         generationConfig: {
@@ -110,7 +116,8 @@ async function flashGenerate(args: {
 }
 
 export type BuildVisionLedgerArgs = {
-  videoFileUri: string
+  videoFileUri?: string
+  videoInlineBase64?: string
   videoMimeType?: string
   mode: SessionEvidenceProvenance['mode']
   clipDurationMs?: number
@@ -119,6 +126,7 @@ export type BuildVisionLedgerArgs = {
   poseEvidenceText?: string
   startSec?: number | null
   endSec?: number | null
+  sport?: string | null
 }
 
 /** Flash scan: grappling timeline or striking factual ledger from video. */
@@ -133,10 +141,12 @@ export async function buildVisionLedger(args: BuildVisionLedgerArgs): Promise<Fa
   if (args.mode === 'grappling') {
     let ledger = await flashGenerate({
       videoFileUri: args.videoFileUri,
+      videoInlineBase64: args.videoInlineBase64,
       videoMimeType: mime,
       useGrapplingSchema: true,
       startSec: window.startSec,
       endSec: window.endSec,
+      sport: args.sport,
       prompt: buildGrapplingEvidenceLedgerPrompt({
         clipDuration: args.clipDurationMs,
         focusTarget: args.focusTarget,
@@ -145,10 +155,12 @@ export async function buildVisionLedger(args: BuildVisionLedgerArgs): Promise<Fa
     if (!hasMeaningfulLedgerData(ledger)) {
       ledger = await flashGenerate({
         videoFileUri: args.videoFileUri,
+        videoInlineBase64: args.videoInlineBase64,
         videoMimeType: mime,
         useGrapplingSchema: true,
         startSec: window.startSec,
         endSec: window.endSec,
+        sport: args.sport,
         prompt: buildGrapplingEvidenceLedgerPrompt({
           clipDuration: args.clipDurationMs,
           focusTarget: args.focusTarget,
@@ -166,9 +178,11 @@ export async function buildVisionLedger(args: BuildVisionLedgerArgs): Promise<Fa
 
   return flashGenerate({
     videoFileUri: args.videoFileUri,
+    videoInlineBase64: args.videoInlineBase64,
     videoMimeType: mime,
     startSec: window.startSec,
     endSec: window.endSec,
+    sport: args.sport,
     prompt: buildEvidenceLedgerPrompt({
       clipDuration: clipDurationSec,
       focusTarget: args.focusTarget as 'both' | 'blue' | 'red' | 'A' | 'B' | undefined,
@@ -179,13 +193,15 @@ export async function buildVisionLedger(args: BuildVisionLedgerArgs): Promise<Fa
 
 export type VerifyVisionLedgerArgs = {
   candidate: FactualLedger | null
-  videoFileUri: string
+  videoFileUri?: string
+  videoInlineBase64?: string
   videoMimeType?: string
   mode: SessionEvidenceProvenance['mode']
   clipDurationMs?: number
   poseEvidenceText?: string
   startSec?: number | null
   endSec?: number | null
+  sport?: string | null
 }
 
 /** Re-watch video and correct/remove unsupported ledger entries. */
@@ -208,12 +224,14 @@ export async function verifyVisionLedger(args: VerifyVisionLedgerArgs): Promise<
 
   const verified = await flashGenerate({
     videoFileUri: args.videoFileUri,
+    videoInlineBase64: args.videoInlineBase64,
     videoMimeType: mime,
     useGrapplingSchema: args.mode === 'grappling',
     prompt,
     timeoutMs: 40_000,
     startSec: args.startSec,
     endSec: args.endSec,
+    sport: args.sport,
   })
 
   if (!verified || !hasMeaningfulLedgerData(verified)) {

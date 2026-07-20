@@ -67,6 +67,7 @@ import { resolvedModels } from '@/lib/gemini/models'
 import { getDbOrNull } from '@/lib/db'
 import { getDb } from '@/lib/marketplace/types'
 import {
+  readUploadedAssetBytes,
   readUploadedAssetStream,
   storeNormalizedAnalysisAsset,
 } from '@/lib/storage/assets'
@@ -85,10 +86,19 @@ import {
 } from '@/lib/gemini/reflex-frame'
 import {
   buildGeminiVideoFilePart,
+  buildGeminiVideoInlinePart,
+  geminiVideoFpsForSport,
+  isInlineVideoEligible,
   normalizeClipWindow,
 } from '@/lib/gemini/videoFilePart'
 
 export const maxDuration = 300
+
+const geminiVideoFpsHint = (context: { requestedFPS?: number; discipline?: string; sport?: string } | null | undefined) => {
+  const requested = Number(context?.requestedFPS)
+  if (Number.isFinite(requested) && requested > 0) return requested
+  return geminiVideoFpsForSport(context?.discipline || context?.sport)
+}
 
 const summarizePatternEvidence = (patterns: unknown): string => {
   if (!patterns) return ''
@@ -1174,6 +1184,40 @@ const handleChat = async (body: any, user: any) => {
     throw new Error('Missing messages')
   }
 
+  // Inline-bytes fast path for chat / initial analysis: when the client has a
+  // normalized R2 asset under 20MB (and no Files URI yet), load bytes once and
+  // attach as videoData so the first Coach Cards pass skips ACTIVE polling.
+  if (
+    context?.nativeVideo &&
+    !context.videoFileUri &&
+    !context.videoData &&
+    typeof context.normalizedAssetId === 'string' &&
+    context.normalizedAssetId.trim()
+  ) {
+    try {
+      const db = getDbOrNull()
+      if (db && user?.id) {
+        const asset = await readUploadedAssetBytes(db, {
+          assetId: String(context.normalizedAssetId).trim(),
+          userId: user.id,
+          isAdmin: user.role === 'shogun',
+        })
+        if (isInlineVideoEligible(asset.sizeBytes)) {
+          context.videoData = asset.bytes.toString('base64')
+          context.videoMimeType = asset.contentType || context.videoMimeType || 'video/mp4'
+          logger.info('Chat inline-bytes fast path', {
+            assetId: context.normalizedAssetId,
+            sizeBytes: asset.sizeBytes,
+          })
+        }
+      }
+    } catch (inlineErr) {
+      logger.warn('Chat inline asset load failed', {
+        detail: inlineErr instanceof Error ? inlineErr.message : String(inlineErr),
+      })
+    }
+  }
+
   const userMessages = messages.map((m: any) => ({ role: m.role, content: m.content }))
   const isInitialVideoAnalysisRequest = Boolean(body?.context?.nativeVideo) &&
     userMessages.length === 1 &&
@@ -1470,14 +1514,23 @@ const handleChat = async (body: any, user: any) => {
         const flashUrl = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(flashModel)}:generateContent?key=${encodeURIComponent(geminiKey)}`
         
         const flashParts: any[] = []
+        const chatVideoOpts = {
+          window: { startSec: context.startSec, endSec: context.endSec },
+          sport: context.discipline || context.sport || null,
+          mediaResolution: 'low' as const,
+        }
         if (context.videoFileUri && isValidFileUri(context.videoFileUri)) {
           flashParts.push(buildGeminiVideoFilePart(
             context.videoFileUri,
             context.videoMimeType || 'video/mp4',
-            { startSec: context.startSec, endSec: context.endSec },
+            chatVideoOpts,
           ))
         } else if (context.videoData) {
-          flashParts.push({ inlineData: { mimeType: context.videoMimeType || 'video/mp4', data: context.videoData } })
+          flashParts.push(buildGeminiVideoInlinePart(
+            context.videoData,
+            context.videoMimeType || 'video/mp4',
+            chatVideoOpts,
+          ))
         }
         flashParts.push({ text: useCometStyle ? COMET_FLASH_SCAN_PROMPT : FLASH_SCAN_PROMPT })
 
@@ -1518,10 +1571,14 @@ const handleChat = async (body: any, user: any) => {
           ledgerVideoParts.push(buildGeminiVideoFilePart(
             context.videoFileUri,
             context.videoMimeType || 'video/mp4',
-            { startSec: context.startSec, endSec: context.endSec },
+            chatVideoOpts,
           ))
         } else if (context.videoData) {
-          ledgerVideoParts.push({ inlineData: { mimeType: context.videoMimeType || 'video/mp4', data: context.videoData } })
+          ledgerVideoParts.push(buildGeminiVideoInlinePart(
+            context.videoData,
+            context.videoMimeType || 'video/mp4',
+            chatVideoOpts,
+          ))
         }
         if (ledgerVideoParts.length > 0) {
           const poseEvidenceText = summarizePoseEvidenceForPrompt(context?.poseEvidence)
@@ -1628,10 +1685,14 @@ const handleChat = async (body: any, user: any) => {
           deepParts.push(buildGeminiVideoFilePart(
             context.videoFileUri,
             context.videoMimeType || 'video/mp4',
-            { startSec: context.startSec, endSec: context.endSec },
+            chatVideoOpts,
           ))
         } else if (context.videoData) {
-          deepParts.push({ inlineData: { mimeType: context.videoMimeType || 'video/mp4', data: context.videoData } })
+          deepParts.push(buildGeminiVideoInlinePart(
+            context.videoData,
+            context.videoMimeType || 'video/mp4',
+            chatVideoOpts,
+          ))
         }
         deepParts.push({ text: deepPromptText })
 
@@ -1777,12 +1838,17 @@ const handleChat = async (body: any, user: any) => {
       const firstUserParts: any[] = []
 
       if (context?.nativeVideo && context?.videoFileUri && isValidFileUri(context.videoFileUri)) {
-        const fps = context.requestedFPS || 5
+        const fps = context.requestedFPS || geminiVideoFpsHint(context)
         const window = normalizeClipWindow(context.startSec, context.endSec)
         firstUserParts.push(buildGeminiVideoFilePart(
           context.videoFileUri,
           context.videoMimeType || 'video/mp4',
-          { startSec: context.startSec, endSec: context.endSec },
+          {
+            window: { startSec: context.startSec, endSec: context.endSec },
+            sport: context.discipline || context.sport || null,
+            fps,
+            mediaResolution: 'low',
+          },
         ))
         const windowHint = window
           ? `- Analyzing the selected window ${window.startSec.toFixed(1)}s–${window.endSec.toFixed(1)}s (${(window.endSec - window.startSec).toFixed(1)}s)\n`
@@ -1799,15 +1865,19 @@ const handleChat = async (body: any, user: any) => {
             `- Use timestamps (MM:SS format) when referencing specific moments`
         })
       } else if (context?.nativeVideo && context?.videoData) {
-        const fps = context.requestedFPS || 5
+        const fps = context.requestedFPS || geminiVideoFpsHint(context)
         const videoB64 = toInlineBase64(context.videoData)
         if (videoB64) {
-          firstUserParts.push({
-            inlineData: {
-              mimeType: context.videoMimeType || 'video/mp4',
-              data: videoB64,
+          firstUserParts.push(buildGeminiVideoInlinePart(
+            videoB64,
+            context.videoMimeType || 'video/mp4',
+            {
+              window: { startSec: context.startSec, endSec: context.endSec },
+              sport: context.discipline || context.sport || null,
+              fps,
+              mediaResolution: 'low',
             },
-          })
+          ))
         }
         firstUserParts.push({
           text: `\n🎬 NATIVE VIDEO (INLINE) MODE:\n` +
@@ -3537,6 +3607,67 @@ export async function POST(req: Request) {
               userId: user.id,
               isAdmin: user.role === 'shogun',
             })
+
+            // Inline-bytes fast path: when the normalized clip is < 20MB, skip
+            // the Gemini Files API ACTIVE poll so Coach Cards can start immediately.
+            // Optional background upload still produces a fileUri for later chat.
+            if (isInlineVideoEligible(normalizedStream.sizeBytes)) {
+              try {
+                await normalizedStream.body.cancel()
+              } catch {
+                void 0
+              }
+              const clipKey = `inline:${normalizedAsset.id}`
+              const credits = await commitVideoAnalysisCredit(user.id, user.role, {
+                sessionId,
+                clipKey,
+              })
+              const bgAssetId = normalizedAsset.id
+              const bgUserId = user.id
+              const bgIsAdmin = user.role === 'shogun'
+              void (async () => {
+                try {
+                  const again = await readUploadedAssetStream(getDb(), {
+                    assetId: bgAssetId,
+                    userId: bgUserId,
+                    isAdmin: bgIsAdmin,
+                  })
+                  const bg = await handleVideoUpload({
+                    body: again.body,
+                    sizeBytes: again.sizeBytes,
+                    mimeType: again.contentType,
+                    fileName: again.originalName,
+                  })
+                  console.log('[video-ingestion] background Files URI ready', {
+                    requestId,
+                    fileUri: bg.fileUri,
+                    normalizedAssetId: bgAssetId,
+                  })
+                } catch (bgErr) {
+                  console.warn('[video-ingestion] background Files upload failed (non-fatal)', {
+                    requestId,
+                    detail: bgErr instanceof Error ? bgErr.message : String(bgErr),
+                  })
+                }
+              })()
+
+              result = {
+                ready: true,
+                inlineEligible: true,
+                fileUri: null,
+                displayName: `fight-video-inline-${Date.now()}`,
+                mimeType: normalizedStream.contentType || 'video/mp4',
+                fileSize: normalizedStream.sizeBytes,
+                credits,
+                videoAnalysisSessionId: sessionId,
+                requestId,
+                normalizedAssetId: normalizedAsset.id,
+                requestedDurationSec: normalizedMaxSec,
+                effectiveDurationSec: normalized.effectiveDurationSec,
+              }
+              break
+            }
+
             const upload = await handleVideoUpload({
               body: normalizedStream.body,
               sizeBytes: normalizedStream.sizeBytes,
@@ -3549,6 +3680,7 @@ export async function POST(req: Request) {
             })
             result = {
               ...upload,
+              inlineEligible: false,
               credits,
               videoAnalysisSessionId: sessionId,
               requestId,

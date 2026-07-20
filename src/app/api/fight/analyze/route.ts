@@ -31,6 +31,8 @@ import type { MotionBurstEvidence, TemporalEvidence } from '@/lib/evidence/sessi
 import { clientKinematicsToFightLang } from '@/lib/compiler/segmentation'
 import { getRecurringFaultsForUser } from '@/lib/coachBrain/recurringFaults'
 import { isVisionFirstSport } from '@/lib/coachBrain/coachBrain'
+import { isInlineVideoEligible } from '@/lib/gemini/videoFilePart'
+import { readUploadedAssetBytes } from '@/lib/storage/assets'
 
 export const maxDuration = 60
 
@@ -59,6 +61,8 @@ type AnalyzeRequest = {
   llm?: { enabled?: boolean }
   videoFileUri?: string
   videoMimeType?: string
+  /** Normalized R2 asset — when < 20MB, analyze loads bytes as Gemini inlineData. */
+  normalizedAssetId?: string
   /** Analysis window for Gemini videoMetadata (original file, no client re-encode). */
   startSec?: number | null
   endSec?: number | null
@@ -159,11 +163,17 @@ export async function POST(request: Request) {
   if (!guard.ok) return guard.response
 
   try {
+    const quotaClipKey =
+      data.videoFileUri ||
+      (data.normalizedAssetId ? `inline:${String(data.normalizedAssetId).trim()}` : '') ||
+      data.clip?.sourceId
     await maybeEnforceVideoFromAnalyzeRequest(guard.user, {
       clipDurationMs: data.clip?.durationMs,
-      videoFileUri: data.videoFileUri,
-      sourceId: data.clip?.sourceId,
-      enabled: data.llm?.enabled !== false && Boolean(data.videoFileUri || (data.clip?.durationMs && data.clip.durationMs > 0)),
+      videoFileUri: quotaClipKey,
+      sourceId: data.clip?.sourceId || data.normalizedAssetId,
+      enabled:
+        data.llm?.enabled !== false &&
+        Boolean(data.videoFileUri || data.normalizedAssetId || (data.clip?.durationMs && data.clip.durationMs > 0)),
     })
   } catch (err) {
     return aiErrorResponse(err)
@@ -199,12 +209,50 @@ export async function POST(request: Request) {
       maybeCleanupGeminiFiles()
     }
 
+    // Inline-bytes fast path: load normalized R2 bytes when < 20MB so the first
+    // Coach Cards pass skips Gemini Files API ACTIVE polling entirely.
+    let videoFileUri = data.videoFileUri
+    let videoMimeType = data.videoMimeType || 'video/mp4'
+    let videoInlineBase64: string | undefined
+    const normalizedAssetId = String(data.normalizedAssetId || '').trim()
+    if (!videoFileUri && normalizedAssetId) {
+      try {
+        const user = await getCurrentUser(request).catch(() => null)
+        const db = getDbOrNull()
+        if (db && user?.id) {
+          const asset = await readUploadedAssetBytes(db, {
+            assetId: normalizedAssetId,
+            userId: user.id,
+            isAdmin: user.role === 'shogun',
+          })
+          if (isInlineVideoEligible(asset.sizeBytes)) {
+            videoInlineBase64 = asset.bytes.toString('base64')
+            videoMimeType = asset.contentType || videoMimeType
+            console.log(
+              `[FightLang] Inline-bytes fast path: asset=${normalizedAssetId} size=${asset.sizeBytes}`,
+            )
+          } else {
+            console.warn(
+              `[FightLang] Normalized asset ${normalizedAssetId} is ${asset.sizeBytes} bytes — too large for inline; need Files API URI`,
+            )
+          }
+        }
+      } catch (inlineErr) {
+        console.warn(
+          '[FightLang] Inline asset load failed:',
+          inlineErr instanceof Error ? inlineErr.message : inlineErr,
+        )
+      }
+    }
+
+    const hasVideoTape = Boolean(videoFileUri || videoInlineBase64)
+
     const poseFrames = normalizePoseFrames(data)
     const visionFirst = isVisionFirstSport(data.sport)
     const visionOnly =
       poseFrames.length === 0 &&
       llmEnabled &&
-      Boolean(data.videoFileUri) &&
+      hasVideoTape &&
       visionFirst
 
     if (poseFrames.length === 0 && !visionOnly) {
@@ -263,11 +311,11 @@ export async function POST(request: Request) {
       clipType: data.clipType ?? null,
       poseEngine: data.pose?.engine ?? null,
       poseQuality: data.pose?.quality ?? null,
-      videoSeen: Boolean(data.videoFileUri),
+      videoSeen: Boolean(hasVideoTape),
       ...(pose3DFrames ? { pose3DFrames } : {}),
     })
 
-    if (llmEnabled && data.videoFileUri) {
+    if (llmEnabled && hasVideoTape) {
       try {
         const mode = sessionEvidence.provenance.mode
         const focusTargetStr =
@@ -283,24 +331,28 @@ export async function POST(request: Request) {
           mode === 'striking' && !visionOnly ? fightLangToVerificationCandidate(ledger) : null
 
         let visionLedger = await buildVisionLedger({
-          videoFileUri: data.videoFileUri,
-          videoMimeType: data.videoMimeType,
+          videoFileUri,
+          videoInlineBase64,
+          videoMimeType,
           mode,
           clipDurationMs: data.clip?.durationMs,
           focusTarget: focusTargetStr,
           fightLangCandidate,
           startSec: data.startSec,
           endSec: data.endSec,
+          sport: data.sport,
         })
 
         visionLedger = await verifyVisionLedger({
           candidate: visionLedger,
-          videoFileUri: data.videoFileUri,
-          videoMimeType: data.videoMimeType,
+          videoFileUri,
+          videoInlineBase64,
+          videoMimeType,
           mode,
           clipDurationMs: data.clip?.durationMs,
           startSec: data.startSec,
           endSec: data.endSec,
+          sport: data.sport,
         })
 
         sessionEvidence = buildSessionEvidence({
@@ -387,15 +439,15 @@ export async function POST(request: Request) {
       const db = getDbOrNull()
 
       // Embedding 2 pipeline: embed video segments into D1 for cross-modal retrieval
-      if (data.videoFileUri && db) {
+      if (videoFileUri && db) {
         const clipId = data.clip?.sourceId || `clip_${Date.now()}`
         embedAndStoreSegments({
           db,
           userId: 'local',
           sessionId: `session_${Date.now()}`,
           clipId,
-          fileUri: data.videoFileUri,
-          mimeType: data.videoMimeType || 'video/mp4',
+          fileUri: videoFileUri,
+          mimeType: videoMimeType || 'video/mp4',
           totalDurationMs: data.clip?.durationMs || 0,
         }).then((res) => {
           console.log(`[FightLang] Embedding 2 segments: ${res.stored} stored, ${res.errors} errors`)
@@ -449,14 +501,15 @@ export async function POST(request: Request) {
           ledger: coachingLedger,
           retrievedSnippets: retrieved.snippets,
           focusTarget: data.focusTarget,
-          videoFileUri: data.videoFileUri,
-          videoMimeType: data.videoMimeType,
+          videoFileUri,
+          videoInlineBase64,
+          videoMimeType,
           startSec: data.startSec,
           endSec: data.endSec,
           visionLedger: sessionEvidence.merged.visionFacts,
           temporalEvidence: temporal,
           // Without pose identity tracks, map A/B to left/right of the frame.
-          visionScreenMapping: visionOnly || (visionFirst && Boolean(data.videoFileUri)),
+          visionScreenMapping: visionOnly || (visionFirst && hasVideoTape),
           coachBrain: {
             selectedSport: data.sport,
             clipType: data.clipType,

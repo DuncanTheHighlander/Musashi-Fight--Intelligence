@@ -14,6 +14,15 @@ export const DEFAULT_UPLOAD_TRIM_SEC = 10
 export const MIN_TRIM_DURATION_TOLERANCE_SEC = 0.75
 export const TRIM_DURATION_TOLERANCE_FRACTION = 0.1
 
+/**
+ * Local analysis artifact targets — keep output under the 20MB inline-bytes
+ * ceiling for a ≤30s window (720p @ ~2.5 Mbps ≈ 9–10 MB / 30s).
+ */
+export const TRIM_MAX_LONG_EDGE_PX = 1280
+export const TRIM_CAPTURE_FPS = 30
+/** ~2.5 Mbps video; phones still land well under 20MB for Free/Pro windows. */
+export const TRIM_VIDEO_BITRATE = 2_500_000
+
 export type TrimWindow = { start: number; end: number }
 
 /** Encoder/container timestamps may drift slightly without changing the clip. */
@@ -313,7 +322,11 @@ async function recordSegment(
         : null
     if (!stream) throw new Error('This browser cannot capture video for trimming.')
 
-    const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined)
+    const recorderOpts: MediaRecorderOptions = {
+      videoBitsPerSecond: TRIM_VIDEO_BITRATE,
+      ...(mimeType ? { mimeType } : {}),
+    }
+    const recorder = new MediaRecorder(stream, recorderOpts)
     const chunks: BlobPart[] = []
     recorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data) }
     const stopped = new Promise<void>((resolve) => { recorder.onstop = () => resolve() })
@@ -378,10 +391,9 @@ async function recordSegmentFromHost(
   const vh = video.videoHeight
   if (!vw || !vh) throw new Error('the preview has no picture to record')
 
-  // Cap the encode resolution: phone encoders handle 720p-class output far
-  // more reliably than 4K, and pose tracking / AI analysis don't need more.
-  const MAX_DIM = 1280
-  const scale = Math.min(1, MAX_DIM / Math.max(vw, vh))
+  // Spec: enforce 720p / 30fps H.264-class output so a ≤30s window stays
+  // under the 20MB inline-bytes fast path for Gemini.
+  const scale = Math.min(1, TRIM_MAX_LONG_EDGE_PX / Math.max(vw, vh))
   const cw = Math.max(2, Math.round((vw * scale) / 2) * 2)
   const ch = Math.max(2, Math.round((vh * scale) / 2) * 2)
 
@@ -391,8 +403,12 @@ async function recordSegmentFromHost(
   const ctx = canvas.getContext('2d')
   if (!ctx) throw new Error('canvas rendering is unavailable in this browser')
 
-  const stream = canvas.captureStream(30)
-  const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined)
+  const stream = canvas.captureStream(TRIM_CAPTURE_FPS)
+  const recorderOpts: MediaRecorderOptions = {
+    videoBitsPerSecond: TRIM_VIDEO_BITRATE,
+    ...(mimeType ? { mimeType } : {}),
+  }
+  const recorder = new MediaRecorder(stream, recorderOpts)
   const chunks: BlobPart[] = []
   recorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data) }
   const stopped = new Promise<void>((resolve) => { recorder.onstop = () => resolve() })

@@ -8,7 +8,7 @@ import { buildCoachBrainBlock, type CoachBrainContext } from '@/lib/coachBrain/c
 import { isGrapplingClip } from '@/lib/grapplingAnalysisPrompt'
 import type { FactualLedger } from '@/lib/fightAnalysisPrompt'
 import type { TemporalEvidence } from '@/lib/evidence/sessionEvidenceExtensions'
-import { buildGeminiVideoFilePart } from '@/lib/gemini/videoFilePart'
+import { buildGeminiVideoFilePart, buildGeminiVideoInlinePart } from '@/lib/gemini/videoFilePart'
 
 class GeminiQuotaError extends Error {
   status: number
@@ -473,19 +473,27 @@ async function attemptCoachingWithModel(args: {
   apiKey: string
   prompt: string
   videoFileUri?: string
+  videoInlineBase64?: string
   videoMimeType?: string
   startSec?: number | null
   endSec?: number | null
+  sport?: string | null
 }): Promise<{ model: string; payload: CoachingPayload; rawText: string }> {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(args.model)}:generateContent?key=${encodeURIComponent(args.apiKey)}`
 
   const parts: Array<Record<string, unknown>> = []
-  if (args.videoFileUri) {
+  const videoOpts = {
+    window: { startSec: args.startSec, endSec: args.endSec },
+    sport: args.sport,
+    mediaResolution: 'low' as const,
+  }
+  if (args.videoInlineBase64) {
     parts.push(
-      buildGeminiVideoFilePart(args.videoFileUri, args.videoMimeType || 'video/mp4', {
-        startSec: args.startSec,
-        endSec: args.endSec,
-      }),
+      buildGeminiVideoInlinePart(args.videoInlineBase64, args.videoMimeType || 'video/mp4', videoOpts),
+    )
+  } else if (args.videoFileUri) {
+    parts.push(
+      buildGeminiVideoFilePart(args.videoFileUri, args.videoMimeType || 'video/mp4', videoOpts),
     )
   }
   parts.push({ text: args.prompt })
@@ -555,6 +563,8 @@ export async function generateGroundedCoaching(args: {
   focusTarget?: CoachingFocusTarget
   /** Gemini Files API URI — lets Pro SEE the actual fight footage alongside the ledger */
   videoFileUri?: string
+  /** Inline base64 when the normalized clip is < 20MB (skips Files ACTIVE wait). */
+  videoInlineBase64?: string
   videoMimeType?: string
   /** Optional analysis window (server-side Gemini videoMetadata offsets). */
   startSec?: number | null
@@ -602,7 +612,7 @@ export async function generateGroundedCoaching(args: {
   const cacheKey = cachingDisabled
     ? null
     : await sha256Hex(
-        `${prompt}\u0000${normalizeCoachingFocus(args.focusTarget)}\u0000${args.videoFileUri ?? ''}\u0000${args.videoMimeType ?? ''}\u0000${args.startSec ?? ''}\u0000${args.endSec ?? ''}`,
+        `${prompt}\u0000${normalizeCoachingFocus(args.focusTarget)}\u0000${args.videoFileUri ?? ''}\u0000${args.videoInlineBase64 ? 'inline' : ''}\u0000${args.videoMimeType ?? ''}\u0000${args.startSec ?? ''}\u0000${args.endSec ?? ''}\u0000${args.coachBrain?.selectedSport ?? ''}`,
       )
 
   const runGemini = async (): Promise<{ model: string; payload: CoachingPayload; rawText: string }> => {
@@ -626,9 +636,11 @@ export async function generateGroundedCoaching(args: {
           apiKey,
           prompt,
           videoFileUri: args.videoFileUri,
+          videoInlineBase64: args.videoInlineBase64,
           videoMimeType: args.videoMimeType,
           startSec: args.startSec,
           endSec: args.endSec,
+          sport: args.coachBrain?.selectedSport,
         })
         return { ...result, payload: applyCoachingFocus(result.payload, args.focusTarget) }
       } catch (err) {

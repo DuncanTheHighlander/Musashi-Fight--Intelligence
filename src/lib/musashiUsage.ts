@@ -391,8 +391,12 @@ export const extractChatClipKey = (action: string, body: Record<string, unknown>
   // The first native-video breakdown is paid for by the video-analysis credit.
   // Do not also spend one of the per-clip follow-up questions on that request.
   if (ctx?.initialVideoAnalysis === true) return null
-  if (!ctx?.videoFileUri) return null
-  const clipKey = String(ctx.videoFileUri).trim().slice(0, 256)
+  const fromUri = ctx?.videoFileUri ? String(ctx.videoFileUri).trim() : ''
+  const fromInline =
+    !fromUri && ctx?.normalizedAssetId
+      ? `inline:${String(ctx.normalizedAssetId).trim()}`
+      : ''
+  const clipKey = (fromUri || fromInline).slice(0, 256)
   return clipKey || null
 }
 
@@ -467,7 +471,7 @@ export const fightActionConsumesVideoQuota = (action: string, body: Record<strin
     const ctx = body?.context as Record<string, unknown> | undefined
     return Boolean(
       ctx?.nativeVideo &&
-        ctx?.videoFileUri &&
+        (ctx?.videoFileUri || ctx?.normalizedAssetId) &&
         typeof ctx?.clipDuration === 'number' &&
         Number(ctx.clipDuration) > 0
     )
@@ -510,14 +514,20 @@ export const extractFightVideoQuotaContext = (
 
   if (action === 'chat' || action === 'strategy') {
     const ctx = body?.context as Record<string, unknown> | undefined
-    if (!ctx?.nativeVideo || !ctx?.videoFileUri) return null
+    if (!ctx?.nativeVideo) return null
+    const clipKey = String(
+      ctx.videoFileUri ||
+        (ctx.normalizedAssetId ? `inline:${String(ctx.normalizedAssetId).trim()}` : '') ||
+        ctx.sourceId ||
+        '',
+    ).trim()
+    if (!clipKey) return null
     const clipDurationSec = resolveQuotaDurationSec({
       clipDurationSec: Number(ctx.clipDuration),
       startSec: Number(ctx.startSec),
       endSec: Number(ctx.endSec),
     })
-    const clipKey = String(ctx.videoFileUri || ctx.sourceId || '').trim()
-    if (!clipKey || !Number.isFinite(clipDurationSec) || clipDurationSec <= 0) return null
+    if (!Number.isFinite(clipDurationSec) || clipDurationSec <= 0) return null
     return { clipDurationSec, clipKey }
   }
 

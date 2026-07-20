@@ -2,27 +2,71 @@ import { describe, expect, it } from 'vitest'
 import {
   buildGeminiVideoFileData,
   buildGeminiVideoFilePart,
+  buildGeminiVideoInlinePart,
+  buildGeminiVideoMetadata,
   clipWindowDurationSec,
+  geminiVideoFpsForSport,
+  isInlineVideoEligible,
   normalizeClipWindow,
   resolveQuotaDurationSec,
+  MAX_INLINE_VIDEO_BYTES,
   MAX_ORIGINAL_UPLOAD_BYTES,
+  GEMINI_FPS_GRAPPLING,
+  GEMINI_FPS_STRIKING,
 } from '@/lib/gemini/videoFilePart'
 
 describe('videoFilePart', () => {
-  it('builds videoMetadata offsets for a valid window', () => {
+  it('builds videoMetadata offsets + fps + mediaResolution for a valid window', () => {
     const part = buildGeminiVideoFilePart('files/abc', 'video/mp4', { startSec: 2.5, endSec: 12.5 })
     expect(part.fileData).toEqual({ fileUri: 'files/abc', mimeType: 'video/mp4' })
     expect(part.videoMetadata).toEqual({
+      fps: GEMINI_FPS_STRIKING,
       startOffset: '2.5s',
       endOffset: '12.5s',
     })
+    expect(part.mediaResolution).toBe('MEDIA_RESOLUTION_LOW')
   })
 
-  it('omits videoMetadata when window is invalid', () => {
+  it('uses grappling fps for vision-first sports', () => {
+    expect(geminiVideoFpsForSport('bjj')).toBe(GEMINI_FPS_GRAPPLING)
+    expect(geminiVideoFpsForSport('wrestling')).toBe(GEMINI_FPS_GRAPPLING)
+    expect(geminiVideoFpsForSport('judo')).toBe(GEMINI_FPS_GRAPPLING)
+    expect(geminiVideoFpsForSport('boxing')).toBe(GEMINI_FPS_STRIKING)
+    expect(geminiVideoFpsForSport('mma')).toBe(GEMINI_FPS_STRIKING)
+    const part = buildGeminiVideoFilePart('files/bjj', 'video/mp4', {
+      window: { startSec: 0, endSec: 10 },
+      sport: 'bjj',
+    })
+    expect(part.videoMetadata?.fps).toBe(5)
+  })
+
+  it('still attaches fps/mediaResolution when window is invalid', () => {
     const data = buildGeminiVideoFileData('files/abc', 'video/webm')
     const part = buildGeminiVideoFilePart('files/abc', 'video/webm', { startSec: 5, endSec: 5 })
     expect(data).toEqual({ fileUri: 'files/abc', mimeType: 'video/webm' })
-    expect(part.videoMetadata).toBeUndefined()
+    expect(part.videoMetadata).toEqual({ fps: GEMINI_FPS_STRIKING })
+    expect(part.mediaResolution).toBe('MEDIA_RESOLUTION_LOW')
+  })
+
+  it('builds inlineData parts for the <20MB fast path', () => {
+    const part = buildGeminiVideoInlinePart('YmFzZTY0', 'video/mp4', {
+      sport: 'bjj',
+      window: { startSec: 0, endSec: 8 },
+    })
+    expect(part.inlineData).toEqual({ mimeType: 'video/mp4', data: 'YmFzZTY0' })
+    expect(part.videoMetadata).toEqual({
+      fps: 5,
+      startOffset: '0s',
+      endOffset: '8s',
+    })
+    expect(buildGeminiVideoMetadata({ fps: 10 })?.fps).toBe(10)
+  })
+
+  it('gates inline eligibility at 20MB', () => {
+    expect(isInlineVideoEligible(1)).toBe(true)
+    expect(isInlineVideoEligible(MAX_INLINE_VIDEO_BYTES - 1)).toBe(true)
+    expect(isInlineVideoEligible(MAX_INLINE_VIDEO_BYTES)).toBe(false)
+    expect(isInlineVideoEligible(0)).toBe(false)
   })
 
   it('normalizes and measures window length for quota', () => {
