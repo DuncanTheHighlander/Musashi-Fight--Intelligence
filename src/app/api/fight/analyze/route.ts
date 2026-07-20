@@ -211,7 +211,7 @@ export async function POST(request: Request) {
 
     // Inline-bytes fast path: load normalized R2 bytes when < 20MB so the first
     // Coach Cards pass skips Gemini Files API ACTIVE polling entirely.
-    let videoFileUri = data.videoFileUri
+    const videoFileUri = data.videoFileUri
     let videoMimeType = data.videoMimeType || 'video/mp4'
     let videoInlineBase64: string | undefined
     const normalizedAssetId = String(data.normalizedAssetId || '').trim()
