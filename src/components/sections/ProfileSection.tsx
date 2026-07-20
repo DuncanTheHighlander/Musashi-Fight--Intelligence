@@ -10,7 +10,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { useAuth } from '@/hooks/useAuth'
 import { useToast } from '@/hooks/use-toast'
-import { User, Mail, Shield, Calendar, Activity, Loader2, TriangleAlert } from 'lucide-react'
+import { User, Mail, Shield, Calendar, Activity, Loader2, TriangleAlert, LogOut } from 'lucide-react'
 import { useSection } from '@/contexts/SectionContext'
 import { SectionShell } from '@/components/ui/section-header'
 import { parseApiResponse } from '@/lib/safeJson'
@@ -189,10 +189,22 @@ function EmailVerificationCard({
 
 export default function ProfileSection() {
   const router = useRouter()
-  const { user, loading, checkSession } = useAuth()
+  const { user, loading, checkSession, logout } = useAuth()
   const { setActiveSection } = useSection()
   const [activity, setActivity] = useState<ProfileActivity | null>(null)
   const [activityError, setActivityError] = useState(false)
+  const [loggingOut, setLoggingOut] = useState(false)
+
+  const onLogout = async () => {
+    if (loggingOut) return
+    setLoggingOut(true)
+    try {
+      await logout()
+      router.push('/welcome')
+    } catch {
+      setLoggingOut(false)
+    }
+  }
 
   useEffect(() => {
     if (!loading && !user) router.push('/welcome')
@@ -346,7 +358,7 @@ export default function ProfileSection() {
           <CardDescription>Manage your account and preferences</CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
             <Button variant="outline" className="justify-start h-10" onClick={() => setActiveSection('coach')}>
               Start Analysis
             </Button>
@@ -355,6 +367,19 @@ export default function ProfileSection() {
             </Button>
             <Button variant="outline" className="justify-start h-10" asChild>
               <Link href="/pricing">Billing &amp; plans</Link>
+            </Button>
+            <Button
+              variant="outline"
+              className="justify-start h-10"
+              disabled={loggingOut}
+              onClick={() => void onLogout()}
+            >
+              {loggingOut ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" />
+              ) : (
+                <LogOut className="mr-2 h-4 w-4" aria-hidden="true" />
+              )}
+              {loggingOut ? 'Logging out…' : 'Log out'}
             </Button>
           </div>
         </CardContent>
