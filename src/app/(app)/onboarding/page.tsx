@@ -15,7 +15,6 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
-import { Checkbox } from '@/components/ui/checkbox'
 import { useToast } from '@/hooks/use-toast'
 import { useAuth } from '@/hooks/useAuth'
 import { parseApiResponse } from '@/lib/safeJson'
@@ -80,26 +79,28 @@ export default function OnboardingPage() {
   const [path, setPath] = useState<Path>('train')
   const [saving, setSaving] = useState(false)
 
-  // Data-use consent — required to be shown (can't skip this screen), but the
-  // decision itself is opt-in: defaults on, the user can uncheck before
-  // continuing. Withdrawable later from Profile. See docs/PRIVACY_CONSENT_SPEC.md.
-  const [aiTrainingConsent, setAiTrainingConsent] = useState(true)
+  // AI consent is a hard condition of using Musashi AI — accept or no coaching.
   const [savingConsent, setSavingConsent] = useState(false)
 
-  async function saveConsent() {
+  async function acceptConsent() {
     setSavingConsent(true)
     try {
-      await fetch('/api/auth/consent', {
+      const res = await fetch('/api/auth/consent', {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ aiTraining: aiTrainingConsent }),
+        body: JSON.stringify({ aiTraining: true }),
       })
-    } catch {
-      // Non-fatal — the Profile page lets the user set this later too.
+      if (!res.ok) throw new Error('Could not save consent')
+      setStep('path')
+    } catch (err) {
+      toast({
+        title: 'Consent required',
+        description: err instanceof Error ? err.message : 'Try again',
+        variant: 'destructive',
+      })
     } finally {
       setSavingConsent(false)
-      setStep('path')
     }
   }
 
@@ -217,22 +218,22 @@ export default function OnboardingPage() {
                 </p>
               </div>
             </div>
-            <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-border/60 p-3 text-sm">
-              <Checkbox
-                checked={aiTrainingConsent}
-                onCheckedChange={(v) => setAiTrainingConsent(v === true)}
-                className="mt-0.5"
-              />
-              <span>
-                Use my footage and its analysis to help improve Musashi&apos;s AI coaching.
-                <span className="block text-xs text-muted-foreground">
-                  You can change this anytime from your Profile.
-                </span>
-              </span>
-            </label>
-            <div className="flex justify-end pt-2">
-              <Button onClick={saveConsent} disabled={savingConsent}>
-                {savingConsent ? <Loader2 className="h-4 w-4 animate-spin" /> : <>Continue <ArrowRight className="ml-1.5 h-4 w-4" /></>}
+            <p className="rounded-lg border border-border/60 bg-muted/30 p-3 text-sm">
+              By continuing, you agree that your footage and its analysis may be used to improve
+              Musashi&apos;s AI coaching. Without this agreement, AI coaching is unavailable.
+            </p>
+            <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end pt-2">
+              <Button variant="outline" asChild>
+                <Link href="/welcome">I don&apos;t agree</Link>
+              </Button>
+              <Button onClick={acceptConsent} disabled={savingConsent}>
+                {savingConsent ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <>
+                    Agree and continue <ArrowRight className="ml-1.5 h-4 w-4" />
+                  </>
+                )}
               </Button>
             </div>
           </CardContent>

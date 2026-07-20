@@ -47,10 +47,11 @@ export default function PrivacyPage() {
                 videos to advertise to third parties.
               </p>
               <p>
-                With your consent, we may also use your uploaded footage and the pose, technique,
-                and analysis data derived from it to develop, evaluate, and improve Musashi&apos;s AI
-                coaching models. You choose this preference during onboarding and can view or
-                withdraw it at any time from your Profile page.
+                To use Musashi AI coaching, you must agree during onboarding that we may use your
+                uploaded footage and the pose, technique, and analysis data derived from it to
+                develop, evaluate, and improve Musashi&apos;s AI coaching models. Without that
+                agreement, AI coaching features are unavailable. You may delete your account and
+                associated data at any time from your Profile page.
               </p>
             </Section>
 
@@ -103,10 +104,9 @@ export default function PrivacyPage() {
             <Section title="8. Your Rights">
               <p>
                 Depending on your jurisdiction, you may have rights to access, correct, export, or
-                delete your personal data. This includes the right to withdraw consent for
-                AI-improvement use of your footage at any time (Profile → AI Improvement) without
-                affecting the lawfulness of processing before withdrawal. Contact us to exercise
-                these rights and we will respond in accordance with applicable law.
+                delete your personal data. You can delete your account and associated content from
+                Profile → Danger Zone. Contact us to exercise additional rights and we will respond
+                in accordance with applicable law.
               </p>
             </Section>
 

@@ -11,6 +11,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Badge } from '@/components/ui/badge'
 import { PromptPreviewModal } from '@/components/ui/prompt-preview-modal'
+import { ShogunOverviewPanel, type OverviewData } from '@/components/admin/ShogunOverviewPanel'
 import { Eye, AlertCircle, CheckCircle } from 'lucide-react'
 import { parseApiResponse } from '@/lib/safeJson'
 
@@ -43,22 +44,6 @@ type PromptsBundle = {
     created_at: string
     version_id: string
   }>
-}
-
-type OverviewUser = {
-  id: string
-  email: string
-  role: string
-  created_at: string
-  email_verified_at: string | null
-  videos_analyzed: number
-  last_analysis_at: string | null
-  is_pro: number
-}
-
-type OverviewData = {
-  totals: { users: number; verified: number; pro: number; videosAnalyzed: number; activeLast7d: number }
-  users: OverviewUser[]
 }
 
 const toNumberOrNull = (v: string): number | null => {
@@ -461,65 +446,11 @@ export default function ShogunPage() {
           </TabsList>
 
           <TabsContent value="overview">
-            <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-5">
-              {[
-                { label: 'Users', value: overview?.totals.users },
-                { label: 'Verified', value: overview?.totals.verified },
-                { label: 'Pro', value: overview?.totals.pro },
-                { label: 'Videos analyzed', value: overview?.totals.videosAnalyzed },
-                { label: 'Active (7d)', value: overview?.totals.activeLast7d },
-              ].map((stat) => (
-                <Card key={stat.label}>
-                  <CardContent className="p-4">
-                    <div className="text-2xl font-bold tabular-nums">{stat.value ?? '—'}</div>
-                    <div className="text-xs text-muted-foreground">{stat.label}</div>
-                  </CardContent>
-                </Card>
-              ))}
-            </div>
-            <Card>
-              <CardHeader>
-                <CardTitle>Users</CardTitle>
-                <CardDescription>Every account, newest first — tier and successful AI video analyses.</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Email</TableHead>
-                      <TableHead>Role</TableHead>
-                      <TableHead>Tier</TableHead>
-                      <TableHead>Verified</TableHead>
-                      <TableHead className="text-right">Videos</TableHead>
-                      <TableHead>Last analysis</TableHead>
-                      <TableHead>Joined</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {(overview?.users || []).map((u) => (
-                      <TableRow key={u.id}>
-                        <TableCell>{u.email}</TableCell>
-                        <TableCell>
-                          <Badge variant={u.role === 'shogun' ? 'default' : 'secondary'}>{u.role}</Badge>
-                        </TableCell>
-                        <TableCell>
-                          <Badge variant={u.is_pro ? 'default' : 'outline'}>{u.is_pro ? 'Pro' : 'Free'}</Badge>
-                        </TableCell>
-                        <TableCell>{u.email_verified_at ? 'Yes' : 'No'}</TableCell>
-                        <TableCell className="text-right tabular-nums">{u.videos_analyzed}</TableCell>
-                        <TableCell className="text-muted-foreground">
-                          {u.last_analysis_at ? new Date(u.last_analysis_at).toLocaleDateString() : '—'}
-                        </TableCell>
-                        <TableCell className="text-muted-foreground">
-                          {u.created_at ? new Date(u.created_at).toLocaleDateString() : '—'}
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-                {!overview && <div className="py-4 text-sm text-muted-foreground">Loading stats…</div>}
-              </CardContent>
-            </Card>
+            <ShogunOverviewPanel
+              overview={overview}
+              onRefresh={loadOverview}
+              onError={setError}
+            />
           </TabsContent>
 
           <TabsContent value="limits">

@@ -210,6 +210,12 @@ export const isProSubscriber = async (userId: string, role: MusashiRole): Promis
   try {
     const db = getDb()
     const nowIso = new Date().toISOString()
+    const comp = await db
+      .prepare('SELECT comp_pro_until FROM musashi_users WHERE id = ?')
+      .bind(userId)
+      .first<{ comp_pro_until: string | null }>()
+    if (comp?.comp_pro_until && String(comp.comp_pro_until) >= nowIso) return true
+
     const row = await db
       .prepare(
         "SELECT stripe_subscription_id FROM musashi_stripe_subscriptions WHERE user_id = ? AND status IN ('active','trialing') AND (current_period_end IS NULL OR current_period_end >= ?) LIMIT 1"
@@ -256,6 +262,18 @@ export const resolveVideoTierLimits = async (userId: string, role: MusashiRole):
   const baseMaxSec = isPro ? PRO_MAX_VIDEO_SEC : FREE_MAX_VIDEO_SEC
   const baseWeekly = isPro ? PRO_WEEKLY_VIDEOS : 0
 
+  let bonusCredits = 0
+  try {
+    const db = getDb()
+    const bonus = await db
+      .prepare('SELECT COALESCE(bonus_video_credits, 0) AS c FROM musashi_users WHERE id = ?')
+      .bind(userId)
+      .first<{ c: number }>()
+    bonusCredits = Math.max(0, Number(bonus?.c || 0))
+  } catch {
+    bonusCredits = 0
+  }
+
   return {
     maxDurationSec: Number.isFinite(overrides.maxDurationSec as number)
       ? Math.max(1, overrides.maxDurationSec as number)
@@ -263,7 +281,7 @@ export const resolveVideoTierLimits = async (userId: string, role: MusashiRole):
     weeklyVideos: Number.isFinite(overrides.weeklyVideos as number)
       ? Math.max(0, overrides.weeklyVideos as number)
       : baseWeekly,
-    lifetimeFreeVideos: FREE_LIFETIME_VIDEOS,
+    lifetimeFreeVideos: FREE_LIFETIME_VIDEOS + bonusCredits,
   }
 }
 

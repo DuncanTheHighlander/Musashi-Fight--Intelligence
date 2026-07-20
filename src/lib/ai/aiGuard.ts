@@ -3,6 +3,9 @@ import { enforceUsage, type MusashiAction } from '@/lib/musashiUsage'
 import type { MusashiUser } from '@/lib/musashiAuth'
 import { assertEmailVerified, requireUser } from '@/lib/musashiAuth'
 import { consumeNoClipChatQuestion } from '@/lib/noClipChatUsage'
+import { isAiKillSwitchActive } from '@/lib/adminRuntime'
+import { assertUserNotBanned } from '@/lib/adminUsers'
+import { getDb } from '@/lib/db'
 
 /**
  * Shared "wallet gate" for every AI-spending route.
@@ -29,8 +32,6 @@ export type AiGuardOk = { ok: true; user: MusashiUser | null }
 export type AiGuardErr = { ok: false; response: NextResponse }
 export type AiGuardResult = AiGuardOk | AiGuardErr
 export type AiGuardOptions = { noClipChat?: boolean }
-
-const KILL_SWITCH = (): boolean => process.env.MUSASHI_AI_KILL_SWITCH === '1'
 
 const hasDbBinding = (): boolean => {
   const db = process.env.DB as unknown as { prepare?: unknown } | undefined
@@ -101,19 +102,29 @@ export const aiGuard = async (
   action: MusashiAction,
   options: AiGuardOptions = {},
 ): Promise<AiGuardResult> => {
-  // 1. Global kill switch beats everything else.
-  if (KILL_SWITCH()) {
-    return {
-      ok: false,
-      response: errorResponse(
-        {
-          error: 'AI temporarily disabled',
-          code: 'AI_KILL_SWITCH',
-          hint: 'A site admin has paused all AI calls. Try again later.',
-        },
-        503,
-        { 'Retry-After': '300' }
-      ),
+  // 1. Global kill switch (env MUSASHI_AI_KILL_SWITCH=1 OR runtime D1 flag).
+  //    Shogun may still analyze so the owner can test during an outage.
+  if (await isAiKillSwitchActive()) {
+    let shogunBypass = false
+    try {
+      const peek = await requireUser(req)
+      shogunBypass = peek.role === 'shogun'
+    } catch {
+      shogunBypass = false
+    }
+    if (!shogunBypass) {
+      return {
+        ok: false,
+        response: errorResponse(
+          {
+            error: 'AI temporarily disabled',
+            code: 'AI_KILL_SWITCH',
+            hint: 'A site admin has paused all AI calls. Try again later.',
+          },
+          503,
+          { 'Retry-After': '300' }
+        ),
+      }
     }
   }
 
@@ -123,6 +134,8 @@ export const aiGuard = async (
   if (hasDbBinding()) {
     try {
       const user = await enforceUsage(req, action)
+      await assertUserNotBanned(user.id, user.role)
+      await assertAiConsent(user)
       if (options.noClipChat) {
         await consumeNoClipChatQuestion(user.id, user.role)
       }
@@ -140,6 +153,10 @@ export const aiGuard = async (
     try {
       user = (await requireUser(req)) as MusashiUser
       assertEmailVerified(user)
+      if (user) {
+        await assertUserNotBanned(user.id, user.role)
+        await assertAiConsent(user)
+      }
     } catch (err) {
       return { ok: false, response: aiErrorResponse(err) }
     }
@@ -282,10 +299,50 @@ export const aiErrorResponse = (err: unknown): NextResponse => {
     )
   }
 
+  if (message === 'CONSENT_REQUIRED') {
+    return errorResponse(
+      {
+        error: 'You must accept AI training consent to use Musashi AI coaching.',
+        code: 'CONSENT_REQUIRED',
+        hint: 'Complete onboarding consent, or contact support if you need help.',
+      },
+      403,
+    )
+  }
+
+  if (message === 'ACCOUNT_BANNED' || message === 'ACCOUNT_SUSPENDED') {
+    return errorResponse(
+      {
+        error: message === 'ACCOUNT_BANNED' ? 'Account banned' : 'Account suspended',
+        code: message,
+      },
+      403,
+    )
+  }
+
   // requireUser throws plain "Unauthorized" or "Invalid session" strings.
   if (/unauthorized|invalid session|no session/i.test(message)) {
     return errorResponse({ error: 'Unauthorized', code: 'UNAUTHORIZED' }, 401)
   }
 
   return errorResponse({ error: message || 'AI guard failed', code: 'AI_GUARD' }, 500)
+}
+
+/** AI coaching requires stored consent_ai_training=1 (shogun exempt). */
+async function assertAiConsent(user: MusashiUser): Promise<void> {
+  if (user.role === 'shogun') return
+  if (!hasDbBinding()) return
+  try {
+    const db = getDb()
+    const row = await db
+      .prepare('SELECT COALESCE(consent_ai_training, 0) AS c FROM musashi_users WHERE id = ?')
+      .bind(user.id)
+      .first<{ c: number }>()
+    if (!row || Number(row.c) !== 1) {
+      throw new Error('CONSENT_REQUIRED')
+    }
+  } catch (e) {
+    if (e instanceof Error && e.message === 'CONSENT_REQUIRED') throw e
+    // If the column is missing (pre-migration), do not hard-block production.
+  }
 }
