@@ -16,8 +16,6 @@ export type TeachContext = {
   clipId?: string | null
   ledgerId?: string | null
   clipDurationMs?: number | null
-  /** SpeechRecognition constructor from FightCoachExperience when available. */
-  onDictate?: (setText: (t: string) => void) => void
 }
 
 type PreviewState = {
@@ -26,6 +24,50 @@ type PreviewState = {
   startMs: number | null
   endMs: number | null
   wholeClip: boolean
+}
+
+function startOneShotDictate(onText: (t: string) => void, onError?: (msg: string) => void) {
+  const w = window as unknown as {
+    SpeechRecognition?: new () => {
+      lang: string
+      interimResults: boolean
+      continuous: boolean
+      onresult: ((ev: { results: ArrayLike<{ 0: { transcript: string }; isFinal?: boolean } }>) => void) | null
+      onerror: ((ev: { error?: string }) => void) | null
+      onend: (() => void) | null
+      start: () => void
+      stop: () => void
+    }
+    webkitSpeechRecognition?: new () => {
+      lang: string
+      interimResults: boolean
+      continuous: boolean
+      onresult: ((ev: { results: ArrayLike<{ 0: { transcript: string }; isFinal?: boolean } }>) => void) | null
+      onerror: ((ev: { error?: string }) => void) | null
+      onend: (() => void) | null
+      start: () => void
+      stop: () => void
+    }
+  }
+  const Ctor = w.SpeechRecognition || w.webkitSpeechRecognition
+  if (!Ctor) {
+    onError?.('Voice input not supported in this browser')
+    return
+  }
+  const rec = new Ctor()
+  rec.lang = navigator.language || 'en-US'
+  rec.interimResults = false
+  rec.continuous = false
+  rec.onresult = (ev) => {
+    const t = ev.results?.[0]?.[0]?.transcript
+    if (t) onText(t)
+  }
+  rec.onerror = (ev) => onError?.(ev.error || 'Voice failed')
+  try {
+    rec.start()
+  } catch {
+    onError?.('Voice failed to start')
+  }
 }
 
 const ERROR_CHIPS = [
@@ -244,15 +286,18 @@ export function TeachCorrectionPanel({
             rows={3}
             className="w-full resize-none rounded-lg border border-zinc-700/50 bg-zinc-900/80 px-2 py-1.5 text-xs text-zinc-100"
           />
-          {ctx.onDictate && (
-            <button
-              type="button"
-              onClick={() => ctx.onDictate?.(setText)}
-              className="text-[11px] text-cyan-300/90 hover:text-cyan-200"
-            >
-              Dictate
-            </button>
-          )}
+          <button
+            type="button"
+            onClick={() =>
+              startOneShotDictate(
+                (t) => setText((prev) => (prev ? `${prev.trim()} ${t}` : t)),
+                (msg) => setError(msg),
+              )
+            }
+            className="text-[11px] text-cyan-300/90 hover:text-cyan-200"
+          >
+            Dictate
+          </button>
 
           <div className="space-y-1">
             <div className="text-[10px] font-semibold uppercase tracking-wide text-zinc-500">Time window</div>
