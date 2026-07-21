@@ -30,9 +30,12 @@ import {
 import type { MotionBurstEvidence, TemporalEvidence } from '@/lib/evidence/sessionEvidenceExtensions'
 import { clientKinematicsToFightLang } from '@/lib/compiler/segmentation'
 import { getRecurringFaultsForUser } from '@/lib/coachBrain/recurringFaults'
-import { isVisionFirstSport } from '@/lib/coachBrain/coachBrain'
+import { isVisionFirstSport, resolveSportKey } from '@/lib/coachBrain/coachBrain'
 import { isInlineVideoEligible } from '@/lib/gemini/videoFilePart'
 import { readUploadedAssetBytes } from '@/lib/storage/assets'
+import { computeVideoFingerprint } from '@/lib/aiCorrections/fingerprint'
+import { formatApprovedCorrectionsBlock, formatCorrectionAppliedSummary } from '@/lib/aiCorrections/formatBlock'
+import { fetchApprovedCorrectionsForClip } from '@/lib/aiCorrections/store'
 
 export const maxDuration = 60
 
@@ -428,6 +431,8 @@ export async function POST(request: Request) {
     }
     let model: string | null = null
     let llmIssues: any[] = []
+    let correctionsAppliedSummary: string | null = null
+    let appliedCorrectionIds: string[] = []
 
     if (llmEnabled) {
       try {
@@ -492,6 +497,56 @@ export async function POST(request: Request) {
       }
       console.log(`[FightLang] Retrieval: ${retrieved.snippets.length} snippets matched (topScore=${retrieved.snippets[0]?.score?.toFixed(3) ?? 'none'})`)
 
+      // Teach Musashi Phase 1: exact-clip approved corrections (same owner only).
+      // Attached beside retrieval — never inside coach-brain text.
+      let approvedCorrectionsBlock: string | null = null
+      try {
+        const owner = await getCurrentUser(request).catch(() => null)
+        const sportKey = resolveSportKey(data.sport) || String(data.sport || '').trim()
+        const clipId =
+          String(data.clip?.assetRef || data.clip?.sourceId || data.normalizedAssetId || '').trim() || null
+        if (db && owner?.id && sportKey && (clipId || data.normalizedAssetId)) {
+          let fingerprint: string | null = null
+          const assetForFp = String(data.normalizedAssetId || clipId || '').trim()
+          if (assetForFp) {
+            fingerprint = await computeVideoFingerprint({
+              db,
+              assetId: assetForFp,
+              userId: owner.id,
+              isAdmin: owner.role === 'shogun',
+              durationMs: data.clip?.durationMs ?? null,
+            })
+          }
+          const rangeStartMs =
+            typeof data.startSec === 'number' && Number.isFinite(data.startSec)
+              ? Math.max(0, Math.trunc(data.startSec * 1000))
+              : 0
+          const rangeEndMs =
+            typeof data.endSec === 'number' && Number.isFinite(data.endSec)
+              ? Math.trunc(data.endSec * 1000)
+              : data.clip?.durationMs ?? null
+          const corrections = await fetchApprovedCorrectionsForClip({
+            db,
+            ownerUserId: owner.id,
+            clipId,
+            videoFingerprint: fingerprint,
+            sport: sportKey,
+            rangeStartMs,
+            rangeEndMs,
+          })
+          if (corrections.length > 0) {
+            approvedCorrectionsBlock = formatApprovedCorrectionsBlock(corrections)
+            appliedCorrectionIds = corrections.map((c) => c.id)
+            correctionsAppliedSummary = formatCorrectionAppliedSummary(corrections)
+          }
+        }
+      } catch (corrErr) {
+        console.warn(
+          '[FightLang] Approved corrections fetch failed (non-fatal):',
+          corrErr instanceof Error ? corrErr.message : corrErr,
+        )
+      }
+
       // Coaching failure must never produce fake feedback: on error we keep
       // the deterministic ledger/overlays, return coaching=null, and surface
       // the failure explicitly so the UI can say "AI coaching unavailable"
@@ -518,11 +573,16 @@ export async function POST(request: Request) {
             poseQuality: data.pose?.quality,
             recurringFaults: recurringFaultLabels,
           },
+          approvedCorrectionsBlock,
         })
         model = gen.model
 
         const validated = validateCoachingPayloadAgainstLedger({ ledger: coachingLedger, payload: gen.payload })
         coaching = validated.sanitized ?? gen.payload
+        if (coaching && appliedCorrectionIds.length > 0) {
+          ;(coaching as CoachingPayload & { applied_correction_ids?: string[] }).applied_correction_ids =
+            appliedCorrectionIds
+        }
         llmIssues = validated.issues
       } catch (llmErr) {
         const message = llmErr instanceof Error ? llmErr.message : String(llmErr)
@@ -609,6 +669,8 @@ export async function POST(request: Request) {
       retrieval: retrieved,
       model,
       llmIssues,
+      appliedCorrectionIds,
+      correctionsAppliedSummary,
       pipelineStats: {
         poseFrames: poseFrames.length,
         actors: ledger.actors,

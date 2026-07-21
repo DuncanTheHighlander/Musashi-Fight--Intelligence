@@ -23,6 +23,7 @@ import { CompactFocusToggle } from '@/components/fight/FocusToggle'
 import { PoseQualityBadge } from '@/components/fight/PoseQualityBadge'
 import RotatingWisdom from '@/components/fight/RotatingWisdom'
 import ChatMarkdown from '@/components/fight/ChatMarkdown'
+import { TeachCorrectionPanel, type TeachContext } from '@/components/fight/TeachCorrectionPanel'
 import {
   deleteSession,
   exportAll,
@@ -361,16 +362,29 @@ type FrameAnalysis = {
 // FighterKinematics and KinematicsSnapshot imported from @/lib/kinematics
 
 type ChatMessage = {
+  id: string
   role: 'user' | 'assistant'
   content: string
+}
+
+function newChatMessageId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return `msg_${crypto.randomUUID()}`
+  }
+  return `msg_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`
+}
+
+function chatMsg(role: ChatMessage['role'], content: string): ChatMessage {
+  return { id: newChatMessageId(), role, content }
 }
 
 function normalizeChatMessages(raw: unknown): ChatMessage[] {
   if (!Array.isArray(raw)) return []
   return raw
-    .filter((m): m is { role: string; content?: unknown } => Boolean(m && typeof m === 'object'))
+    .filter((m): m is { id?: unknown; role: string; content?: unknown } => Boolean(m && typeof m === 'object'))
     .filter((m) => m.role === 'user' || m.role === 'assistant')
     .map((m) => ({
+      id: typeof m.id === 'string' && m.id ? m.id : newChatMessageId(),
       role: m.role as ChatMessage['role'],
       content: typeof m.content === 'string' ? m.content : '',
     }))
@@ -552,6 +566,9 @@ export default function FightCoachExperience({
   const [fightLangCoaching, setFightLangCoaching] = useState<any | null>(null)
   // Saved analysis id + model from the server — enables the thumbs rating row.
   const [fightLangRatingContext, setFightLangRatingContext] = useState<{ ledgerId: string; aiModel?: string | null; discipline?: string | null } | null>(null)
+  const [chatTeachFor, setChatTeachFor] = useState<TeachContext | null>(null)
+  const [correctionsAppliedSummary, setCorrectionsAppliedSummary] = useState<string | null>(null)
+  const [priorCoachingSnapshot, setPriorCoachingSnapshot] = useState<unknown>(null)
   const [fightLangLlmIssues, setFightLangLlmIssues] = useState<Array<{ code: string; message: string }> | null>(null)
   const [fightLangOverlayAnnotations, setFightLangOverlayAnnotations] = useState<FightLangOverlayAnnotation[] | null>(null)
   // Phase 1 + 2: AI guard response state. When the server returns 401/402/429/503
@@ -2027,6 +2044,12 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
           throw new Error('Coach Cards response was incomplete. Please retry the analysis.')
         }
         setFightLangCoaching(json.coaching)
+        if (typeof json?.correctionsAppliedSummary === 'string' && json.correctionsAppliedSummary) {
+          setCorrectionsAppliedSummary(json.correctionsAppliedSummary)
+          toast({ title: 'Corrections applied', description: json.correctionsAppliedSummary })
+        } else {
+          setCorrectionsAppliedSummary(null)
+        }
         setFightLangRatingContext(
           json?.coaching && typeof json?.savedLedgerId === 'string'
             ? { ledgerId: json.savedLedgerId, aiModel: json?.model ?? null, discipline: selectedSportRef.current || null }
@@ -2159,7 +2182,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
       const result = await parseApiResponse(response) as { message: string }
       const coachingText = asChatContent(result.message)
       if (coachingText) {
-        setMessages((prev) => [...prev, { role: 'assistant', content: coachingText }])
+        setMessages((prev) => [...prev, chatMsg('assistant', coachingText )])
         speakText(coachingText)
       }
     } catch (error) {
@@ -2219,7 +2242,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
       }
 
       setChatInput('')
-      setMessages((prev: any[]) => [...prev, { role: 'user', content: userMessage }])
+      setMessages((prev: any[]) => [...prev, chatMsg('user', userMessage )])
 
       // Get current context
       const kinematicsContext = kinematicsRef.current ? {
@@ -2241,7 +2264,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           action,
-          messages: [...messages, { role: 'user', content: userMessage }],
+          messages: [...messages, chatMsg('user', userMessage )],
           context: {
             analysisStyle: 'comet',
             ...currentFightClipAiMetadata(),
@@ -2304,31 +2327,34 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
         const reason =
           [failure.error, failure.hint].filter(Boolean).join(' ') ||
           `Coaching failed (status ${response.status}). Please try again.`
-        setMessages((prev) => [...prev, { role: 'assistant', content: `⚠️ ${reason}` }])
+        setMessages((prev) => [...prev, chatMsg('assistant', `⚠️ ${reason}` )])
         return
       }
       if (coachingMode === 'strategy') {
         const strategy = parsed as StrategyResponse
         setCurrentStrategy(strategy)
-        setMessages((prev) => [...prev, {
-          role: 'assistant',
-          content: `Strategy generated:\nGameplan: ${strategy.gameplan}\nCounters: ${(strategy.counters || []).join(', ')}`
-        }])
+        setMessages((prev) => [
+          ...prev,
+          chatMsg(
+            'assistant',
+            `Strategy generated:\nGameplan: ${strategy.gameplan}\nCounters: ${(strategy.counters || []).join(', ')}`,
+          ),
+        ])
       } else {
         const chat = parsed as { message: string }
         // Guard: a leaked internal coaching-JSON payload becomes clean prose.
         const chatText = asChatContent(chat.message)
         if (chatText) {
-          setMessages((prev) => [...prev, { role: 'assistant', content: chatText }])
+          setMessages((prev) => [...prev, chatMsg('assistant', chatText )])
           speakText(chatText)
         } else {
-          setMessages((prev) => [...prev, { role: 'assistant', content: '⚠️ The coach returned an empty reply — please ask again.' }])
+          setMessages((prev) => [...prev, chatMsg('assistant', '⚠️ The coach returned an empty reply — please ask again.' )])
         }
       }
     } catch (error) {
       console.error('Chat failed:', error)
       const msg = error instanceof Error ? error.message : 'Unknown error'
-      setMessages((prev) => [...prev, { role: 'assistant', content: `⚠️ Coaching failed: ${msg}` }])
+      setMessages((prev) => [...prev, chatMsg('assistant', `⚠️ Coaching failed: ${msg}` )])
       toast({
         title: "Chat failed",
         description: msg,
@@ -2890,7 +2916,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           action: 'chat',
-          messages: [{ role: 'user', content: INITIAL_CLIP_ANALYSIS_REQUEST }],
+          messages: [chatMsg('user', INITIAL_CLIP_ANALYSIS_REQUEST )],
           context: {
             analysisStyle: 'comet',
             ...currentFightClipAiMetadata(),
@@ -2919,7 +2945,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
 
       const message = asChatContent(result.message || '')
       if (!message) throw new Error('The coach returned an empty initial analysis.')
-      setMessages([{ role: 'assistant', content: message }])
+      setMessages([chatMsg('assistant', message )])
       setInitialAnalysisReady(true)
       setInitialAnalysisStatus(null)
       speakText(message)
@@ -2935,7 +2961,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
       setMessages(prev => {
         // Only show error if no assistant message was already added by streaming
         if (prev.some(m => m.role === 'assistant')) return prev
-        return [{ role: 'assistant', content: `⚠️ Full clip analysis failed.\n\n${message}\n\nThe tape is attached; retry analysis or ask a focused question.` }]
+        return [chatMsg('assistant', `⚠️ Full clip analysis failed.\n\n${message}\n\nThe tape is attached; retry analysis or ask a focused question.`)]
       })
       toast({
         title: 'Analysis failed',
@@ -3566,7 +3592,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                 setMessages(prev => {
                   // Only add if no assistant message exists yet (avoid duplication with runInitialClipAnalysis)
                   if (prev.some(m => m.role === 'assistant')) return prev
-                  return [{ role: 'assistant', content: fullText }]
+                  return [chatMsg('assistant', fullText)]
                 })
                 setInitialAnalysisReady(true)
               }
@@ -3587,7 +3613,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
         setStreamAnalysisPhase('complete')
         setMessages(prev => {
           if (prev.some(m => m.role === 'assistant')) return prev
-          return [{ role: 'assistant', content: fullText }]
+          return [chatMsg('assistant', fullText)]
         })
         setInitialAnalysisReady(true)
       }
@@ -4418,8 +4444,8 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
           <>
             {messages.length > 0 && (
               <div className="max-h-[320px] space-y-2 overflow-y-auto px-3 pt-3">
-                {messages.map((m, idx) => (
-                  <div key={idx} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                {messages.map((m) => (
+                  <div key={m.id} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                     <div
                       className={cn(
                         'max-w-[90%] rounded-xl px-3 py-2 text-sm',
@@ -4429,6 +4455,43 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                       )}
                     >
                       {m.role === 'assistant' ? <ChatMarkdown text={m.content ?? ''} /> : (m.content ?? '')}
+                      {isShogun && m.role === 'assistant' && (
+                        <div className="mt-1.5">
+                          <button
+                            type="button"
+                            className="text-[10px] font-semibold uppercase tracking-wide text-cyan-600 hover:text-cyan-500"
+                            onClick={() =>
+                              setChatTeachFor({
+                                surface: 'chat',
+                                responseRef: m.id,
+                                originalText: m.content ?? '',
+                                sport: selectedSport || 'bjj_grappling',
+                                focusTarget,
+                                clipId: normalizedAssetId || null,
+                                ledgerId: fightLangRatingContext?.ledgerId ?? null,
+                                clipDurationMs:
+                                  clipDurationSec > 0 ? Math.round(clipDurationSec * 1000) : null,
+                                evidenceStartMs: null,
+                                evidenceEndMs: null,
+                              })
+                            }
+                          >
+                            Teach
+                          </button>
+                          {chatTeachFor?.responseRef === m.id && (
+                            <TeachCorrectionPanel
+                              ctx={chatTeachFor}
+                              onClose={() => setChatTeachFor(null)}
+                              onApproved={() =>
+                                toast({
+                                  title: 'Correction approved',
+                                  description: 'Saved for this clip. Reanalyze to apply.',
+                                })
+                              }
+                            />
+                          )}
+                        </div>
+                      )}
                     </div>
                   </div>
                 ))}
@@ -5238,6 +5301,28 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                     <span className="text-sm font-medium text-cyan-100">Preparing your coach…</span>
                   </div>
                 )}
+                {correctionsAppliedSummary && coachReady && (
+                  <div className="mb-3 rounded-xl border border-emerald-500/30 bg-emerald-950/40 px-4 py-2 text-sm text-emerald-100">
+                    {correctionsAppliedSummary}
+                    {priorCoachingSnapshot ? ' · Before/after available in this session.' : ''}
+                  </div>
+                )}
+                {isShogun && coachReady && visionTapeReady && (
+                  <div className="mb-3">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-8 text-xs"
+                      disabled={fightLangLoading || initialAnalysisLoading}
+                      onClick={() => {
+                        setPriorCoachingSnapshot(fightLangCoaching)
+                        void analyzeFightLangWindow({ mode: 'full' })
+                      }}
+                    >
+                      Reanalyze with corrections
+                    </Button>
+                  </div>
+                )}
                 <CoachingPanel
                   payload={coachReady ? fightLangCoaching : null}
                   llmIssues={fightLangLlmIssues ?? undefined}
@@ -5249,6 +5334,23 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                       const winMs = Math.round(selectedWindowDurationSec() * 1000)
                       return winMs > 0 ? winMs : clipDurationSec > 0 ? Math.round(clipDurationSec * 1000) : null
                     })()
+                  }
+                  teachContext={
+                    isShogun
+                      ? {
+                          isShogun: true,
+                          sport: selectedSport || 'bjj_grappling',
+                          focusTarget: focusTarget ?? null,
+                          clipId: normalizedAssetId || null,
+                          clipDurationMs:
+                            clipDurationSec > 0 ? Math.round(clipDurationSec * 1000) : null,
+                          onApproved: () =>
+                            toast({
+                              title: 'Correction approved',
+                              description: 'Use Reanalyze with corrections to apply it to this clip.',
+                            }),
+                        }
+                      : null
                   }
                   isAdmin={isShogun}
                   coachUnavailable={Boolean(videoUrl && bootPipelineReady && !coachReady)}
@@ -5547,8 +5649,8 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                   )}
 
                   {/* Chat messages */}
-                  {messages.map((m, idx) => (
-                    <div key={idx} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                  {messages.map((m) => (
+                    <div key={m.id} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                       <div
                         className={cn(
                           'max-w-[90%] rounded-xl px-3 py-2 text-sm',
@@ -5558,6 +5660,43 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                         )}
                       >
                         {m.role === 'assistant' ? <ChatMarkdown text={m.content ?? ''} /> : (m.content ?? '')}
+                        {isShogun && m.role === 'assistant' && (
+                          <div className="mt-1.5">
+                            <button
+                              type="button"
+                              className="text-[10px] font-semibold uppercase tracking-wide text-cyan-300/90 hover:text-cyan-200"
+                              onClick={() =>
+                                setChatTeachFor({
+                                  surface: 'chat',
+                                  responseRef: m.id,
+                                  originalText: m.content ?? '',
+                                  sport: selectedSport || 'bjj_grappling',
+                                  focusTarget,
+                                  clipId: normalizedAssetId || null,
+                                  ledgerId: fightLangRatingContext?.ledgerId ?? null,
+                                  clipDurationMs:
+                                    clipDurationSec > 0 ? Math.round(clipDurationSec * 1000) : null,
+                                  evidenceStartMs: null,
+                                  evidenceEndMs: null,
+                                })
+                              }
+                            >
+                              Teach
+                            </button>
+                            {chatTeachFor?.responseRef === m.id && (
+                              <TeachCorrectionPanel
+                                ctx={chatTeachFor}
+                                onClose={() => setChatTeachFor(null)}
+                                onApproved={() =>
+                                  toast({
+                                    title: 'Correction approved',
+                                    description: 'Saved for this clip. Reanalyze to apply.',
+                                  })
+                                }
+                              />
+                            )}
+                          </div>
+                        )}
                       </div>
                     </div>
                   ))}

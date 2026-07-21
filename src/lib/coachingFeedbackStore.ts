@@ -17,6 +17,9 @@ export type CoachingFeedbackRow = {
   rating: CoachingRating
   aiModel: string | null
   discipline: string | null
+  cardSection: string | null
+  errorCategoriesJson: string | null
+  feedbackText: string | null
   createdAt: string
 }
 
@@ -28,6 +31,12 @@ export async function saveCoachingFeedback(args: {
   rating: CoachingRating
   aiModel?: string | null
   discipline?: string | null
+  /** Optional: which coach-card section was rated. */
+  cardSection?: string | null
+  /** Optional: reason chips (wrong technique, wrong fighter, …). */
+  errorCategories?: string[] | null
+  /** Optional free-text note. Never alters AI output. */
+  feedbackText?: string | null
 }): Promise<string> {
   const { db } = args
   // Re-rating replaces the user's previous verdict for this analysis.
@@ -37,10 +46,18 @@ export async function saveCoachingFeedback(args: {
     .run()
 
   const id = `cfb_${crypto.randomUUID()}`
+  const categoriesJson =
+    Array.isArray(args.errorCategories) && args.errorCategories.length > 0
+      ? JSON.stringify(args.errorCategories.map(String).slice(0, 8))
+      : null
+  const feedbackText = args.feedbackText ? String(args.feedbackText).trim().slice(0, 1000) || null : null
+
   await db
     .prepare(
-      `INSERT INTO coaching_feedback (id, user_id, session_id, rating, ai_model, discipline, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO coaching_feedback (
+        id, user_id, session_id, rating, ai_model, discipline,
+        card_section, error_categories_json, feedback_text, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .bind(
       id,
@@ -49,7 +66,10 @@ export async function saveCoachingFeedback(args: {
       args.rating,
       args.aiModel ?? null,
       args.discipline ?? null,
-      new Date().toISOString()
+      args.cardSection ?? null,
+      categoriesJson,
+      feedbackText,
+      new Date().toISOString(),
     )
     .run()
   return id
@@ -76,6 +96,9 @@ export async function listCoachingFeedback(
     rating: (r.rating === -1 ? -1 : 1) as CoachingRating,
     aiModel: r.ai_model ?? null,
     discipline: r.discipline ?? null,
+    cardSection: r.card_section ?? null,
+    errorCategoriesJson: r.error_categories_json ?? null,
+    feedbackText: r.feedback_text ?? null,
     createdAt: r.created_at,
   }))
 }

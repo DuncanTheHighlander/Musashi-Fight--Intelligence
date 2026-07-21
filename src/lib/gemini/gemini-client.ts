@@ -128,6 +128,11 @@ export function buildGroundedCoachingPrompt(args: {
   temporalEvidence?: TemporalEvidence | null
   /** When true (vision-first / no pose), map Fighter A=LEFT and B=RIGHT on screen. */
   visionScreenMapping?: boolean
+  /**
+   * Approved human corrections for THIS exact clip (same owner).
+   * Attached beside retrieval — never inside coach-brain text.
+   */
+  approvedCorrectionsBlock?: string | null
 }): string {
   // Keep the model constrained: ledger is truth; everything must cite evidence ids when available.
   const ledgerJson = JSON.stringify(
@@ -307,7 +312,7 @@ ${coachBrainBlock}
 
 Retrieved fight knowledge (use to ground tactical concepts):
 ${retrievedBlock}
-
+${args.approvedCorrectionsBlock ? `\n${args.approvedCorrectionsBlock}\n` : ''}
 Current FightEvidenceLedger (truncated):
 ${ledgerJson}
 
@@ -585,6 +590,8 @@ export async function generateGroundedCoaching(args: {
   temporalEvidence?: TemporalEvidence | null
   /** When true (vision-first / no pose), map Fighter A=LEFT and B=RIGHT on screen. */
   visionScreenMapping?: boolean
+  /** Exact-clip approved corrections block (beside retrieval). */
+  approvedCorrectionsBlock?: string | null
 }): Promise<{ model: string; payload: CoachingPayload; rawText: string }> {
   // DRY_RUN short-circuit — returns a deterministic mock payload so smoke
   // tests and local iteration don't burn Gemini tokens. Toggle via env:
@@ -610,6 +617,7 @@ export async function generateGroundedCoaching(args: {
     visionLedger: args.visionLedger,
     temporalEvidence: args.temporalEvidence,
     visionScreenMapping: args.visionScreenMapping,
+    approvedCorrectionsBlock: args.approvedCorrectionsBlock,
   })
 
   // Phase 2: dedupe + LRU result cache. Two callers with literally identical
@@ -620,7 +628,7 @@ export async function generateGroundedCoaching(args: {
   const cacheKey = cachingDisabled
     ? null
     : await sha256Hex(
-        `${prompt}\u0000${normalizeCoachingFocus(args.focusTarget)}\u0000${args.videoFileUri ?? ''}\u0000${args.videoInlineBase64 ? 'inline' : ''}\u0000${args.videoMimeType ?? ''}\u0000${args.startSec ?? ''}\u0000${args.endSec ?? ''}\u0000${args.coachBrain?.selectedSport ?? ''}`,
+        `${prompt}\u0000${normalizeCoachingFocus(args.focusTarget)}\u0000${args.videoFileUri ?? ''}\u0000${args.videoInlineBase64 ? 'inline' : ''}\u0000${args.videoMimeType ?? ''}\u0000${args.startSec ?? ''}\u0000${args.endSec ?? ''}\u0000${args.coachBrain?.selectedSport ?? ''}\u0000${args.approvedCorrectionsBlock ?? ''}`,
       )
 
   const runGemini = async (): Promise<{ model: string; payload: CoachingPayload; rawText: string }> => {

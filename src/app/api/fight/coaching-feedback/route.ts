@@ -9,6 +9,9 @@ type FeedbackRequest = {
   rating?: number
   aiModel?: string | null
   discipline?: string | null
+  cardSection?: string | null
+  errorCategories?: string[] | null
+  feedbackText?: string | null
 }
 
 /** POST /api/fight/coaching-feedback → thumbs up (1) / thumbs down (-1) on an analysis. */
@@ -47,6 +50,9 @@ export async function POST(request: Request) {
       rating: body.rating,
       aiModel: typeof body.aiModel === 'string' ? body.aiModel : null,
       discipline: typeof body.discipline === 'string' ? body.discipline : null,
+      cardSection: typeof body.cardSection === 'string' ? body.cardSection : null,
+      errorCategories: Array.isArray(body.errorCategories) ? body.errorCategories.map(String) : null,
+      feedbackText: typeof body.feedbackText === 'string' ? body.feedbackText : null,
     })
     return NextResponse.json({ success: true, feedbackId: id })
   } catch (err) {

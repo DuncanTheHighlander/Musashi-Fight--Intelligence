@@ -4,6 +4,7 @@ import React, { useMemo, useState } from 'react'
 import Link from 'next/link'
 import type { CoachingPayload } from '@/lib/validators/llm-output.validator'
 import { buildCoachFeedbackView } from '@/lib/feedback/coachFeedback'
+import { TeachCorrectionPanel, ThumbsDownReasonPanel, type TeachContext } from '@/components/fight/TeachCorrectionPanel'
 
 /**
  * Quota / guard state surfaced from the AI routes (see `src/lib/ai/aiGuard.ts`).
@@ -44,6 +45,15 @@ export type CoachingPanelProps = Readonly<{
   onRetryAnalyze?: () => void
   /** True while a retry Analyze is in flight. */
   retryBusy?: boolean
+  /** Shogun Teach Musashi capture (Phase 1). */
+  teachContext?: {
+    isShogun: boolean
+    sport: string
+    focusTarget?: string | null
+    clipId?: string | null
+    clipDurationMs?: number | null
+    onApproved?: () => void
+  } | null
 }>
 
 const ACTOR_COLORS: Record<string, { bg: string; border: string; text: string; icon: string }> = {
@@ -161,8 +171,9 @@ function RatingRow({ context }: { context: NonNullable<CoachingPanelProps['ratin
   const [rated, setRated] = useState<1 | -1 | null>(null)
   const [busy, setBusy] = useState(false)
   const [failed, setFailed] = useState(false)
+  const [showReasons, setShowReasons] = useState(false)
 
-  const submit = async (rating: 1 | -1) => {
+  const submit = async (rating: 1 | -1, extra?: { categories?: string[]; text?: string }) => {
     if (busy) return
     setBusy(true)
     setFailed(false)
@@ -175,11 +186,14 @@ function RatingRow({ context }: { context: NonNullable<CoachingPanelProps['ratin
           rating,
           aiModel: context.aiModel ?? null,
           discipline: context.discipline ?? null,
+          errorCategories: extra?.categories ?? null,
+          feedbackText: extra?.text ?? null,
         }),
       })
       const data = (await res.json().catch(() => null)) as { success?: boolean } | null
       if (!res.ok || !data?.success) throw new Error('rating failed')
       setRated(rating)
+      setShowReasons(false)
     } catch {
       setFailed(true)
     } finally {
@@ -188,41 +202,75 @@ function RatingRow({ context }: { context: NonNullable<CoachingPanelProps['ratin
   }
 
   return (
-    <div className="flex items-center gap-2 rounded-2xl border border-zinc-700/40 bg-zinc-900/50 px-4 py-2.5">
-      <span className="text-xs font-medium text-zinc-400">
-        {rated ? 'Thanks — your rating helps the coach improve.' : 'Was this coaching useful?'}
-      </span>
-      <div className="ml-auto flex items-center gap-1.5">
-        <button
-          type="button"
-          disabled={busy}
-          onClick={() => void submit(1)}
-          aria-label="Coaching was useful"
-          className={`rounded-lg border px-2.5 py-1 text-sm transition ${
-            rated === 1
-              ? 'border-emerald-400/60 bg-emerald-500/20 text-emerald-200'
-              : 'border-zinc-600/50 text-zinc-300 hover:border-emerald-400/40 hover:text-emerald-200'
-          } ${busy ? 'opacity-50' : ''}`}
-        >
-          &#128077;
-        </button>
-        <button
-          type="button"
-          disabled={busy}
-          onClick={() => void submit(-1)}
-          aria-label="Coaching was not useful"
-          className={`rounded-lg border px-2.5 py-1 text-sm transition ${
-            rated === -1
-              ? 'border-red-400/60 bg-red-500/20 text-red-200'
-              : 'border-zinc-600/50 text-zinc-300 hover:border-red-400/40 hover:text-red-200'
-          } ${busy ? 'opacity-50' : ''}`}
-        >
-          &#128078;
-        </button>
+    <div className="space-y-2">
+      <div className="flex items-center gap-2 rounded-2xl border border-zinc-700/40 bg-zinc-900/50 px-4 py-2.5">
+        <span className="text-xs font-medium text-zinc-400">
+          {rated ? 'Thanks — your rating helps the coach improve.' : 'Was this coaching useful?'}
+        </span>
+        <div className="ml-auto flex items-center gap-1.5">
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => void submit(1)}
+            aria-label="Coaching was useful"
+            className={`rounded-lg border px-2.5 py-1 text-sm transition ${
+              rated === 1
+                ? 'border-emerald-400/60 bg-emerald-500/20 text-emerald-200'
+                : 'border-zinc-600/50 text-zinc-300 hover:border-emerald-400/40 hover:text-emerald-200'
+            } ${busy ? 'opacity-50' : ''}`}
+          >
+            &#128077;
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => setShowReasons(true)}
+            aria-label="Coaching was not useful"
+            className={`rounded-lg border px-2.5 py-1 text-sm transition ${
+              rated === -1
+                ? 'border-red-400/60 bg-red-500/20 text-red-200'
+                : 'border-zinc-600/50 text-zinc-300 hover:border-red-400/40 hover:text-red-200'
+            } ${busy ? 'opacity-50' : ''}`}
+          >
+            &#128078;
+          </button>
+        </div>
+        {failed && <span className="text-[11px] text-amber-400">Couldn&apos;t save — try again</span>}
       </div>
-      {failed && <span className="text-[11px] text-amber-400">Couldn&apos;t save — try again</span>}
+      {showReasons && !rated && (
+        <ThumbsDownReasonPanel
+          busy={busy}
+          onCancel={() => setShowReasons(false)}
+          onSubmit={({ categories, text }) => void submit(-1, { categories, text })}
+        />
+      )}
     </div>
   )
+}
+
+function evidenceWindowFromPayload(
+  payload: CoachingPayload,
+  section: 'coach_read' | 'fix' | 'drill' | 'quick_cues',
+  fixIndex?: number,
+): { startMs: number | null; endMs: number | null } {
+  const cues = Array.isArray(payload.quickCues) ? payload.quickCues : []
+  const pickCue = (i: number) => {
+    const c = cues[i] as { t?: { startMs?: number; endMs?: number } } | undefined
+    const startMs = typeof c?.t?.startMs === 'number' && c.t.startMs > 0 ? c.t.startMs : null
+    const endMs = typeof c?.t?.endMs === 'number' && c.t.endMs > 0 ? c.t.endMs : startMs
+    return { startMs, endMs }
+  }
+  if (section === 'quick_cues' && cues.length) return pickCue(0)
+  if (section === 'fix' && typeof fixIndex === 'number') {
+    const corr = payload.suggestedCorrections?.[fixIndex] as
+      | { evidenceIds?: string[] }
+      | undefined
+    // Prefer matching cue by index when evidence ids aren't time-stamped here.
+    if (cues[fixIndex]) return pickCue(fixIndex)
+    void corr
+  }
+  if (cues[0]) return pickCue(0)
+  return { startMs: null, endMs: null }
 }
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
@@ -244,11 +292,35 @@ export function CoachingPanel({
   unavailableReason,
   onRetryAnalyze,
   retryBusy,
+  teachContext,
 }: CoachingPanelProps) {
+  const [teachFor, setTeachFor] = useState<TeachContext | null>(null)
   const view = useMemo(
     () => (payload ? buildCoachFeedbackView(payload, { clipDurationMs }) : null),
     [payload, clipDurationMs]
   )
+
+  const openTeach = (
+    section: 'coach_read' | 'fix' | 'drill' | 'quick_cues',
+    originalText: string,
+    fixIndex?: number,
+  ) => {
+    if (!payload || !teachContext?.isShogun || !teachContext.sport) return
+    const win = evidenceWindowFromPayload(payload, section, fixIndex)
+    setTeachFor({
+      surface: 'coach_card',
+      cardSection: section,
+      responseRef: typeof fixIndex === 'number' ? `fix_${fixIndex}` : section,
+      originalText,
+      evidenceStartMs: win.startMs,
+      evidenceEndMs: win.endMs,
+      sport: teachContext.sport,
+      focusTarget: teachContext.focusTarget,
+      clipId: teachContext.clipId,
+      ledgerId: ratingContext?.ledgerId ?? null,
+      clipDurationMs: teachContext.clipDurationMs ?? clipDurationMs ?? null,
+    })
+  }
 
   if (quotaState) {
     return <QuotaStateCard state={quotaState} />
@@ -339,10 +411,26 @@ export function CoachingPanel({
               AI
             </div>
             <div className="text-sm font-bold tracking-wide text-cyan-100">COACH&apos;S READ</div>
+            {teachContext?.isShogun && (
+              <button
+                type="button"
+                onClick={() => openTeach('coach_read', view.coachRead)}
+                className="ml-auto rounded-md border border-cyan-400/40 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-cyan-200 hover:bg-cyan-500/15"
+              >
+                Teach
+              </button>
+            )}
           </div>
           <div className="mt-3 text-[15px] font-medium leading-relaxed text-white/95">
             {view.coachRead}
           </div>
+          {teachFor?.cardSection === 'coach_read' && (
+            <TeachCorrectionPanel
+              ctx={teachFor}
+              onClose={() => setTeachFor(null)}
+              onApproved={teachContext?.onApproved}
+            />
+          )}
         </div>
       </div>
 
@@ -357,13 +445,31 @@ export function CoachingPanel({
                   <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-cyan-500/20 text-xs font-black text-cyan-300">
                     {idx + 1}
                   </span>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-sm font-bold text-white">{fix.title}</span>
-                    <FighterBadge actorId={fix.actorId} />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-sm font-bold text-white">{fix.title}</span>
+                      <FighterBadge actorId={fix.actorId} />
+                      {teachContext?.isShogun && (
+                        <button
+                          type="button"
+                          onClick={() => openTeach('fix', `${fix.title}. ${fix.body}`, idx)}
+                          className="ml-auto rounded-md border border-cyan-400/40 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-cyan-200 hover:bg-cyan-500/15"
+                        >
+                          Teach
+                        </button>
+                      )}
+                    </div>
+                    <div className="mt-2.5 text-[13px] leading-relaxed text-zinc-300">
+                      {fix.body}
+                    </div>
+                    {teachFor?.responseRef === `fix_${idx}` && (
+                      <TeachCorrectionPanel
+                        ctx={teachFor}
+                        onClose={() => setTeachFor(null)}
+                        onApproved={teachContext?.onApproved}
+                      />
+                    )}
                   </div>
-                </div>
-                <div className="mt-2.5 pl-[34px] text-[13px] leading-relaxed text-zinc-300">
-                  {fix.body}
                 </div>
               </div>
             ))}
@@ -389,7 +495,18 @@ export function CoachingPanel({
       {/* Quick Cues */}
       {view.quickCues.length > 0 && (
         <div className="space-y-2">
-          <SectionLabel>Quick Cues</SectionLabel>
+          <div className="flex items-center gap-2 px-1">
+            <SectionLabel>Quick Cues</SectionLabel>
+            {teachContext?.isShogun && (
+              <button
+                type="button"
+                onClick={() => openTeach('quick_cues', view.quickCues.join('\n'))}
+                className="ml-auto rounded-md border border-cyan-400/40 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-cyan-200 hover:bg-cyan-500/15"
+              >
+                Teach
+              </button>
+            )}
+          </div>
           <ul className="space-y-1.5 rounded-2xl border border-zinc-700/50 bg-gradient-to-br from-zinc-900/80 to-zinc-800/30 p-4">
             {view.quickCues.map((cue, idx) => (
               <li key={idx} className="flex items-start gap-2.5 text-sm font-medium text-white/90">
@@ -398,6 +515,13 @@ export function CoachingPanel({
               </li>
             ))}
           </ul>
+          {teachFor?.cardSection === 'quick_cues' && (
+            <TeachCorrectionPanel
+              ctx={teachFor}
+              onClose={() => setTeachFor(null)}
+              onApproved={teachContext?.onApproved}
+            />
+          )}
         </div>
       )}
 
