@@ -2039,13 +2039,19 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
         if (Array.isArray(json?.overlayAnnotations)) {
           setFightLangOverlayAnnotations(json.overlayAnnotations)
         }
+        // Retry Analyze after soft-fail must flip the all-at-once gate so cards render.
+        setCoachReady(true)
+        setBootPipelineReady(true)
+        setBootPipelineMessage('')
         return true
       } catch (err) {
         if (!isStale()) {
+          const message = err instanceof Error ? err.message : 'Could not load coaching'
           console.warn('[FightLang analyze]', err)
+          setFightLangLlmIssues([{ code: 'coach_cards_incomplete', message }])
           toast({
             title: 'Analysis failed',
-            description: err instanceof Error ? err.message : 'Could not load coaching',
+            description: message,
             variant: 'destructive',
           })
         }
@@ -3000,6 +3006,42 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
 
     const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
     const stillThisClip = () => videoFileRef.current === file
+    const isAiQuotaBootError = (message: string) =>
+      /free limit|weekly.*(video|allowance)|FREE_VIDEO_QUOTA|WEEKLY_VIDEO_QUOTA|credits used|AI video credits/i.test(
+        message,
+      )
+    /** Soft-unlock flag for this boot attempt (watchdog-safe; not React state). */
+    let softUnlockedThisBoot = false
+    let visionBootWatchdog: number | null = null
+    const clearVisionWatchdog = () => {
+      if (visionBootWatchdog != null) {
+        window.clearTimeout(visionBootWatchdog)
+        visionBootWatchdog = null
+      }
+    }
+    /** Quota / AI outage must not trap the athlete on a locked player forever. */
+    const unlockLocalPlaybackWithoutCoach = (reason: string) => {
+      softUnlockedThisBoot = true
+      try { videoRef.current?.pause() } catch { void 0 }
+      setCoachReady(false)
+      applyPlaybackLock(false)
+      setBootPipelineReady(true)
+      setBootPipelineMessage('')
+      // Keep stage non-fatal so the Ready/Play overlay stays usable.
+      setIngestionStage('gemini_ready')
+      setBootVerificationSummary(reason)
+      setBootWarnings([reason])
+      setFightLangLlmIssues([{ code: 'coach_cards_incomplete', message: reason }])
+      toast({
+        title: 'Local playback ready',
+        description: `${reason} Scroll to the video and tap ▶ Play.`,
+        variant: 'destructive',
+      })
+      requestAnimationFrame(() => {
+        document.getElementById('fight-lab-anchor')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      })
+      void persistClipSession(file, localSessionIdRef.current || `local-${Date.now()}`)
+    }
 
     try {
       const visionFirstBoot = isVisionFirstSport(selectedSportRef.current)
@@ -3009,12 +3051,28 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
         visionUploadAttemptedRef.current = true
         setCoachReady(false)
         setBootPipelineMessage('Preparing your coach…')
-        const fileUri = await uploadVideoForNativeAnalysisRef.current?.(file, { silentToast: true })
-        if (!fileUri) {
+        // Hard ceiling so a hung upload/AI never traps Play forever.
+        visionBootWatchdog = window.setTimeout(() => {
+          if (!stillThisClip() || softUnlockedThisBoot) return
           visionUploadAttemptedRef.current = false
-          throw new Error(nativeUploadErrorRef.current || 'Gemini tape upload failed. Please retry the analysis.')
+          unlockLocalPlaybackWithoutCoach(
+            'Coach prep timed out. Play is unlocked — retry Analyze for Coach Cards.',
+          )
+        }, 90_000)
+
+        const fileUri = await uploadVideoForNativeAnalysisRef.current?.(file, { silentToast: true })
+        if (softUnlockedThisBoot || !stillThisClip()) { clearVisionWatchdog(); return false }
+        if (!fileUri) {
+          clearVisionWatchdog()
+          visionUploadAttemptedRef.current = false
+          const uploadErr = nativeUploadErrorRef.current || 'Gemini tape upload failed. Please retry the analysis.'
+          unlockLocalPlaybackWithoutCoach(
+            isAiQuotaBootError(uploadErr)
+              ? `${uploadErr} You can still play the clip locally; upgrade for Coach Cards.`
+              : `${uploadErr} Play is unlocked — retry Analyze for Coach Cards.`,
+          )
+          return false
         }
-        if (!stillThisClip()) return
 
         setBootPipelineMessage('Preparing your coach…')
         const normalizedDeadline = Date.now() + 45_000
@@ -3035,7 +3093,11 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
           await sleep(80)
         }
         if (!normalizedVideo) {
-          throw new Error('Server processing finished, but the normalized video could not be opened.')
+          clearVisionWatchdog()
+          unlockLocalPlaybackWithoutCoach(
+            'Server processing finished, but the normalized video could not be opened. Play may still work from the local trim — retry Analyze if needed.',
+          )
+          return false
         }
         ensureAnalysisWindow(normalizedVideo.duration)
         setClipDurationSec(normalizedVideo.duration)
@@ -3053,12 +3115,15 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
           runInitialClipAnalysis(fileUri, file),
           analyzeFightLangWindow({ mode: 'full' }),
         ])
-        if (!stillThisClip()) return
-        if (!initialOk && !coachCardsReady) {
-          throw new Error('The tape uploaded, but coaching analysis did not complete. Retry analysis.')
-        }
+        clearVisionWatchdog()
+        if (softUnlockedThisBoot || !stillThisClip()) return false
         if (!coachCardsReady) {
-          throw new Error('The tape was reviewed, but Coach Cards were not returned. Retry analysis.')
+          unlockLocalPlaybackWithoutCoach(
+            initialOk
+              ? 'Coach Cards did not finish. Play is unlocked — retry Analyze for cards.'
+              : 'Coaching analysis did not complete. Play is unlocked — retry Analyze.',
+          )
+          return false
         }
 
         try { videoRef.current?.pause() } catch { void 0 }
@@ -3247,7 +3312,14 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
       clipAnalysisPipelineStartedRef.current = true
       const tapeHandle = await uploadVideoForNativeAnalysisRef.current?.(file, { silentToast: true })
       if (!tapeHandle) {
-        throw new Error(nativeUploadErrorRef.current || 'Could not prepare the clip for AI coaching.')
+        const uploadErr = nativeUploadErrorRef.current || 'Could not prepare the clip for AI coaching.'
+        if (isAiQuotaBootError(uploadErr)) {
+          unlockLocalPlaybackWithoutCoach(
+            `${uploadErr} You can still play the clip locally; upgrade for Coach Cards.`,
+          )
+          return false
+        }
+        throw new Error(uploadErr)
       }
       if (!stillThisClip()) return
 
@@ -3259,7 +3331,10 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
       }
       if (!stillThisClip()) return
       if (fightLangPoseFramesRef.current.length < 4) {
-        throw new Error('Pose mapping did not produce enough frames for Coach Cards. Retry analysis or pick a clearer clip.')
+        unlockLocalPlaybackWithoutCoach(
+          'Pose mapping did not produce enough frames for Coach Cards. Play is unlocked — retry with a clearer clip.',
+        )
+        return false
       }
 
       setBootPipelineMessage('Preparing your coach…')
@@ -3268,11 +3343,13 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
         analyzeFightLangWindow({ mode: 'full' }),
       ])
       if (!stillThisClip()) return
-      if (!coachCardsReady && !initialOk) {
-        throw new Error('Coaching analysis did not complete. Retry analysis.')
-      }
       if (!coachCardsReady) {
-        throw new Error('Coach Cards were not returned. Retry analysis.')
+        unlockLocalPlaybackWithoutCoach(
+          initialOk
+            ? 'Coach Cards did not finish. Play is unlocked — retry Analyze for cards.'
+            : 'Coaching analysis did not complete. Play is unlocked — retry Analyze.',
+        )
+        return false
       }
 
       setInitialAnalysisReady(true)
@@ -3299,24 +3376,36 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
       // Streaming narration is started from the ▶ Play button click handler rather than here,
       // so network + CPU isn't spent on an SSE stream before the user actually watches.
     } catch (e) {
-      if (isVisionFirstSport(selectedSportRef.current)) setIngestionStage('failed')
+      clearVisionWatchdog()
+      const message = e instanceof Error ? e.message : 'Setup failed. Pick a new clip to retry.'
       console.warn('[boot pipeline]', e)
-      // Error path: keep playback LOCKED so the video never plays while systems are in a broken state.
-      // The user can click "New Video" to retry or use the explicit retry button in the overlay.
       applyPlaybackLock(false)
       setCoachReady(false)
-      setBootPipelineReady(false)
-      setBootPipelineMessage(
-        e instanceof Error ? `Setup failed: ${e.message}` : 'Setup failed - pick a new clip to retry.'
-      )
-      setBootWarnings([e instanceof Error ? e.message : 'Setup failed. Pick a new clip to retry.'])
-      toast({
-        title: 'Setup failed — video stays paused',
-        description: e instanceof Error ? e.message : 'Try a different clip (MP4 / H.264 recommended).',
-        variant: 'destructive',
-      })
-      // AI analysis is NOT auto-triggered on error either. User must click "Analyze with AI".
+      // Soft-unlock for quota AND other AI/setup failures so Play is never hard-trapped.
+      if (softUnlockedThisBoot) {
+        // already unlocked
+      } else if (
+        isAiQuotaBootError(message) ||
+        isVisionFirstSport(selectedSportRef.current) ||
+        /coaching|gemini|analysis|upload|tape|timeout/i.test(message)
+      ) {
+        unlockLocalPlaybackWithoutCoach(
+          isAiQuotaBootError(message)
+            ? `${message} You can still play the clip locally; upgrade for Coach Cards.`
+            : `${message} Play is unlocked — retry Analyze for Coach Cards.`,
+        )
+      } else {
+        setBootPipelineReady(false)
+        setBootPipelineMessage(`Setup failed: ${message}`)
+        setBootWarnings([message])
+        toast({
+          title: 'Setup failed — video stays paused',
+          description: message,
+          variant: 'destructive',
+        })
+      }
     } finally {
+      clearVisionWatchdog()
       bootPipelineRunningRef.current = false
     }
   }
@@ -3514,8 +3603,9 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
 
   // Phase 2: Strategy analysis with pattern context
   const analyzeStrategyWithPatterns = async () => {
+    // Legacy striking strategy path — silent no-op when the old frame analysis
+    // object was never built (vision-first / soft-fail / cards-only boot).
     if (!videoRef.current || !analysis) {
-      toast({ title: 'No analysis available', variant: 'destructive' })
       return
     }
     
@@ -3966,13 +4056,17 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
     }
   }, [videoUrl, clipDurationSec, playbackUnlocked, coachingEnabled, llmCallCount, analyzeFightLangWindow, isPoseQualitySpendBlocked])
 
-  // Auto-trigger strategy once initial clip analysis finishes (after playback gate opens)
+  // Auto-trigger strategy once initial clip analysis finishes (after playback gate opens).
+  // Skip vision-first sports, soft-fail (!coachReady), and when the legacy `analysis`
+  // object was never populated — otherwise we spam a false "No analysis available" toast.
   useEffect(() => {
-    if (initialAnalysisReady && !currentStrategy && playbackUnlocked) {
-      void analyzeStrategyWithPatterns()
-    }
+    if (!initialAnalysisReady || currentStrategy || !playbackUnlocked) return
+    if (!coachReady) return
+    if (isVisionFirstSport(selectedSportRef.current)) return
+    if (!analysis) return
+    void analyzeStrategyWithPatterns()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initialAnalysisReady, playbackUnlocked])
+  }, [initialAnalysisReady, playbackUnlocked, coachReady, analysis])
 
   // First compile ASAP once pose frames exist (after boot unlock) for on-video annotations + preview strip
   useEffect(() => {
@@ -4482,7 +4576,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                         playbackUnlocked && 'bg-emerald-500/15 text-emerald-200',
                       )}
                     >
-                      {!bootPipelineReady || !coachReady ? (
+                      {!bootPipelineReady ? (
                         <>
                           <Loader2 className="mr-1.5 h-3 w-3 animate-spin" aria-hidden />
                           Preparing
@@ -4495,7 +4589,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                       ) : (
                         <>
                           <Play className="mr-1.5 h-3 w-3 fill-current" aria-hidden />
-                          Ready
+                          {coachReady ? 'Ready' : 'Play (local)'}
                         </>
                       )}
                     </Badge>
@@ -4673,11 +4767,11 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                     <div
                       className="absolute inset-0 z-[60] flex flex-col items-center justify-center gap-5 bg-black px-6 text-center"
                       style={{ pointerEvents: 'auto' }}
-                      onClick={(e) => { if (!bootPipelineReady || !coachReady) { e.preventDefault(); e.stopPropagation() } }}
-                      onMouseDown={(e) => { if (!bootPipelineReady || !coachReady) { e.preventDefault(); e.stopPropagation() } }}
-                      onKeyDown={(e) => { if (!bootPipelineReady || !coachReady) { e.preventDefault(); e.stopPropagation() } }}
+                      onClick={(e) => { if (!bootPipelineReady) { e.preventDefault(); e.stopPropagation() } }}
+                      onMouseDown={(e) => { if (!bootPipelineReady) { e.preventDefault(); e.stopPropagation() } }}
+                      onKeyDown={(e) => { if (!bootPipelineReady) { e.preventDefault(); e.stopPropagation() } }}
                     >
-                      {!bootPipelineReady || !coachReady ? (
+                      {!bootPipelineReady ? (
                         <>
                           {bootPipelineFailed
                             ? <AlertTriangle className="h-10 w-10 text-amber-400" />
@@ -4770,27 +4864,31 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                                 if (v.currentTime > 0) v.currentTime = 0
                               } catch { void 0 }
                               void v.play().then(() => {
-                                // Bad trim/output can "play" with no picture — fail loudly.
+                                // Bad trim/output can "play" with no picture — fail loudly,
+                                // but never re-lock bootPipelineReady (keeps ▶ Play available).
                                 window.setTimeout(() => {
                                   const el = videoRef.current
                                   if (!el || !playbackUnlockedRef.current) return
                                   if (el.videoWidth === 0 || el.videoHeight === 0) {
                                     applyPlaybackLock(false)
-                                    setBootPipelineReady(false)
-                                    setBootPipelineMessage('This clip has no picture — re-trim or try MP4 (H.264).')
+                                    setBootPipelineReady(true)
+                                    setBootVerificationSummary(
+                                      'This clip has no picture yet — re-trim or try MP4 (H.264), then tap Play again.',
+                                    )
                                     toast({
                                       title: "Couldn't play this clip",
                                       description: 'The trim/upload likely produced an unplayable file. Re-trim or use MP4 (H.264).',
                                       variant: 'destructive',
                                     })
                                   }
-                                }, 500)
+                                }, 800)
                               }).catch((err) => {
                                 applyPlaybackLock(false)
+                                setBootPipelineReady(true)
                                 const msg = err instanceof Error ? err.message : 'Playback blocked'
                                 toast({
                                   title: "Couldn't play this clip",
-                                  description: `${msg}. Try MP4 (H.264) or re-trim.`,
+                                  description: `${msg}. Try MP4 (H.264) or re-trim, then tap Play again.`,
                                   variant: 'destructive',
                                 })
                               })
@@ -4809,8 +4907,11 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                           </div>
                           <Badge className="border-0 bg-emerald-500/20 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-emerald-100">
                             <CheckCircle2 className="mr-1.5 h-3.5 w-3.5" aria-hidden />
-                            Ready — click to play
+                            {coachReady ? 'Ready — click to play' : 'Local play ready'}
                           </Badge>
+                          {!coachReady && bootVerificationSummary ? (
+                            <p className="max-w-sm text-sm text-white/70">{bootVerificationSummary}</p>
+                          ) : null}
                           {visionFirstActive && (
                             <Button
                               type="button"
@@ -5139,7 +5240,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                 )}
                 <CoachingPanel
                   payload={coachReady ? fightLangCoaching : null}
-                  llmIssues={coachReady ? (fightLangLlmIssues ?? undefined) : undefined}
+                  llmIssues={fightLangLlmIssues ?? undefined}
                   overlayCount={coachReady ? (fightLangOverlayAnnotations?.length ?? 0) : 0}
                   quotaState={aiQuotaState}
                   ratingContext={coachReady ? fightLangRatingContext : null}
@@ -5150,6 +5251,23 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                     })()
                   }
                   isAdmin={isShogun}
+                  coachUnavailable={Boolean(videoUrl && bootPipelineReady && !coachReady)}
+                  unavailableReason={
+                    !coachReady
+                      ? (bootVerificationSummary || bootWarnings[0] || null)
+                      : null
+                  }
+                  onRetryAnalyze={() => {
+                    void analyzeFightLangWindow({ mode: 'full' }).then((ok) => {
+                      if (ok) {
+                        toast({
+                          title: 'Coach Cards ready',
+                          description: 'Panels unlocked with your latest analysis.',
+                        })
+                      }
+                    })
+                  }}
+                  retryBusy={fightLangLoading}
                 />
               </div>
 

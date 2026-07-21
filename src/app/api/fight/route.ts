@@ -90,6 +90,7 @@ import {
   geminiVideoFpsForSport,
   isInlineVideoEligible,
   normalizeClipWindow,
+  GEMINI_MEDIA_RESOLUTION_LOW,
 } from '@/lib/gemini/videoFilePart'
 
 export const maxDuration = 300
@@ -1543,7 +1544,11 @@ const handleChat = async (body: any, user: any) => {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               contents: [{ role: 'user', parts: flashParts }],
-              generationConfig: { temperature: 0.3, responseMimeType: 'application/json' }
+              generationConfig: {
+                temperature: 0.3,
+                responseMimeType: 'application/json',
+                mediaResolution: GEMINI_MEDIA_RESOLUTION_LOW,
+              },
             })
           })
           const flashData = await safeParseResponse(flashResp) as any
@@ -1609,6 +1614,7 @@ const handleChat = async (body: any, user: any) => {
                 generationConfig: {
                   temperature: 0.15,
                   responseMimeType: 'application/json',
+                  mediaResolution: GEMINI_MEDIA_RESOLUTION_LOW,
                   // Strict enums stop hallucinated positions on grappling clips.
                   ...(useGrappling ? { responseSchema: GRAPPLING_LEDGER_RESPONSE_SCHEMA } : {}),
                 },
@@ -1735,9 +1741,14 @@ const handleChat = async (body: any, user: any) => {
         const doDeepChat = async (modelId: string, useSystemInstruction: boolean) => {
            const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelId)}:generateContent?key=${encodeURIComponent(geminiKey)}`
            logger.aiRequest(modelId, 'deep-video-analysis')
+           const deepGenConfig = {
+             temperature: 0.55,
+             maxOutputTokens: 4096,
+             mediaResolution: GEMINI_MEDIA_RESOLUTION_LOW,
+           }
            const body: Record<string, unknown> = useSystemInstruction 
-             ? { systemInstruction: { parts: [{ text: fullSystemPrompt }] }, contents: reqContents, generationConfig: { temperature: 0.55, maxOutputTokens: 4096 } }
-             : { contents: [{ role: 'user', parts: [{ text: fullSystemPrompt }, ...deepParts] }], generationConfig: { temperature: 0.55, maxOutputTokens: 4096 } }
+             ? { systemInstruction: { parts: [{ text: fullSystemPrompt }] }, contents: reqContents, generationConfig: deepGenConfig }
+             : { contents: [{ role: 'user', parts: [{ text: fullSystemPrompt }, ...deepParts] }], generationConfig: deepGenConfig }
              
            const resp = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
            let data: any
@@ -1939,9 +1950,16 @@ const handleChat = async (body: any, user: any) => {
         const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelId)}:generateContent?key=${encodeURIComponent(geminiKey)}`
         logger.aiRequest(modelId, 'chat', { hasVideo: !!context?.nativeVideo })
         const reqContents = useSystemInstruction ? contents : contentsWithSystemInFirst
+        const generationConfig: Record<string, unknown> = {
+          temperature: generationTemperature,
+          // v1beta-safe global setting. Never attach mediaResolution on Parts.
+          ...((context?.nativeVideo && (context?.videoFileUri || context?.videoData))
+            ? { mediaResolution: GEMINI_MEDIA_RESOLUTION_LOW }
+            : {}),
+        }
         const body: Record<string, unknown> = useSystemInstruction
-          ? { systemInstruction: { parts: [{ text: systemInstructionText }] }, contents: reqContents, generationConfig: { temperature: generationTemperature } }
-          : { contents: reqContents, generationConfig: { temperature: generationTemperature } }
+          ? { systemInstruction: { parts: [{ text: systemInstructionText }] }, contents: reqContents, generationConfig }
+          : { contents: reqContents, generationConfig }
         const resp = await fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -3016,6 +3034,7 @@ const handleAnalyzeVideoStream = async (body: any): Promise<Response> => {
               generationConfig: {
                 temperature: 0.15,
                 responseMimeType: 'application/json',
+                mediaResolution: GEMINI_MEDIA_RESOLUTION_LOW,
                 ...(useGrappling ? { responseSchema: GRAPPLING_LEDGER_RESPONSE_SCHEMA } : {}),
               }
             })
@@ -3051,7 +3070,11 @@ const handleAnalyzeVideoStream = async (body: any): Promise<Response> => {
                     }
                   ]
                 }],
-                generationConfig: { temperature: 0.1, responseMimeType: 'application/json' }
+                generationConfig: {
+                  temperature: 0.1,
+                  responseMimeType: 'application/json',
+                  mediaResolution: GEMINI_MEDIA_RESOLUTION_LOW,
+                },
               })
             }, 20000)
 
@@ -3094,7 +3117,11 @@ const handleAnalyzeVideoStream = async (body: any): Promise<Response> => {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               contents: [{ role: 'user', parts: verifyParts }],
-              generationConfig: { temperature: 0.1, responseMimeType: 'application/json' },
+              generationConfig: {
+                temperature: 0.1,
+                responseMimeType: 'application/json',
+                mediaResolution: GEMINI_MEDIA_RESOLUTION_LOW,
+              },
             }),
           }, 35000)
           if (verifyResp.ok) {

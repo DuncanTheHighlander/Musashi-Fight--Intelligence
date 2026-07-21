@@ -20,7 +20,11 @@ import {
   fightLangToVerificationCandidate,
   type SessionEvidenceProvenance,
 } from '@/lib/evidence/sessionEvidence'
-import { buildGeminiVideoFilePart, buildGeminiVideoInlinePart } from '@/lib/gemini/videoFilePart'
+import {
+  buildGeminiVideoFilePart,
+  buildGeminiVideoInlinePart,
+  GEMINI_MEDIA_RESOLUTION_LOW,
+} from '@/lib/gemini/videoFilePart'
 
 function extractJsonObject<T = Record<string, unknown>>(raw: string): T | null {
   const text = raw.trim()
@@ -91,6 +95,7 @@ async function flashGenerate(args: {
         generationConfig: {
           temperature: 0.1,
           responseMimeType: 'application/json',
+          mediaResolution: GEMINI_MEDIA_RESOLUTION_LOW,
           ...(args.useGrapplingSchema ? { responseSchema: GRAPPLING_LEDGER_RESPONSE_SCHEMA } : {}),
         },
       }),

@@ -8,7 +8,11 @@ import { buildCoachBrainBlock, type CoachBrainContext } from '@/lib/coachBrain/c
 import { isGrapplingClip } from '@/lib/grapplingAnalysisPrompt'
 import type { FactualLedger } from '@/lib/fightAnalysisPrompt'
 import type { TemporalEvidence } from '@/lib/evidence/sessionEvidenceExtensions'
-import { buildGeminiVideoFilePart, buildGeminiVideoInlinePart } from '@/lib/gemini/videoFilePart'
+import {
+  buildGeminiVideoFilePart,
+  buildGeminiVideoInlinePart,
+  GEMINI_MEDIA_RESOLUTION_LOW,
+} from '@/lib/gemini/videoFilePart'
 
 class GeminiQuotaError extends Error {
   status: number
@@ -514,6 +518,10 @@ async function attemptCoachingWithModel(args: {
       maxOutputTokens: 8192,
       responseMimeType: 'application/json',
       thinkingConfig,
+      // Global (v1beta-safe). Never put mediaResolution on Part — that 400s.
+      ...(args.videoInlineBase64 || args.videoFileUri
+        ? { mediaResolution: GEMINI_MEDIA_RESOLUTION_LOW }
+        : {}),
     },
   })
 

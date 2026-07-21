@@ -33,6 +33,17 @@ export type CoachingPanelProps = Readonly<{
   clipDurationMs?: number | null
   /** Admin/debug mode: shows validator warnings and the raw payload. Normal users never see raw data. */
   isAdmin?: boolean
+  /**
+   * Soft-fail: boot finished / Play unlocked but Coach Cards never arrived.
+   * Shows "Coaching unavailable — Retry Analyze" instead of the blank placeholder.
+   */
+  coachUnavailable?: boolean
+  /** Optional reason from boot soft-fail or analyze error. */
+  unavailableReason?: string | null
+  /** Retry Analyze CTA (Full Clip / vision-first Analyze). */
+  onRetryAnalyze?: () => void
+  /** True while a retry Analyze is in flight. */
+  retryBusy?: boolean
 }>
 
 const ACTOR_COLORS: Record<string, { bg: string; border: string; text: string; icon: string }> = {
@@ -222,7 +233,18 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
   )
 }
 
-export function CoachingPanel({ payload, llmIssues, quotaState, ratingContext, clipDurationMs, isAdmin }: CoachingPanelProps) {
+export function CoachingPanel({
+  payload,
+  llmIssues,
+  quotaState,
+  ratingContext,
+  clipDurationMs,
+  isAdmin,
+  coachUnavailable,
+  unavailableReason,
+  onRetryAnalyze,
+  retryBusy,
+}: CoachingPanelProps) {
   const view = useMemo(
     () => (payload ? buildCoachFeedbackView(payload, { clipDurationMs }) : null),
     [payload, clipDurationMs]
@@ -232,11 +254,22 @@ export function CoachingPanel({ payload, llmIssues, quotaState, ratingContext, c
     return <QuotaStateCard state={quotaState} />
   }
 
-  // Failed analysis: clean, human error — never JSON, never mock feedback.
+  // Failed analysis / soft-fail: clear retry CTA — never blank placeholder, never mock feedback.
   const coachingFailed =
-    !payload && Array.isArray(llmIssues) && llmIssues.some((i) => i.code === 'llm_unavailable')
+    !payload &&
+    (Boolean(coachUnavailable) ||
+      (Array.isArray(llmIssues) && llmIssues.some((i) => i.code === 'llm_unavailable' || i.code === 'coach_cards_incomplete')))
 
   if (coachingFailed) {
+    const issueHint =
+      Array.isArray(llmIssues) && llmIssues.length > 0
+        ? llmIssues[0]?.message
+        : null
+    const body =
+      (unavailableReason && unavailableReason.trim()) ||
+      issueHint ||
+      "The coach couldn't finish Coach Cards for this clip. Your video is fine — retry Analyze."
+
     return (
       <div className="space-y-4">
         <div className="rounded-2xl border border-amber-500/30 bg-gradient-to-br from-amber-950/40 via-slate-900/80 to-slate-950/60 p-5 backdrop-blur-xl">
@@ -247,9 +280,29 @@ export function CoachingPanel({ payload, llmIssues, quotaState, ratingContext, c
             <div className="text-sm font-bold tracking-wide text-amber-100">COACHING UNAVAILABLE</div>
           </div>
           <div className="mt-3 text-[15px] font-medium leading-relaxed text-white/90">
-            The coach couldn&apos;t review this clip right now. Your video and tracking are fine —
-            try running the analysis again in a moment.
+            {body}
           </div>
+          {onRetryAnalyze && (
+            <div className="mt-4">
+              <button
+                type="button"
+                disabled={retryBusy}
+                onClick={() => onRetryAnalyze()}
+                className="rounded-lg border border-amber-400/40 bg-amber-500/15 px-3 py-2 text-sm font-semibold text-amber-100 transition hover:bg-amber-500/25 disabled:opacity-50"
+              >
+                {retryBusy ? 'Retrying…' : 'Retry Analyze'}
+              </button>
+            </div>
+          )}
+          {isAdmin && Array.isArray(llmIssues) && llmIssues.length > 0 && (
+            <ul className="mt-3 list-disc space-y-1 pl-5 text-xs text-zinc-400">
+              {llmIssues.slice(0, 4).map((i, idx) => (
+                <li key={idx}>
+                  <span className="font-medium text-zinc-300">{i.code}</span>: {i.message}
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
       </div>
     )
