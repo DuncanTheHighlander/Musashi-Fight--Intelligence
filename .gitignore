@@ -101,3 +101,4 @@ public/models/*.onnx
 
 # Stray local OAuth helper file
 .codex-wrangler-long-oauth-url.txt
+eval-results/
