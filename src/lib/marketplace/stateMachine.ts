@@ -34,6 +34,7 @@ export type JobEvent =
   | 'RESOLVE_REFUND'
   | 'RESOLVE_RELEASE'
   | 'RESOLVE_SPLIT'
+  | 'DISMISS_DISPUTE'
   | 'CANCEL'
   | 'EXPIRE'
 
@@ -81,6 +82,7 @@ const TRANSITIONS: Record<JobStatus, Partial<Record<JobEvent, JobStatus>>> = {
     RESOLVE_REFUND: 'RESOLVED_REFUND',
     RESOLVE_RELEASE: 'RESOLVED_RELEASE',
     RESOLVE_SPLIT: 'RESOLVED_SPLIT',
+    DISMISS_DISPUTE: 'SUBMITTED',
   },
   // Terminals
   RESOLVED_REFUND: {},

@@ -1,11 +1,20 @@
 import { NextResponse } from 'next/server'
 import { requireStripeSecretKey } from '@/lib/stripe/getStripeSecretKey'
+import { requireUser } from '@/lib/musashiAuth'
 
 /**
- * Example Worker-backed route: validates Stripe secret from Secrets Store.
- * Returns metadata only — never exposes the secret key to the client.
+ * Worker-backed route: validates Stripe secret from Secrets Store.
+ * Shogun-only; returns metadata only — never exposes the secret key.
  */
-export async function GET() {
+export async function GET(request: Request) {
+  try {
+    await requireUser(request, { role: 'shogun' })
+  } catch (e) {
+    const code = e instanceof Error ? e.message : 'UNKNOWN'
+    if (code === 'UNAUTHORIZED') return NextResponse.json({ error: 'Login required' }, { status: 401 })
+    return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+  }
+
   try {
     const secretKey = await requireStripeSecretKey()
     const mode = secretKey.startsWith('sk_live_') ? 'live' : 'test'
@@ -13,7 +22,6 @@ export async function GET() {
     return NextResponse.json({
       configured: true,
       mode,
-      keyPrefix: `${secretKey.slice(0, 7)}…`,
     })
   } catch {
     return NextResponse.json({ configured: false, mode: null }, { status: 503 })

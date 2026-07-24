@@ -12,6 +12,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Badge } from '@/components/ui/badge'
 import { PromptPreviewModal } from '@/components/ui/prompt-preview-modal'
 import { ShogunOverviewPanel, type OverviewData } from '@/components/admin/ShogunOverviewPanel'
+import { ShogunBusinessPanel } from '@/components/admin/ShogunBusinessPanel'
 import { AiCorrectionsPanel } from '@/components/admin/AiCorrectionsPanel'
 import { Eye, AlertCircle, CheckCircle } from 'lucide-react'
 import { parseApiResponse } from '@/lib/safeJson'
@@ -442,6 +443,7 @@ export default function ShogunPage() {
         <Tabs defaultValue="overview">
           <TabsList>
             <TabsTrigger value="overview">Overview</TabsTrigger>
+            <TabsTrigger value="business">Business</TabsTrigger>
             <TabsTrigger value="corrections">Corrections</TabsTrigger>
             <TabsTrigger value="limits">Limits</TabsTrigger>
             <TabsTrigger value="prompts">Prompts</TabsTrigger>
@@ -453,6 +455,10 @@ export default function ShogunPage() {
               onRefresh={loadOverview}
               onError={setError}
             />
+          </TabsContent>
+
+          <TabsContent value="business">
+            <ShogunBusinessPanel onError={setError} />
           </TabsContent>
 
           <TabsContent value="corrections">

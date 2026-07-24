@@ -12,7 +12,7 @@
  *   refund   → RESOLVED_REFUND, full refund to fighter
  *   release  → RESOLVED_RELEASE, full payout (minus fee) to analyst
  *   split    → RESOLVED_SPLIT, partial refund + partial payout
- *   dismiss  → DISMISSED, no ledger change, job returned to APPROVED → RELEASE
+ *   dismiss  → DISMISSED, no ledger change, job returned to SUBMITTED
  */
 import { NextResponse } from 'next/server'
 import { requireUser } from '@/lib/musashiAuth'
@@ -30,6 +30,16 @@ type Params = { id: string }
 
 type Resolution = 'refund' | 'release' | 'split' | 'dismiss'
 const VALID_RESOLUTIONS: Resolution[] = ['refund', 'release', 'split', 'dismiss']
+
+function paymentFailureResponse(body: Record<string, unknown>, e: unknown) {
+  return NextResponse.json(
+    {
+      ...body,
+      paymentWarning: e instanceof Error ? e.message : 'Payment provider failed',
+    },
+    { status: 502 },
+  )
+}
 
 export async function POST(req: Request, context: { params: Promise<Params> }) {
   try {
@@ -87,10 +97,7 @@ export async function POST(req: Request, context: { params: Promise<Params> }) {
       try {
         await executeJobRefundMoneyMovement(db, job.id)
       } catch (e) {
-        return NextResponse.json({
-          status: 'RESOLVED_REFUND',
-          paymentWarning: e instanceof Error ? e.message : 'Refund provider failed',
-        })
+        return paymentFailureResponse({ status: 'RESOLVED_REFUND' }, e)
       }
       return NextResponse.json({ status: 'RESOLVED_REFUND' })
     }
@@ -127,10 +134,7 @@ export async function POST(req: Request, context: { params: Promise<Params> }) {
       try {
         await executeJobReleaseMoneyMovement(db, job.id)
       } catch (e) {
-        return NextResponse.json({
-          status: 'RESOLVED_RELEASE',
-          paymentWarning: e instanceof Error ? e.message : 'Payout provider failed',
-        })
+        return paymentFailureResponse({ status: 'RESOLVED_RELEASE' }, e)
       }
       return NextResponse.json({ status: 'RESOLVED_RELEASE' })
     }
@@ -144,7 +148,6 @@ export async function POST(req: Request, context: { params: Promise<Params> }) {
           { status: 400 },
         )
       }
-      // Platform fee scales down proportionally with the payout.
       const feeBps = job.platform_fee_bps
       const platformFeeCents = Math.floor((payoutAmountCents * feeBps) / 10_000)
       const analystNetCents = Math.max(0, payoutAmountCents - platformFeeCents)
@@ -176,13 +179,15 @@ export async function POST(req: Request, context: { params: Promise<Params> }) {
       try {
         await executeJobSplitMoneyMovement(db, job.id)
       } catch (e) {
-        return NextResponse.json({
-          status: 'RESOLVED_SPLIT',
-          refundAmountCents,
-          payoutAmountCents: analystNetCents,
-          platformFeeCents,
-          paymentWarning: e instanceof Error ? e.message : 'Split payout provider failed',
-        })
+        return paymentFailureResponse(
+          {
+            status: 'RESOLVED_SPLIT',
+            refundAmountCents,
+            payoutAmountCents: analystNetCents,
+            platformFeeCents,
+          },
+          e,
+        )
       }
       return NextResponse.json({
         status: 'RESOLVED_SPLIT',
@@ -192,26 +197,12 @@ export async function POST(req: Request, context: { params: Promise<Params> }) {
       })
     }
 
-    // dismiss: no money moved, dispute closed, job goes through normal RELEASE path.
     if (resolution === 'dismiss') {
-      await recordRelease(db, {
-        jobId: job.id,
-        amountCents: job.amount_cents,
-        platformFeeCents: job.platform_fee_cents,
-        analystPayoutCents: job.analyst_payout_cents,
-        currency: job.currency,
-        actorUserId: admin.id,
-      })
       await applyTransition(db, {
         jobId: job.id,
-        event: 'RESOLVE_RELEASE',
+        event: 'DISMISS_DISPUTE',
         actorUserId: admin.id,
-        patch: { released_at: now },
-        payload: { disputeId: id, notes, dismissed: true },
-      })
-      await recordAnalystPayoutStats(db, {
-        analystId: job.analyst_id,
-        analystPayoutCents: job.analyst_payout_cents,
+        payload: { disputeId: id, notes },
       })
       await db
         .prepare(
@@ -222,15 +213,7 @@ export async function POST(req: Request, context: { params: Promise<Params> }) {
         )
         .bind(admin.id, now, notes, now, id)
         .run()
-      try {
-        await executeJobReleaseMoneyMovement(db, job.id)
-      } catch (e) {
-        return NextResponse.json({
-          status: 'DISMISSED',
-          paymentWarning: e instanceof Error ? e.message : 'Payout provider failed',
-        })
-      }
-      return NextResponse.json({ status: 'DISMISSED' })
+      return NextResponse.json({ status: 'DISMISSED', jobStatus: 'SUBMITTED' })
     }
 
     return NextResponse.json({ error: 'unreachable' }, { status: 500 })

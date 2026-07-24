@@ -1,9 +1,21 @@
 name = "app"
-main = ".open-next/worker.js"
+main = "src/cloudflare-worker.ts"
 compatibility_date = "2024-09-23"
 compatibility_flags = ["nodejs_compat"]
+find_additional_modules = true
+preserve_file_names = true
 minify = true
 keep_names = false
+
+[[rules]]
+type = "ESModule"
+globs = [".open-next/**/*.js", ".open-next/**/*.mjs"]
+fallthrough = true
+
+[[rules]]
+type = "Text"
+globs = [".open-next/**/*.sql", ".open-next/**/*.html"]
+fallthrough = true
 
 [alias]
 sqlite = "./src/lib/workerEmptyModule.ts"

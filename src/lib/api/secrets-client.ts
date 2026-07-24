@@ -6,12 +6,10 @@
 export type StripeStatusResponse = {
   configured: boolean
   mode: 'live' | 'test' | null
-  keyPrefix?: string
 }
 
 export type SupabaseHealthResponse = {
   configured: boolean
-  url?: string
 }
 
 export type ConfigStatusResponse = {
@@ -29,18 +27,21 @@ export type ConfigStatusResponse = {
 /** Example: browser fetches Stripe status via Worker API route (no secrets in client). */
 export async function fetchStripeStatus(): Promise<StripeStatusResponse> {
   const res = await fetch('/api/stripe/status', { credentials: 'same-origin' })
+  if (!res.ok) throw new Error(`Stripe status failed (${res.status})`)
   return res.json()
 }
 
 /** Example: browser fetches Supabase health via Worker API route. */
 export async function fetchSupabaseHealth(): Promise<SupabaseHealthResponse> {
   const res = await fetch('/api/supabase/health', { credentials: 'same-origin' })
+  if (!res.ok) throw new Error(`Supabase health failed (${res.status})`)
   return res.json()
 }
 
 /** Ops dashboard: which Secrets Store bindings resolve (booleans only). */
 export async function fetchConfigStatus(): Promise<ConfigStatusResponse> {
   const res = await fetch('/api/internal/config-status', { credentials: 'same-origin' })
+  if (!res.ok) throw new Error(`Config status failed (${res.status})`)
   return res.json()
 }
 

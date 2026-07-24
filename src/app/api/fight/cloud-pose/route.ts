@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import { readSecretEnv } from '@/lib/env'
-import { aiGuard, aiErrorResponse } from '@/lib/ai/aiGuard'
+import { aiGuard, aiErrorResponse, isAuthDisabled } from '@/lib/ai/aiGuard'
 import { enforceCloudPoseRateLimit } from '@/lib/musashiUsage'
 
 export const maxDuration = 300
@@ -119,7 +119,7 @@ export async function POST(request: Request) {
   const guard = await aiGuard(request, 'track')
   if (!guard.ok) return guard.response
 
-  if (guard.user && process.env.MUSASHI_DISABLE_AUTH !== '1') {
+  if (guard.user && !isAuthDisabled()) {
     try {
       await enforceCloudPoseRateLimit(guard.user.id)
     } catch (err) {

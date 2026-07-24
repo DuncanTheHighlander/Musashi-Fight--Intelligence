@@ -41,6 +41,8 @@ const hasDbBinding = (): boolean => {
 const isAuthDisabled = (): boolean =>
   process.env.MUSASHI_DISABLE_AUTH === '1' && process.env.NODE_ENV !== 'production'
 
+export { isAuthDisabled }
+
 // In-memory burst limiter — only used when D1 is unavailable. Per-IP,
 // per-action, 60-second rolling window. Intentionally tiny: this is a
 // safety net for local dev, NOT a substitute for the D1-backed quota.

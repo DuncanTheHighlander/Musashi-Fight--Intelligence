@@ -27,27 +27,21 @@ type PreviewState = {
 }
 
 function startOneShotDictate(onText: (t: string) => void, onError?: (msg: string) => void) {
+  type SpeechRec = {
+    lang: string
+    interimResults: boolean
+    continuous: boolean
+    onresult: ((ev: {
+      results: ArrayLike<{ 0?: { transcript?: string }; isFinal?: boolean }>
+    }) => void) | null
+    onerror: ((ev: { error?: string }) => void) | null
+    onend: (() => void) | null
+    start: () => void
+    stop: () => void
+  }
   const w = window as unknown as {
-    SpeechRecognition?: new () => {
-      lang: string
-      interimResults: boolean
-      continuous: boolean
-      onresult: ((ev: { results: ArrayLike<{ 0: { transcript: string }; isFinal?: boolean } }>) => void) | null
-      onerror: ((ev: { error?: string }) => void) | null
-      onend: (() => void) | null
-      start: () => void
-      stop: () => void
-    }
-    webkitSpeechRecognition?: new () => {
-      lang: string
-      interimResults: boolean
-      continuous: boolean
-      onresult: ((ev: { results: ArrayLike<{ 0: { transcript: string }; isFinal?: boolean } }>) => void) | null
-      onerror: ((ev: { error?: string }) => void) | null
-      onend: (() => void) | null
-      start: () => void
-      stop: () => void
-    }
+    SpeechRecognition?: new () => SpeechRec
+    webkitSpeechRecognition?: new () => SpeechRec
   }
   const Ctor = w.SpeechRecognition || w.webkitSpeechRecognition
   if (!Ctor) {

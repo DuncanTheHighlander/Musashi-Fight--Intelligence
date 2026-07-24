@@ -4,8 +4,8 @@ import {
   getDefaultPaymentMethodId,
   stripeFormRequest,
 } from '@/lib/stripe/customer'
+import { resolveSameOriginCheckoutUrl } from '@/lib/marketplace/checkoutUrls'
 import type { MarketplaceJobRow } from './types'
-
 export type MarketplacePaymentMode = 'mock' | 'stripe'
 
 export type MarketplaceFundingSession = {
@@ -83,14 +83,16 @@ export async function createMarketplaceCheckoutSession(args: {
   const secretKey = await getStripeSecretKey()
   if (!secretKey) throw new Error('STRIPE_NOT_CONFIGURED')
 
-  const origin = new URL(args.req.url).origin
-  const successUrl =
-    args.successUrl ||
-    `${origin}/marketplace/jobs/${args.job.id}?funding=success`
-  const cancelUrl =
-    args.cancelUrl ||
-    `${origin}/marketplace/jobs/${args.job.id}?funding=cancelled`
-
+  const successUrl = resolveSameOriginCheckoutUrl(
+    args.req,
+    args.successUrl,
+    `/marketplace/jobs/${args.job.id}?funding=success`,
+  )
+  const cancelUrl = resolveSameOriginCheckoutUrl(
+    args.req,
+    args.cancelUrl,
+    `/marketplace/jobs/${args.job.id}?funding=cancelled`,
+  )
   const form = new URLSearchParams()
   form.set('mode', 'payment')
   form.set('success_url', successUrl)

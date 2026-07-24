@@ -95,6 +95,8 @@ pnpm predeploy       # env check + unit tests
 pnpm deploy          # build:cf + wrangler deploy --config wrangler.bundle.toml
 ```
 
+Production deploy uses `src/cloudflare-worker.ts` as the Worker entry (via `wrangler.bundle.toml`). That wrapper re-exports OpenNext's `fetch` handler and adds the Cloudflare `scheduled` trigger for marketplace cron maintenance. After deploy, confirm Triggers → Cron in the Cloudflare dashboard shows an active scheduled handler. HTTP fallback: `/api/cron/marketplace` with `X-Cron-Secret`.
+
 Windows note: `build:cf` needs Developer Mode ON (symlinks) — or deploy from WSL/CI.
 
 ## 7. Stripe webhook (after first deploy)
