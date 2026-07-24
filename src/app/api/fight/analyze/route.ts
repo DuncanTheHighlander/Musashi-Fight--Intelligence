@@ -36,6 +36,13 @@ import { readUploadedAssetBytes } from '@/lib/storage/assets'
 import { computeVideoFingerprint } from '@/lib/aiCorrections/fingerprint'
 import { formatApprovedCorrectionsBlock, formatCorrectionAppliedSummary } from '@/lib/aiCorrections/formatBlock'
 import { fetchApprovedCorrectionsForClip } from '@/lib/aiCorrections/store'
+import { visionFirstEnabled } from '@/lib/visionFirst'
+import {
+  buildVisionEvidence,
+  hasUsableVisionEvidence,
+  type VisionEvidence,
+  type VisionEvidenceUsage,
+} from '@/lib/evidence/visionEvidence'
 
 export const maxDuration = 60
 
@@ -251,7 +258,11 @@ export async function POST(request: Request) {
     const hasVideoTape = Boolean(videoFileUri || videoInlineBase64)
 
     const poseFrames = normalizePoseFrames(data)
-    const visionFirst = isVisionFirstSport(data.sport)
+    // Vision-first rollout: with the flag ON, EVERY sport coaches from the
+    // tape when one is attached — pose becomes optional supporting evidence
+    // and its absence can never block Coach Cards.
+    const visionPrimary = visionFirstEnabled() && llmEnabled && hasVideoTape
+    const visionFirst = isVisionFirstSport(data.sport) || visionPrimary
     const visionOnly =
       poseFrames.length === 0 &&
       llmEnabled &&
@@ -318,7 +329,57 @@ export async function POST(request: Request) {
       ...(pose3DFrames ? { pose3DFrames } : {}),
     })
 
-    if (llmEnabled && hasVideoTape) {
+    // ── Vision-first Pass 1: THE single full-video Gemini call ─────────────
+    // Replaces the legacy two-call flash scan + verification when the flag is
+    // on. The coaching pass below then runs on evidence JSON with NO video.
+    let visionEvidence: VisionEvidence | null = null
+    let visionEvidenceUsage: VisionEvidenceUsage | null = null
+    if (visionPrimary) {
+      try {
+        const result = await buildVisionEvidence({
+          videoFileUri,
+          videoInlineBase64,
+          videoMimeType,
+          sport: data.sport,
+          clipType: data.clipType,
+          focusTarget: data.focusTarget,
+          clipDurationSec:
+            typeof data.clip?.durationMs === 'number' && data.clip.durationMs > 0
+              ? data.clip.durationMs / 1000
+              : null,
+          startSec: data.startSec,
+          endSec: data.endSec,
+        })
+        visionEvidence = result.evidence
+        visionEvidenceUsage = result.usage
+        console.log(
+          `[VisionFirst] evidence pass ok: model=${result.usage.model} latency=${result.usage.latencyMs}ms tokens=${result.usage.totalTokens ?? '?'} people=${visionEvidence.people.length} seen=${visionEvidence.seen.length} heard=${visionEvidence.heard.length}`,
+        )
+      } catch (evidenceErr) {
+        const message = evidenceErr instanceof Error ? evidenceErr.message : String(evidenceErr)
+        console.warn('[VisionFirst] evidence pass failed:', message)
+        if (visionOnly) {
+          // No pose AND no vision evidence — nothing to coach from.
+          return NextResponse.json(
+            { success: false, error: `Vision analysis failed: ${message}`, failedStage: 'gemini_evidence' },
+            { status: 502 },
+          )
+        }
+        // Pose exists: continue with the legacy ledger-only coaching path.
+      }
+      if (visionOnly && !hasUsableVisionEvidence(visionEvidence)) {
+        return NextResponse.json(
+          {
+            success: false,
+            error: 'Vision analysis produced no usable evidence for this clip.',
+            failedStage: 'gemini_evidence',
+          },
+          { status: 502 },
+        )
+      }
+    }
+
+    if (llmEnabled && hasVideoTape && !visionPrimary) {
       try {
         const mode = sessionEvidence.provenance.mode
         const focusTargetStr =
@@ -388,9 +449,9 @@ export async function POST(request: Request) {
       }
     }
 
-    if (visionOnly && !sessionEvidence.merged.visionFacts) {
+    if (visionOnly && !visionPrimary && !sessionEvidence.merged.visionFacts) {
       return NextResponse.json(
-        { success: false, error: 'Vision analysis produced no usable ledger for this clip.' },
+        { success: false, error: 'Vision analysis produced no usable ledger for this clip.', failedStage: 'gemini_evidence' },
         { status: 502 },
       )
     }
@@ -563,8 +624,11 @@ export async function POST(request: Request) {
           endSec: data.endSec,
           visionLedger: sessionEvidence.merged.visionFacts,
           temporalEvidence: temporal,
-          // Without pose identity tracks, map A/B to left/right of the frame.
-          visionScreenMapping: visionOnly || (visionFirst && hasVideoTape),
+          // Pass-1 evidence: when set, coaching runs WITHOUT re-sending video.
+          visionEvidence,
+          // With vision evidence, identity comes from its fighterAssignment;
+          // the left/right fallback only applies when no evidence exists.
+          visionScreenMapping: !visionEvidence && (visionOnly || (visionFirst && hasVideoTape)),
           coachBrain: {
             selectedSport: data.sport,
             clipType: data.clipType,
@@ -653,6 +717,9 @@ export async function POST(request: Request) {
     return NextResponse.json({
       success: true,
       ledger: coachingLedger,
+      visionFirst: visionPrimary,
+      ...(visionEvidence ? { visionEvidence } : {}),
+      ...(visionEvidenceUsage ? { visionEvidenceUsage } : {}),
       sessionEvidence: {
         provenance: sessionEvidence.provenance,
         mergeNotes: sessionEvidence.merged.mergeNotes,

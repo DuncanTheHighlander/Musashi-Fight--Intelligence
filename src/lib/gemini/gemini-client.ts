@@ -1,7 +1,8 @@
 import { safeParseResponse } from '@/lib/safeJson'
 import type { FightEvidenceLedger } from '@/lib/fightlang/fightlang.types'
 import type { CoachingPayload } from '@/lib/validators/llm-output.validator'
-import { GEMINI_MODEL_DEFAULT, GEMINI_EMBED_MODEL_DEFAULT, resolvedModels } from '@/lib/gemini/models'
+import { GEMINI_MODEL_DEFAULT, GEMINI_EMBED_MODEL_DEFAULT, isGemini3Model, resolvedModels } from '@/lib/gemini/models'
+import { formatVisionEvidenceBlock, type VisionEvidence } from '@/lib/evidence/visionEvidence'
 import { getServerSecret, requireGeminiApiKey } from '@/lib/cloudflare/secrets'
 import { getCoachingCache, sha256Hex } from '@/lib/ai/coachingCache'
 import { buildCoachBrainBlock, type CoachBrainContext } from '@/lib/coachBrain/coachBrain'
@@ -133,6 +134,12 @@ export function buildGroundedCoachingPrompt(args: {
    * Attached beside retrieval — never inside coach-brain text.
    */
   approvedCorrectionsBlock?: string | null
+  /**
+   * Vision-first Pass 1 evidence (SEEN/HEARD/INFERRED/UNCERTAIN). When present
+   * it is the PRIMARY source of truth and the FightLang ledger is demoted to
+   * supporting evidence — the tape itself is NOT re-sent on this pass.
+   */
+  visionEvidence?: VisionEvidence | null
 }): string {
   // Keep the model constrained: ledger is truth; everything must cite evidence ids when available.
   const ledgerJson = JSON.stringify(
@@ -240,20 +247,41 @@ ${JSON.stringify(args.temporalEvidence.exchangeWindows, null, 2)}
 `
       : ''
 
+  const visionFirstMode = Boolean(args.visionEvidence)
+  const visionEvidenceMainBlock = args.visionEvidence
+    ? `\n${formatVisionEvidenceBlock(args.visionEvidence)}\n`
+    : ''
+
+  const criticalContract = visionFirstMode
+    ? `CRITICAL CONTRACT (VISION-FIRST):
+- The VISION EVIDENCE LEDGER above is the PRIMARY source of truth — it was extracted from the actual tape (video + audio).
+- Coach ONLY the people it classifies as fighters. Never coach the referee, a spectator, a coach, or the cameraman.
+- "heard" entries are audio only: a shouted instruction ("throw a knee!") is NEVER evidence the action happened — only a "seen" entry proves an action.
+- Respect "uncertain": never describe hidden grips, occluded limbs, or anything the evidence marks unknowable.
+- The FightEvidenceLedger below is SUPPORTING pose evidence only. Use it to corroborate stance, guard, posture, level changes, and movement direction. Where it conflicts with the vision evidence, the vision evidence wins.
+- You MUST NOT invent strikes, stances, faults, or events absent from the vision evidence.
+- But you MUST interpret the data tactically. Turn raw observations into fight analysis.`
+    : `CRITICAL CONTRACT:
+- The FightEvidenceLedger is the ONLY source of truth for what was detected.
+- You MUST NOT invent strikes, stances, faults, or events not in the ledger.
+- But you MUST interpret the data tactically. Turn raw detections into fight analysis.`
+
+  const ledgerVocabularyBlock = visionFirstMode
+    ? `- Name techniques with the specificity the vision evidence supports — say "jab" when a jab is seen, "level change to double-leg" when seen. Never upgrade an uncertain action into a named technique.
+- Timestamps must come from the vision evidence (seen/heard entries, phases, coaching windows).`
+    : `- Events now include CLASSIFIED STRIKES (jab, cross, lead_hook, rear_hook, lead_uppercut, rear_uppercut, teep, lead_kick, rear_kick). Use the specific strike type in your analysis — say "jab" not "strike."
+- Patterns include: guard_drop_before_entry, linear_retreat (only moves straight back), one_beat_entry (same-timing entry, counterable), circling (fighter moving laterally around opponent — describe direction and tactical purpose), ring_cutting (fighter cutting off angles to trap opponent). Name these patterns specifically and explain the tactical consequence.
+- MOVEMENT IS CRITICAL: If "circling" or "ring_cutting" patterns appear in the ledger, you MUST mention them prominently. Describe WHO is circling, in what direction, and whether the other fighter is cutting off the ring or retreating linearly. Do NOT say "both fighters moving in a straight line" if a circling pattern exists.`
+
   return `You are Musashi Fight Intelligence - an elite combat-sports coach and tactical fight analyst.
 
 YOUR JOB: Analyze the fight evidence and produce serious, technical, useful coaching. The feedback must feel like a high-level coach reviewed the exchange: what happened, why it happened, what danger or opportunity it creates, and exactly what the selected fighter should fix next.
 ${shortClipBlock}
 
 ${buildCoachingFocusBlock(args.focusTarget, { visionScreenMapping: args.visionScreenMapping })}
-
-CRITICAL CONTRACT:
-- The FightEvidenceLedger is the ONLY source of truth for what was detected.
-- You MUST NOT invent strikes, stances, faults, or events not in the ledger.
-- But you MUST interpret the data tactically. Turn raw detections into fight analysis.
-- Events now include CLASSIFIED STRIKES (jab, cross, lead_hook, rear_hook, lead_uppercut, rear_uppercut, teep, lead_kick, rear_kick). Use the specific strike type in your analysis — say "jab" not "strike."
-- Patterns include: guard_drop_before_entry, linear_retreat (only moves straight back), one_beat_entry (same-timing entry, counterable), circling (fighter moving laterally around opponent — describe direction and tactical purpose), ring_cutting (fighter cutting off angles to trap opponent). Name these patterns specifically and explain the tactical consequence.
-- MOVEMENT IS CRITICAL: If "circling" or "ring_cutting" patterns appear in the ledger, you MUST mention them prominently. Describe WHO is circling, in what direction, and whether the other fighter is cutting off the ring or retreating linearly. Do NOT say "both fighters moving in a straight line" if a circling pattern exists.
+${visionEvidenceMainBlock}
+${criticalContract}
+${ledgerVocabularyBlock}
 - Example: Don't say "Guard low detected." Instead say "Fighter A is leaving the chin open after jab combinations — B has a clear counter-cross opportunity through the gap."
 - Example: Don't say "Range is mid." Instead say "A is controlling distance with the jab and B can't get inside — B needs to use angles or level-change to close the gap."
 - Example: Don't say "Strike detected." Instead say "A lands a cross — B's guard was low after the hook, creating a clean line."
@@ -313,7 +341,7 @@ ${coachBrainBlock}
 Retrieved fight knowledge (use to ground tactical concepts):
 ${retrievedBlock}
 ${args.approvedCorrectionsBlock ? `\n${args.approvedCorrectionsBlock}\n` : ''}
-Current FightEvidenceLedger (truncated):
+${visionFirstMode ? 'Supporting FightEvidenceLedger (pose-derived, corroboration only — vision evidence wins on conflict; truncated):' : 'Current FightEvidenceLedger (truncated):'}
 ${ledgerJson}
 
 CONCISENESS RULE: Be dense and punchy like an elite corner coach / fight reporter, NOT a lecture. Every word must earn its spot. No filler, no generic advice.
@@ -429,14 +457,19 @@ export async function generateJson<T>(args: {
   apiKey?: string
 }): Promise<{ model: string; data: T; rawText: string }> {
   const apiKey = await resolveKey(args.apiKey)
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(args.model)}:generateContent?key=${encodeURIComponent(apiKey)}`
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(args.model)}:generateContent`
 
   const body = JSON.stringify({
     contents: [{ role: 'user', parts: args.parts }],
     generationConfig: {
-      temperature: args.temperature ?? 0.3,
-      topP: args.topP ?? 0.95,
-      topK: args.topK ?? 40,
+      // Gemini 3.x: sampling params stay at server defaults per official docs.
+      ...(isGemini3Model(args.model)
+        ? {}
+        : {
+            temperature: args.temperature ?? 0.3,
+            topP: args.topP ?? 0.95,
+            topK: args.topK ?? 40,
+          }),
       maxOutputTokens: args.maxOutputTokens ?? 2048,
       responseMimeType: 'application/json',
     },
@@ -444,7 +477,7 @@ export async function generateJson<T>(args: {
 
   const resp = await fetchWithRetry(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
     body,
   })
 
@@ -488,7 +521,7 @@ async function attemptCoachingWithModel(args: {
   endSec?: number | null
   sport?: string | null
 }): Promise<{ model: string; payload: CoachingPayload; rawText: string }> {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(args.model)}:generateContent?key=${encodeURIComponent(args.apiKey)}`
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(args.model)}:generateContent`
 
   const parts: Array<Record<string, unknown>> = []
   const videoOpts = {
@@ -509,7 +542,7 @@ async function attemptCoachingWithModel(args: {
 
   // Gemini 3.x Pro rejects thinkingBudget:0 ("only works in thinking mode").
   // Use thinkingLevel for 3.x; keep thinkingBudget for 2.5 Flash-style models.
-  const isGemini3 = /gemini-3/i.test(args.model)
+  const isGemini3 = isGemini3Model(args.model)
   const thinkingConfig = isGemini3
     ? { thinkingLevel: 'LOW' as const }
     : { thinkingBudget: 0 }
@@ -517,9 +550,9 @@ async function attemptCoachingWithModel(args: {
   const body = JSON.stringify({
     contents: [{ role: 'user', parts }],
     generationConfig: {
-      temperature: 0.25,
-      topP: 0.9,
-      topK: 40,
+      // Gemini 3.x official guidance: keep temperature/topP/topK at server
+      // defaults (temperature 1.0). Legacy 2.x models keep the old tuning.
+      ...(isGemini3 ? {} : { temperature: 0.25, topP: 0.9, topK: 40 }),
       maxOutputTokens: 8192,
       responseMimeType: 'application/json',
       thinkingConfig,
@@ -532,7 +565,8 @@ async function attemptCoachingWithModel(args: {
 
   const resp = await fetchWithRetry(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    // API key travels in a header, never the query string (log hygiene).
+    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': args.apiKey },
     body,
   })
 
@@ -592,6 +626,14 @@ export async function generateGroundedCoaching(args: {
   visionScreenMapping?: boolean
   /** Exact-clip approved corrections block (beside retrieval). */
   approvedCorrectionsBlock?: string | null
+  /**
+   * Vision-first Pass 1 evidence. When present, coaching runs on the evidence
+   * JSON and the video is NOT attached (CRITICAL COST RULE: the tape is sent
+   * to Gemini exactly once, in the evidence pass). Set `resendVideoOverride`
+   * for a controlled retry / Shogun diagnostic only.
+   */
+  visionEvidence?: VisionEvidence | null
+  resendVideoOverride?: boolean
 }): Promise<{ model: string; payload: CoachingPayload; rawText: string }> {
   // DRY_RUN short-circuit — returns a deterministic mock payload so smoke
   // tests and local iteration don't burn Gemini tokens. Toggle via env:
@@ -618,7 +660,15 @@ export async function generateGroundedCoaching(args: {
     temporalEvidence: args.temporalEvidence,
     visionScreenMapping: args.visionScreenMapping,
     approvedCorrectionsBlock: args.approvedCorrectionsBlock,
+    visionEvidence: args.visionEvidence,
   })
+
+  // CRITICAL COST RULE: when Pass-1 vision evidence is present, the coaching
+  // pass runs on evidence JSON only — the tape was already sent once. Video is
+  // re-attached only via the explicit override (controlled retry / Shogun).
+  const attachVideo = !args.visionEvidence || args.resendVideoOverride === true
+  const coachingVideoFileUri = attachVideo ? args.videoFileUri : undefined
+  const coachingVideoInline = attachVideo ? args.videoInlineBase64 : undefined
 
   // Phase 2: dedupe + LRU result cache. Two callers with literally identical
   // Gemini inputs share one round-trip; repeated requests inside the TTL
@@ -651,8 +701,8 @@ export async function generateGroundedCoaching(args: {
           model,
           apiKey,
           prompt,
-          videoFileUri: args.videoFileUri,
-          videoInlineBase64: args.videoInlineBase64,
+          videoFileUri: coachingVideoFileUri,
+          videoInlineBase64: coachingVideoInline,
           videoMimeType: args.videoMimeType,
           startSec: args.startSec,
           endSec: args.endSec,
