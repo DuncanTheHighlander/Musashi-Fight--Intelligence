@@ -257,11 +257,21 @@ export async function POST(request: Request) {
 
     const hasVideoTape = Boolean(videoFileUri || videoInlineBase64)
 
-    const poseFrames = normalizePoseFrames(data)
+    let poseFrames = normalizePoseFrames(data)
     // Vision-first rollout: with the flag ON, EVERY sport coaches from the
     // tape when one is attached — pose becomes optional supporting evidence
     // and its absence can never block Coach Cards.
     const visionPrimary = visionFirstEnabled() && llmEnabled && hasVideoTape
+    // Defense in depth: when vision is primary, a low-quality pose sidecar is
+    // dropped server-side too — contaminated tracks (bystander lock, heavy
+    // occlusion) must never leak tactical claims into the coaching ledger.
+    if (visionPrimary && poseFrames.length > 0) {
+      const q = String(data.pose?.quality ?? '').toLowerCase()
+      if (q === 'low' || (typeof data.pose?.quality === 'number' && data.pose.quality < 0.5)) {
+        console.log('[VisionFirst] dropping low-quality pose sidecar (%d frames, quality=%s)', poseFrames.length, String(data.pose?.quality))
+        poseFrames = []
+      }
+    }
     const visionFirst = isVisionFirstSport(data.sport) || visionPrimary
     const visionOnly =
       poseFrames.length === 0 &&

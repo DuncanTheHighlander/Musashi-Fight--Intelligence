@@ -746,6 +746,19 @@ export default function FightCoachExperience({
     if (poseQualityOverrideRef.current) return false
     return poseEngineInfoRef.current?.quality?.recommendation === 'request_better_clip'
   }, [])
+  /**
+   * Vision-first pose sidecar gate: pose evidence rides along to coaching ONLY
+   * when the dense track is trustworthy — quality not low, at least half the
+   * samples usable, and both fighters tracked in at least half of them (the
+   * identity-confidence proxy; a track locked onto one person or a bystander
+   * fails this). Weak pose is silently dropped — never a card blocker.
+   */
+  const isPoseSidecarReliable = useCallback(() => {
+    const info = poseEngineInfoRef.current
+    const q = info?.quality
+    if (!info || !q) return false
+    return q.overall !== 'low' && q.coverage >= 0.5 && q.bothFighters >= 0.5
+  }, [])
   useEffect(() => {
     try {
       const stored = window.localStorage.getItem('musashiSelectedSport')
@@ -1811,8 +1824,13 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
 
   const analyzeFightLangWindow = useCallback(
     async (opts?: { mode?: 'window' | 'full'; windowMs?: number; replayPass?: number }): Promise<boolean> => {
-      // Vision-first sports coach from tape — pose quality must not block the card path.
-      if (isPoseQualitySpendBlocked() && !isVisionFirstSport(selectedSportRef.current)) return false
+      // Vision-first: pose quality NEVER vetoes the card path — the tape is the
+      // evidence. (Legacy behavior kept when the flag is off.)
+      if (
+        isPoseQualitySpendBlocked() &&
+        !visionFirstClientEnabled() &&
+        !isVisionFirstSport(selectedSportRef.current)
+      ) return false
 
       const frames = fightLangPoseFramesRef.current
       const video = videoRef.current
@@ -1838,8 +1856,12 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
       )
 
       const clipMeta = currentFightClipAiMetadata()
+      // Under the vision-first flag EVERY sport coaches from tape; pose is a
+      // reliability-gated sidecar, never a prerequisite.
       const visionFirst =
-        isVisionFirstSport(selectedSportRef.current) || isVisionFirstSport(clipMeta.sport)
+        visionFirstClientEnabled() ||
+        isVisionFirstSport(selectedSportRef.current) ||
+        isVisionFirstSport(clipMeta.sport)
       const grappling = isGrapplingClip({
         discipline: clipMeta.sport,
         clipType: clipMeta.clipType,
@@ -1963,13 +1985,20 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
             : slicePoseFramesWindow(pose3DFramesRef.current, windowMs)
           : []
 
+      // Vision-first: pose rides along ONLY when the dense track passes the
+      // reliability gate (quality/coverage/both-fighter thresholds); otherwise
+      // empty pose keeps the server on the vision-only path. Weak pose is
+      // silently dropped — it can never block or contaminate the cards.
+      const poseSidecar = visionFirstTape
+        ? (visionFirstClientEnabled() && isPoseSidecarReliable() ? slice : [])
+        : slice
+
       const result = await dedupeInflight(dedupeKey, () =>
         fetchAndParseApiResponse<any>('/api/fight/analyze', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            // Vision-first: empty pose forces the server vision-only coaching path.
-            poseFrames: visionFirstTape ? [] : slice,
+            poseFrames: poseSidecar,
             ...(!visionFirstTape && kinSlice.length >= 4 ? { kinematics: kinSlice } : {}),
             ...(!visionFirstTape && temporalBurst ? { temporalBurst } : {}),
             ...(!visionFirstTape && pose3dSlice.length >= 4 ? { pose3DFrames: pose3dSlice } : {}),
@@ -1980,7 +2009,9 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
             llm: { enabled: true },
             // Sport + clip context route the coach-brain sport file and context notes server-side.
             ...currentFightClipAiMetadata(),
-            pose: visionFirstTape
+            // Provenance stays honest: report the real engine whenever pose
+            // frames actually ride along as the sidecar.
+            pose: visionFirstTape && poseSidecar.length === 0
               ? { engine: 'vision-first', quality: 'video' }
               : poseEngineInfoRef.current
                 ? {
@@ -2115,7 +2146,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
         if (!isStale()) setFightLangLoading(false)
       }
     },
-    [currentFightClipAiMetadata, focusTarget, isPoseQualitySpendBlocked, selectedWindowDurationSec, toast]
+    [currentFightClipAiMetadata, focusTarget, isPoseQualitySpendBlocked, isPoseSidecarReliable, selectedWindowDurationSec, toast]
   )
   const styleScanThreeFrames = async () => {
     if (!videoRef.current) return
@@ -3116,7 +3147,10 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
     }
 
     try {
-      const visionFirstBoot = isVisionFirstSport(selectedSportRef.current)
+      // Under the vision-first flag EVERY sport boots tape-first: upload →
+      // one evidence pass → Coach Cards. No pose-frame waits, no pose gates.
+      // The pose dense pass still runs in the background for the overlay.
+      const visionFirstBoot = visionFirstClientEnabled() || isVisionFirstSport(selectedSportRef.current)
       if (visionFirstBoot) {
         // BJJ/wrestling/judo: upload small artifact → parallel AI → all-at-once reveal.
         clipAnalysisPipelineStartedRef.current = true
@@ -4794,7 +4828,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                         }
                       }}
                       onError={(e) => {
-                        if (isVisionFirstSport(selectedSportRef.current) && !geminiFileUriRef.current) {
+                        if ((visionFirstClientEnabled() || isVisionFirstSport(selectedSportRef.current)) && !geminiFileUriRef.current) {
                           // HEVC/VFR phone originals may be undecodable by the
                           // browser. Keep the BJJ tape pipeline alive: it will
                           // replace this preview with the server-normalized MP4.
