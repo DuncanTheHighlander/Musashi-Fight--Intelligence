@@ -1,0 +1,117 @@
+{
+  "type": "OBJECT",
+  "properties": {
+    "schemaVersion": { "type": "STRING" },
+    "scene": {
+      "type": "OBJECT",
+      "properties": {
+        "setting": { "type": "STRING", "enum": ["cage", "ring", "mat", "open_gym", "outdoor", "unknown"] },
+        "fightAreaVisible": { "type": "BOOLEAN" },
+        "visibilityNotes": { "type": "ARRAY", "items": { "type": "STRING" } },
+        "cameraMotion": { "type": "STRING", "enum": ["stable", "handheld", "moving", "unknown"] },
+        "orientation": { "type": "STRING", "enum": ["landscape", "portrait", "unknown"] }
+      },
+      "required": ["setting", "fightAreaVisible", "cameraMotion", "orientation"]
+    },
+    "people": {
+      "type": "ARRAY",
+      "items": {
+        "type": "OBJECT",
+        "properties": {
+          "id": { "type": "STRING" },
+          "role": { "type": "STRING", "enum": ["fighter", "referee", "spectator", "cameraman", "coach", "unknown"] },
+          "description": { "type": "STRING" },
+          "screenPosition": { "type": "STRING", "enum": ["left", "right", "center", "foreground", "background", "moving"] },
+          "insideFightArea": { "type": "BOOLEAN", "nullable": true },
+          "focusCandidate": { "type": "BOOLEAN" },
+          "confidence": { "type": "NUMBER" }
+        },
+        "required": ["id", "role", "description", "screenPosition", "focusCandidate", "confidence"]
+      }
+    },
+    "fighterAssignment": {
+      "type": "OBJECT",
+      "properties": {
+        "fighterA_personId": { "type": "STRING", "nullable": true },
+        "fighterB_personId": { "type": "STRING", "nullable": true },
+        "basis": { "type": "STRING" },
+        "confidence": { "type": "NUMBER" },
+        "cornerColors": {
+          "type": "OBJECT",
+          "properties": {
+            "A": { "type": "STRING", "enum": ["blue", "red", "unknown"] },
+            "B": { "type": "STRING", "enum": ["blue", "red", "unknown"] }
+          },
+          "required": ["A", "B"]
+        }
+      },
+      "required": ["fighterA_personId", "fighterB_personId", "basis", "confidence", "cornerColors"]
+    },
+    "phases": {
+      "type": "ARRAY",
+      "items": {
+        "type": "OBJECT",
+        "properties": {
+          "startSec": { "type": "NUMBER" },
+          "endSec": { "type": "NUMBER" },
+          "label": { "type": "STRING" }
+        },
+        "required": ["startSec", "endSec", "label"]
+      }
+    },
+    "seen": {
+      "type": "ARRAY",
+      "items": {
+        "type": "OBJECT",
+        "properties": {
+          "startSec": { "type": "NUMBER" },
+          "endSec": { "type": "NUMBER" },
+          "personIds": { "type": "ARRAY", "items": { "type": "STRING" } },
+          "observation": { "type": "STRING" },
+          "confidence": { "type": "NUMBER" }
+        },
+        "required": ["startSec", "endSec", "personIds", "observation", "confidence"]
+      }
+    },
+    "heard": {
+      "type": "ARRAY",
+      "items": {
+        "type": "OBJECT",
+        "properties": {
+          "tSec": { "type": "NUMBER" },
+          "kind": { "type": "STRING", "enum": ["coach_instruction", "crowd", "referee", "impact", "bell", "speech", "other"] },
+          "transcript": { "type": "STRING" },
+          "attribution": { "type": "STRING" },
+          "confidence": { "type": "NUMBER" }
+        },
+        "required": ["tSec", "kind", "transcript", "attribution", "confidence"]
+      }
+    },
+    "inferred": {
+      "type": "ARRAY",
+      "items": {
+        "type": "OBJECT",
+        "properties": {
+          "inference": { "type": "STRING" },
+          "basis": { "type": "STRING" },
+          "confidence": { "type": "NUMBER" }
+        },
+        "required": ["inference", "basis", "confidence"]
+      }
+    },
+    "uncertain": { "type": "ARRAY", "items": { "type": "STRING" } },
+    "coachingWindows": {
+      "type": "ARRAY",
+      "items": {
+        "type": "OBJECT",
+        "properties": {
+          "startSec": { "type": "NUMBER" },
+          "endSec": { "type": "NUMBER" },
+          "reason": { "type": "STRING" }
+        },
+        "required": ["startSec", "endSec", "reason"]
+      }
+    }
+  },
+  "required": ["schemaVersion", "scene", "people", "fighterAssignment", "phases", "seen", "heard", "inferred", "uncertain", "coachingWindows"]
+}

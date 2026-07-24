@@ -65,6 +65,7 @@ import { FightAnalyzer } from '@/components/video/FightAnalyzer'
 import { pickByClick } from '@/lib/pose/fighterSelection'
 import { visionFirstClientEnabled } from '@/lib/visionFirst'
 import type { VisionEvidence } from '@/lib/evidence/visionEvidence'
+import { classifyFailure, failureMessage, stageLabel } from '@/lib/fight/pipelineStatus'
 import { isRtmposeReady, rtmposeRequested } from '@/lib/pose/rtmposeBackend'
 import type { PoseEngineInfo } from '@/lib/pose/poseQuality'
 import { filterFramesByVisibility } from '@/lib/pose/poseQuality'
@@ -2132,11 +2133,21 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
         return true
       } catch (err) {
         if (!isStale()) {
-          const message = err instanceof Error ? err.message : 'Could not load coaching'
+          // Failure taxonomy: a dropped connection is a NETWORK failure and is
+          // reported as one — never as a pose or coaching content problem.
+          const kind = classifyFailure(err, 'building_coaching')
+          const message =
+            kind === 'network'
+              ? failureMessage('network')
+              : err instanceof Error
+                ? err.message
+                : 'Could not load coaching'
           console.warn('[FightLang analyze]', err)
-          setFightLangLlmIssues([{ code: 'coach_cards_incomplete', message }])
+          setFightLangLlmIssues([
+            { code: kind === 'network' ? 'network_error' : 'coach_cards_incomplete', message },
+          ])
           toast({
-            title: 'Analysis failed',
+            title: kind === 'network' ? 'Network error' : 'Analysis failed',
             description: message,
             variant: 'destructive',
           })
@@ -2762,7 +2773,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
     setUploadByteProgress(null)
     setIngestionStage('uploading_original')
     nativeUploadErrorRef.current = null
-    setInitialAnalysisStatus('Uploading original video securely...')
+    setInitialAnalysisStatus(stageLabel('uploading'))
     const silentToast = Boolean(opts?.silentToast)
     nativeUploadAbortRef.current?.abort()
     const uploadAbort = new AbortController()
@@ -2823,7 +2834,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
       }
 
       setIngestionStage('original_uploaded')
-      setInitialAnalysisStatus('Server is normalizing your video for AI…')
+      setInitialAnalysisStatus(stageLabel('preparing_video'))
       setIngestionStage('normalizing')
       const res = await fetch('/api/fight', {
         method: 'POST',
@@ -3161,7 +3172,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
         clipAnalysisPipelineStartedRef.current = true
         visionUploadAttemptedRef.current = true
         setCoachReady(false)
-        setBootPipelineMessage('Preparing your coach…')
+        setBootPipelineMessage(stageLabel('uploading'))
         // Hard ceiling so a hung upload/AI never traps Play forever.
         visionBootWatchdog = window.setTimeout(() => {
           if (!stillThisClip() || softUnlockedThisBoot) return
@@ -3185,7 +3196,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
           return false
         }
 
-        setBootPipelineMessage('Preparing your coach…')
+        setBootPipelineMessage(stageLabel('preparing_video'))
         const normalizedDeadline = Date.now() + 45_000
         let normalizedVideo: HTMLVideoElement | null = null
         while (Date.now() < normalizedDeadline) {
@@ -3220,7 +3231,14 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
         }
 
         setIngestionStage('analyzing')
-        setBootPipelineMessage('Preparing your coach…')
+        setBootPipelineMessage(stageLabel('watching'))
+        // Flip to the coaching stage label once the evidence pass has had time
+        // to complete server-side (both run inside one analyze request).
+        const coachingStageTimer = window.setTimeout(() => {
+          if (stillThisClip() && !softUnlockedThisBoot) {
+            setBootPipelineMessage(stageLabel('building_coaching'))
+          }
+        }, 20_000)
         // Vision-first: one grounded pipeline (analyze seeds chat). Legacy:
         // parallel initial clip analysis + deep Coach Cards.
         const [initialOk, coachCardsReady] = visionFirstClientEnabled()
@@ -3229,6 +3247,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
               runInitialClipAnalysis(fileUri, file),
               analyzeFightLangWindow({ mode: 'full' }),
             ])
+        window.clearTimeout(coachingStageTimer)
         clearVisionWatchdog()
         if (softUnlockedThisBoot || !stillThisClip()) return false
         if (!coachCardsReady) {
