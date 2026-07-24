@@ -65,6 +65,15 @@ import { FightAnalyzer } from '@/components/video/FightAnalyzer'
 import { pickByClick } from '@/lib/pose/fighterSelection'
 import { visionFirstClientEnabled } from '@/lib/visionFirst'
 import type { VisionEvidence } from '@/lib/evidence/visionEvidence'
+import {
+  clipFollowUpsExhausted,
+  formatClipFollowUpLabel,
+  isChatGroundingReady,
+  isPostUploadChatReady,
+  shouldAttemptTapeUploadForChat,
+  type ClipFollowUpUsage,
+} from '@/lib/chat/chatGrounding'
+import { QUESTIONS_PER_CLIP } from '@/lib/musashiUsage'
 import { classifyFailure, failureMessage, stageLabel } from '@/lib/fight/pipelineStatus'
 import { isRtmposeReady, rtmposeRequested } from '@/lib/pose/rtmposeBackend'
 import type { PoseEngineInfo } from '@/lib/pose/poseQuality'
@@ -804,6 +813,7 @@ export default function FightCoachExperience({
   const [chatLoading, setChatLoading] = useState(false)
   const [coachingLoading, setCoachingLoading] = useState(false)
   const [chatInput, setChatInput] = useState('')
+  const [clipFollowUp, setClipFollowUp] = useState<ClipFollowUpUsage | null>(null)
   const [noClipChatCredits, setNoClipChatCredits] = useState<NoClipChatBalance | null>(null)
   // Target for the idle no-clip chat portal (see idleChatSlotId) — looked up
   // client-side since the slot is a plain DOM node the host page renders.
@@ -967,6 +977,40 @@ export default function FightCoachExperience({
     void refreshNoClipChatCredits()
   }, [refreshNoClipChatCredits])
 
+  const refreshClipFollowUp = useCallback(async () => {
+    if (!user || !videoUrl) {
+      setClipFollowUp(null)
+      return
+    }
+    const context: Record<string, string> = {}
+    if (geminiFileUriRef.current) context.videoFileUri = geminiFileUriRef.current
+    if (normalizedAssetIdRef.current) context.normalizedAssetId = normalizedAssetIdRef.current
+    if (clipAssetRefRef.current) context.clipAssetRef = clipAssetRefRef.current
+    if (!context.videoFileUri && !context.normalizedAssetId && !context.clipAssetRef) {
+      setClipFollowUp({ used: 0, limit: QUESTIONS_PER_CLIP, remaining: QUESTIONS_PER_CLIP })
+      return
+    }
+    try {
+      const res = await fetch('/api/fight', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ action: 'clip_question_status', context }),
+      })
+      if (!res.ok) return
+      const data = (await res.json()) as Partial<ClipFollowUpUsage>
+      if (
+        typeof data.used === 'number' &&
+        typeof data.limit === 'number' &&
+        typeof data.remaining === 'number'
+      ) {
+        setClipFollowUp({ used: data.used, limit: data.limit, remaining: data.remaining })
+      }
+    } catch {
+      // Composer counter is informational; POST chat remains authoritative.
+    }
+  }, [user, videoUrl])
+
   // YouTube-style breakdown
   const [breakdownLoading, setBreakdownLoading] = useState(false)
   const [breakdownResult, setBreakdownResult] = useState<{
@@ -995,6 +1039,11 @@ export default function FightCoachExperience({
   /** Normalized R2 asset for the inline-bytes fast path (<20MB, no Files ACTIVE wait). */
   const normalizedAssetIdRef = useRef<string | null>(null)
   const [normalizedAssetId, setNormalizedAssetId] = useState<string | null>(null)
+
+  useEffect(() => {
+    void refreshClipFollowUp()
+  }, [refreshClipFollowUp, geminiFileUri, normalizedAssetId, initialAnalysisReady])
+
   /**
    * All-at-once reveal: Play + Coach Cards + 👍/👎 unlock together when AI finishes.
    * Do not set true until parallel initial analysis + Coach Cards resolve.
@@ -2269,8 +2318,11 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
       setCoachingLoading(false)
     }
   }
-  const sendChat = async () => {
-    if (!chatInput.trim()) return
+  const sendChat = async (overrideText?: string) => {
+    if (chatLoading || uploadingVideo) return
+
+    const userMessage = (typeof overrideText === 'string' ? overrideText : chatInput).trim()
+    if (!userMessage) return
 
     if (!videoUrl && noClipChatCredits?.tier === 'free' && noClipChatCredits.remaining === 0) {
       toast({
@@ -2281,31 +2333,43 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
       return
     }
 
-    const userMessage = chatInput.trim()
+    if (videoUrl && clipFollowUpsExhausted(clipFollowUp)) {
+      toast({
+        title: 'Follow-up limit reached',
+        description: `All ${QUESTIONS_PER_CLIP} follow-ups for this clip have been used. Analyze a new clip for ${QUESTIONS_PER_CLIP} more.`,
+        variant: 'destructive',
+      })
+      return
+    }
 
     try {
-      // A question shown as clip-aware must be grounded in the active tape.
-      // Never silently fall through to a generic answer while bytes are still
-      // uploading or after tape preparation failed.
-      if (videoUrl && !geminiFileUriRef.current) {
-        if (uploadingVideo) {
-          toast({
-            title: 'Tape is still uploading',
-            description: 'Wait for the upload to finish, then send your question.',
-          })
-          return
-        }
-        if (!videoFileRef.current) {
-          toast({
-            title: 'Tape is not attached',
-            description: 'Re-upload the clip so the coach can ground its answer in the video.',
-            variant: 'destructive',
-          })
-          return
-        }
+      const groundingReady = isChatGroundingReady({
+        geminiFileUri: geminiFileUriRef.current,
+        normalizedAssetId: normalizedAssetIdRef.current,
+        visionEvidence: visionEvidenceRef.current,
+        visionFirstEnabled: visionFirstClientEnabled(),
+      })
+
+      // A question shown as clip-aware must be grounded. Only force upload when
+      // no Files URI, normalized asset, or VisionEvidence is available yet.
+      if (
+        shouldAttemptTapeUploadForChat({
+          videoLoaded: Boolean(videoUrl),
+          groundingReady,
+          hasVideoFile: Boolean(videoFileRef.current),
+          uploading: uploadingVideo,
+        })
+      ) {
         setChatLoading(true)
         const tapeUri = await uploadVideoForNativeAnalysis(undefined, { silentToast: true })
-        if (!tapeUri || !geminiFileUriRef.current) {
+        if (
+          !isPostUploadChatReady({
+            tapeUri,
+            geminiFileUri: geminiFileUriRef.current,
+            normalizedAssetId: normalizedAssetIdRef.current,
+            visionEvidence: visionEvidenceRef.current,
+          })
+        ) {
           toast({
             title: 'Tape upload failed',
             description: nativeUploadErrorRef.current || 'Retry the upload before asking about this clip.',
@@ -2313,38 +2377,45 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
           })
           return
         }
+      } else if (videoUrl && !groundingReady) {
+        if (uploadingVideo) {
+          toast({
+            title: 'Tape is still uploading',
+            description: 'Wait for the upload to finish, then send your question.',
+          })
+          return
+        }
+        toast({
+          title: 'Missing evidence',
+          description: 'Re-upload the clip so the coach can ground its answer in the video.',
+          variant: 'destructive',
+        })
+        return
       }
 
-      setChatInput('')
-      setMessages((prev: any[]) => [...prev, chatMsg('user', userMessage )])
+      setMessages((prev) => [...prev, chatMsg('user', userMessage)])
 
-      // Get current context
       const kinematicsContext = kinematicsRef.current ? {
         fighters: kinematicsRef.current.fighters,
         range: kinematicsRef.current.range
       } : null
-      
-      // Set loading state based on mode
+
       if (coachingMode === 'strategy') {
         setStrategyLoading(true)
       } else {
         setChatLoading(true)
       }
-      
-      // Call unified API endpoint with action 'strategy' or 'chat'
+
       const action = coachingMode === 'strategy' ? 'strategy' : 'chat'
       const response = await fetch('/api/fight', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           action,
-          messages: [...messages, chatMsg('user', userMessage )],
+          messages: [...messages, chatMsg('user', userMessage)],
           context: {
             analysisStyle: 'comet',
             ...currentFightClipAiMetadata(),
-            // Evidence summary for the server's empty-evidence honesty gate:
-            // with a clip loaded but nothing actually observable, the model
-            // must say so instead of inventing clip content.
             evidence: {
               clipLoaded: Boolean(videoUrl),
               videoAttached: Boolean(geminiFileUriRef.current || normalizedAssetIdRef.current),
@@ -2361,11 +2432,13 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                   nativeVideo: false,
                   visionEvidence: visionEvidenceRef.current,
                   clipDuration: selectedWindowDurationSec(),
-                  // Clip identity so approved Teach corrections match in chat.
                   ...(normalizedAssetIdRef.current
                     ? { normalizedAssetId: normalizedAssetIdRef.current }
                     : {}),
                   ...(clipAssetRefRef.current ? { clipAssetRef: clipAssetRefRef.current } : {}),
+                  ...(geminiFileUriRef.current
+                    ? { videoFileUri: geminiFileUriRef.current, videoMimeType: 'video/mp4' }
+                    : {}),
                 }
               : {
                   nativeVideo: Boolean(geminiFileUriRef.current || normalizedAssetIdRef.current),
@@ -2406,19 +2479,54 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
           }
         })
       })
-      
+
       const parsed = await parseApiResponse(response)
-      // Failed calls (quota, verification, guard statuses) return {error,hint}
-      // with no message/gameplan — surface the reason IN the chat thread.
-      // Silently dropping it left users staring at their own unanswered message.
-      const failure = parsed as { error?: string; hint?: string }
+      const failure = parsed as { error?: string; hint?: string; code?: string }
       if (!response.ok || (failure.error && !(parsed as { message?: string }).message)) {
+        const code = failure.code || failure.error || ''
+        if (String(code).includes('CLIP_QUESTION_LIMIT') || String(failure.error || '').toLowerCase().includes('question limit')) {
+          toast({
+            title: 'Follow-up limit reached',
+            description: failure.hint || `All ${QUESTIONS_PER_CLIP} follow-ups for this clip have been used.`,
+            variant: 'destructive',
+          })
+          setClipFollowUp({ used: QUESTIONS_PER_CLIP, limit: QUESTIONS_PER_CLIP, remaining: 0 })
+        } else if (response.status === 401) {
+          toast({
+            title: 'Authentication failure',
+            description: failure.hint || 'Sign in again to continue coaching.',
+            variant: 'destructive',
+          })
+        } else {
+          toast({
+            title: response.status >= 500 ? 'Model failure' : 'Network failure',
+            description: [failure.error, failure.hint].filter(Boolean).join(' ') || `Coaching failed (status ${response.status}).`,
+            variant: 'destructive',
+          })
+        }
         const reason =
           [failure.error, failure.hint].filter(Boolean).join(' ') ||
           `Coaching failed (status ${response.status}). Please try again.`
-        setMessages((prev) => [...prev, chatMsg('assistant', `⚠️ ${reason}` )])
+        setMessages((prev) => [...prev, chatMsg('assistant', `⚠️ ${reason}`)])
+        // Keep the draft so the user can retry without retyping.
         return
       }
+
+      // Clear the composer only after a successful assistant reply.
+      setChatInput('')
+
+      const followUp = (parsed as { clipFollowUp?: ClipFollowUpUsage }).clipFollowUp
+      if (
+        followUp &&
+        typeof followUp.used === 'number' &&
+        typeof followUp.limit === 'number' &&
+        typeof followUp.remaining === 'number'
+      ) {
+        setClipFollowUp(followUp)
+      } else if (videoUrl) {
+        void refreshClipFollowUp()
+      }
+
       if (coachingMode === 'strategy') {
         const strategy = parsed as StrategyResponse
         setCurrentStrategy(strategy)
@@ -2431,23 +2539,22 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
         ])
       } else {
         const chat = parsed as { message: string }
-        // Guard: a leaked internal coaching-JSON payload becomes clean prose.
         const chatText = asChatContent(chat.message)
         if (chatText) {
-          setMessages((prev) => [...prev, chatMsg('assistant', chatText )])
+          setMessages((prev) => [...prev, chatMsg('assistant', chatText)])
           speakText(chatText)
         } else {
-          setMessages((prev) => [...prev, chatMsg('assistant', '⚠️ The coach returned an empty reply — please ask again.' )])
+          setMessages((prev) => [...prev, chatMsg('assistant', '⚠️ The coach returned an empty reply — please ask again.')])
         }
       }
     } catch (error) {
       console.error('Chat failed:', error)
       const msg = error instanceof Error ? error.message : 'Unknown error'
-      setMessages((prev) => [...prev, chatMsg('assistant', `⚠️ Coaching failed: ${msg}` )])
+      setMessages((prev) => [...prev, chatMsg('assistant', `⚠️ Coaching failed: ${msg}`)])
       toast({
-        title: "Chat failed",
+        title: 'Network failure',
         description: msg,
-        variant: "destructive"
+        variant: 'destructive',
       })
     } finally {
       setChatLoading(false)
@@ -4516,7 +4623,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                 </Button>
               )}
               {videoUrl ? (
-                <Button size="sm" variant="outline" onClick={() => { pendingBootFileRef.current = null; setVideoUrl(null); setVideoFile(null); videoFileRef.current = null; geminiFileUriRef.current = null; setGeminiFileUri(null); normalizedAssetIdRef.current = null; setNormalizedAssetId(null); setCoachReady(false); setMessages([]); setFightLangCoaching(null); setAiQuotaState(null); setFightLangOverlayAnnotations(null); setCompiledLedger(null); setInitialAnalysisReady(false); setStreamAnalysisPhase('idle'); setStreamAnalysisText(''); setAutoRetrieval(null); setStreamEvidenceLedger(null); applyPlaybackLock(false); setBootPipelineReady(false); setBootPipelineMessage(''); setClipLoadSource('none'); clipLoadSourceRef.current = 'none'; }}>
+                <Button size="sm" variant="outline" onClick={() => { pendingBootFileRef.current = null; setVideoUrl(null); setVideoFile(null); videoFileRef.current = null; geminiFileUriRef.current = null; setGeminiFileUri(null); normalizedAssetIdRef.current = null; setNormalizedAssetId(null); setCoachReady(false); setMessages([]); setFightLangCoaching(null); setAiQuotaState(null); setFightLangOverlayAnnotations(null); setCompiledLedger(null); setInitialAnalysisReady(false); setStreamAnalysisPhase('idle'); setStreamAnalysisText(''); setAutoRetrieval(null); setStreamEvidenceLedger(null); applyPlaybackLock(false); setBootPipelineReady(false); setBootPipelineMessage(''); setClipLoadSource('none'); clipLoadSourceRef.current = 'none'; setClipFollowUp(null); }}>
                   New Video
                 </Button>
               ) : (
@@ -5828,7 +5935,16 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                   {messages.length > 0 && messages[messages.length - 1]?.role === 'assistant' && !chatLoading && (
                     <div className="flex flex-wrap gap-1 pt-1">
                       {['What should I drill?', 'Who won the exchange?', 'Focus on footwork', 'Explain the counters'].map((q) => (
-                        <Button key={q} size="sm" variant="outline" onClick={() => setChatInput(q)} className="text-xs h-6 px-2 opacity-70 hover:opacity-100">{q}</Button>
+                        <Button
+                          key={q}
+                          size="sm"
+                          variant="outline"
+                          disabled={Boolean(videoUrl) && clipFollowUpsExhausted(clipFollowUp)}
+                          onClick={() => void sendChat(q)}
+                          className="text-xs h-6 px-2 opacity-70 hover:opacity-100"
+                        >
+                          {q}
+                        </Button>
                       ))}
                     </div>
                   )}
@@ -5836,6 +5952,16 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
 
                 {/* Chat input */}
                 <div className="border-t border-border/30 bg-card/60 p-3 space-y-2">
+                  {videoUrl && clipFollowUp && (
+                    <div className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
+                      <span>{formatClipFollowUpLabel(clipFollowUp)}</span>
+                      {clipFollowUpsExhausted(clipFollowUp) && (
+                        <span className="text-amber-600 dark:text-amber-400">
+                          All three follow-ups for this clip have been used. TEACH still works.
+                        </span>
+                      )}
+                    </div>
+                  )}
                   {/* Coaching presets — fill the input with a full prompt */}
                   <div className="flex flex-wrap gap-1">
                     {([
@@ -5847,7 +5973,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                         key={kind}
                         size="sm"
                         variant="outline"
-                        disabled={chatLoading || uploadingVideo || !videoUrl}
+                        disabled={chatLoading || uploadingVideo || !videoUrl || clipFollowUpsExhausted(clipFollowUp)}
                         onClick={() => applyCoachingPreset(kind)}
                         className="text-xs h-6 px-2 opacity-70 hover:opacity-100"
                       >
@@ -5858,15 +5984,25 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                   <div className="flex gap-2">
                     <input value={chatInput} onChange={(e) => setChatInput(e.target.value)}
                       className="flex-1 rounded-lg border border-border/60 bg-background/30 px-3 py-2 text-sm outline-none focus:border-primary/50"
-                      placeholder={uploadingVideo ? ingestionStatusText : voiceListening ? 'Listening…' : !videoUrl ? 'Ask anything — no clip needed…' : 'Ask about the fight…'}
-                      disabled={chatLoading || uploadingVideo}
+                      placeholder={
+                        videoUrl && clipFollowUpsExhausted(clipFollowUp)
+                          ? 'Follow-up limit reached for this clip…'
+                          : uploadingVideo
+                            ? ingestionStatusText
+                            : voiceListening
+                              ? 'Listening…'
+                              : !videoUrl
+                                ? 'Ask anything — no clip needed…'
+                                : 'Ask about the fight…'
+                      }
+                      disabled={chatLoading || uploadingVideo || (Boolean(videoUrl) && clipFollowUpsExhausted(clipFollowUp))}
                       onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); if (voiceListening) stopVoice(); void sendChat() } }}
                     />
                     <Button
                       size="icon"
                       variant={voiceListening ? 'default' : 'outline'}
                       onClick={() => (voiceListening ? stopVoice() : startVoice())}
-                      disabled={!voiceSupported || chatLoading || uploadingVideo}
+                      disabled={!voiceSupported || chatLoading || uploadingVideo || (Boolean(videoUrl) && clipFollowUpsExhausted(clipFollowUp))}
                       title={
                         !voiceSupported
                           ? 'Voice input not supported in this browser'
@@ -5879,7 +6015,12 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                     >
                       <Mic className="h-4 w-4" />
                     </Button>
-                    <Button size="icon" onClick={() => { if (voiceListening) stopVoice(); void sendChat() }} disabled={!chatInput.trim() || chatLoading || uploadingVideo} className="shrink-0 h-9 w-9">
+                    <Button
+                      size="icon"
+                      onClick={() => { if (voiceListening) stopVoice(); void sendChat() }}
+                      disabled={!chatInput.trim() || chatLoading || uploadingVideo || (Boolean(videoUrl) && clipFollowUpsExhausted(clipFollowUp))}
+                      className="shrink-0 h-9 w-9"
+                    >
                       <Send className="h-4 w-4" />
                     </Button>
                   </div>

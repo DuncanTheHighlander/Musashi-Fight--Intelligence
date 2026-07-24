@@ -84,14 +84,14 @@ describe('extractFightVideoQuotaContext', () => {
 })
 
 describe('per-clip question cap', () => {
-  it('uses product-specified per-clip question limits', () => {
+  it('uses a single per-clip follow-up limit of 3 for every tier', () => {
     expect(FREE_QUESTIONS_PER_CLIP).toBe(3)
-    expect(PRO_QUESTIONS_PER_CLIP).toBe(15)
+    expect(PRO_QUESTIONS_PER_CLIP).toBe(3)
   })
 
-  it('resolves the per-clip ceiling by tier', () => {
-    expect(questionsPerClipForTier(false)).toBe(FREE_QUESTIONS_PER_CLIP)
-    expect(questionsPerClipForTier(true)).toBe(PRO_QUESTIONS_PER_CLIP)
+  it('resolves the per-clip ceiling identically for free and pro', () => {
+    expect(questionsPerClipForTier(false)).toBe(3)
+    expect(questionsPerClipForTier(true)).toBe(3)
   })
 
   it('extracts the clip key only for clip-grounded chat/strategy questions', () => {
@@ -101,5 +101,7 @@ describe('per-clip question cap', () => {
     expect(extractChatClipKey('analyze_video_stream', { context: { videoFileUri: 'files/abc' } })).toBeNull()
     expect(extractChatClipKey('chat', { context: { videoFileUri: 'files/abc' } })).toBe('files/abc')
     expect(extractChatClipKey('strategy', { context: { videoFileUri: 'files/xyz' } })).toBe('files/xyz')
+    expect(extractChatClipKey('chat', { context: { normalizedAssetId: 'n1' } })).toBe('inline:n1')
+    expect(extractChatClipKey('chat', { context: { clipAssetRef: 'r2:x' } })).toBe('r2:x')
   })
 })

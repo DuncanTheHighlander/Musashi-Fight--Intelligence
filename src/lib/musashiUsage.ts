@@ -23,12 +23,17 @@ export const SHOGUN_MAX_VIDEO_SEC = 600
 
 /**
  * Follow-up AI questions allowed per analyzed clip.
- * The initial Full Clip Analysis is NOT counted here — only chat/strategy
- * questions that reference an already-uploaded clip. Bounds per-clip COGS:
- * each clip-grounded question re-sends video context to Gemini.
+ * The initial Full Clip Analysis / Coach Cards are NOT counted — only
+ * chat/strategy questions grounded on an analyzed clip.
+ *
+ * Product rule (vision-first follow-up): EVERY authenticated role gets the
+ * same ceiling of 3 successful follow-ups per clip (free, pro, shogun).
  */
-export const FREE_QUESTIONS_PER_CLIP = 3
-export const PRO_QUESTIONS_PER_CLIP = 15
+export const QUESTIONS_PER_CLIP = 3
+/** @deprecated Use QUESTIONS_PER_CLIP — kept for import compatibility. */
+export const FREE_QUESTIONS_PER_CLIP = QUESTIONS_PER_CLIP
+/** @deprecated Use QUESTIONS_PER_CLIP — all tiers share the same limit of 3. */
+export const PRO_QUESTIONS_PER_CLIP = QUESTIONS_PER_CLIP
 
 type Limits = {
   perMinute: number
@@ -377,9 +382,8 @@ export const enforceVideoAnalysis = async (
     .run()
 }
 
-/** Per-clip follow-up question ceiling for a user's tier. */
-export const questionsPerClipForTier = (isPro: boolean): number =>
-  isPro ? PRO_QUESTIONS_PER_CLIP : FREE_QUESTIONS_PER_CLIP
+/** Per-clip follow-up question ceiling — same for every authenticated tier. */
+export const questionsPerClipForTier = (_isPro?: boolean): number => QUESTIONS_PER_CLIP
 
 /**
  * Extract the clip key a chat/strategy question is grounded on, or null if the
@@ -396,40 +400,71 @@ export const extractChatClipKey = (action: string, body: Record<string, unknown>
     !fromUri && ctx?.normalizedAssetId
       ? `inline:${String(ctx.normalizedAssetId).trim()}`
       : ''
-  const clipKey = (fromUri || fromInline).slice(0, 256)
+  const fromAssetRef =
+    !fromUri && !fromInline && ctx?.clipAssetRef
+      ? String(ctx.clipAssetRef).trim()
+      : ''
+  const clipKey = (fromUri || fromInline || fromAssetRef).slice(0, 256)
   return clipKey || null
 }
 
-/**
- * Enforce the per-clip follow-up question cap. Increments a (user, clip) counter
- * and throws `CLIP_QUESTION_LIMIT` once the tier ceiling is reached. Shogun is
- * unlimited; local/dev (auth disabled) is a no-op.
- */
-export const enforceClipQuestionLimit = async (
+/** Read current follow-up usage for a clip (does not increment). */
+export const getClipQuestionUsage = async (
   userId: string,
-  role: MusashiRole,
-  clipKey: string
-): Promise<void> => {
-  if (process.env.MUSASHI_DISABLE_AUTH === '1' && process.env.NODE_ENV !== 'production') return
-  if (role === 'shogun') return
-
+  clipKey: string,
+): Promise<{ used: number; limit: number; remaining: number }> => {
+  const limit = QUESTIONS_PER_CLIP
   const key = String(clipKey || '').trim().slice(0, 256)
-  if (!key) return
+  if (!key) return { used: 0, limit, remaining: limit }
 
-  const isPro = await isProSubscriber(userId, role)
-  const limit = questionsPerClipForTier(isPro)
+  try {
+    const db = getDb()
+    const row = await db
+      .prepare('SELECT question_count FROM musashi_clip_questions WHERE user_id = ? AND clip_key = ?')
+      .bind(userId, key)
+      .first()
+    const used = row?.question_count != null ? Number(row.question_count) : 0
+    const safeUsed = Number.isFinite(used) && used > 0 ? used : 0
+    return { used: safeUsed, limit, remaining: Math.max(0, limit - safeUsed) }
+  } catch {
+    return { used: 0, limit, remaining: limit }
+  }
+}
 
-  const db = getDb()
-  const row = await db
-    .prepare('SELECT question_count FROM musashi_clip_questions WHERE user_id = ? AND clip_key = ?')
-    .bind(userId, key)
-    .first()
-
-  const used = row?.question_count != null ? Number(row.question_count) : 0
-  if (used >= limit) {
-    throw new Error('CLIP_QUESTION_LIMIT')
+/**
+ * Throw CLIP_QUESTION_LIMIT when the user has already used their allowance.
+ * Does not increment — call {@link incrementClipQuestion} only after a
+ * successful AI reply so failed requests do not consume a follow-up.
+ */
+export const assertClipQuestionAvailable = async (
+  userId: string,
+  _role: MusashiRole,
+  clipKey: string,
+): Promise<{ used: number; limit: number }> => {
+  if (process.env.MUSASHI_DISABLE_AUTH === '1' && process.env.NODE_ENV !== 'production') {
+    return { used: 0, limit: QUESTIONS_PER_CLIP }
   }
 
+  const key = String(clipKey || '').trim().slice(0, 256)
+  if (!key) return { used: 0, limit: QUESTIONS_PER_CLIP }
+
+  const usage = await getClipQuestionUsage(userId, key)
+  if (usage.used >= usage.limit) {
+    throw new Error('CLIP_QUESTION_LIMIT')
+  }
+  return { used: usage.used, limit: usage.limit }
+}
+
+/** Increment the (user, clip) follow-up counter after a successful AI reply. */
+export const incrementClipQuestion = async (userId: string, clipKey: string): Promise<{ used: number; limit: number }> => {
+  if (process.env.MUSASHI_DISABLE_AUTH === '1' && process.env.NODE_ENV !== 'production') {
+    return { used: 0, limit: QUESTIONS_PER_CLIP }
+  }
+
+  const key = String(clipKey || '').trim().slice(0, 256)
+  if (!key) return { used: 0, limit: QUESTIONS_PER_CLIP }
+
+  const db = getDb()
   const now = new Date().toISOString()
   await db
     .prepare(
@@ -437,10 +472,28 @@ export const enforceClipQuestionLimit = async (
        VALUES (?, ?, 1, ?)
        ON CONFLICT(user_id, clip_key) DO UPDATE SET
          question_count = question_count + 1,
-         updated_at = excluded.updated_at`
+         updated_at = excluded.updated_at`,
     )
     .bind(userId, key, now)
     .run()
+
+  return getClipQuestionUsage(userId, key).then((u) => ({ used: u.used, limit: u.limit }))
+}
+
+/**
+ * Enforce the per-clip follow-up question cap (check + increment).
+ * Prefer {@link assertClipQuestionAvailable} + {@link incrementClipQuestion}
+ * when counting only successful replies.
+ *
+ * All authenticated roles (including shogun) share QUESTIONS_PER_CLIP.
+ */
+export const enforceClipQuestionLimit = async (
+  userId: string,
+  role: MusashiRole,
+  clipKey: string,
+): Promise<void> => {
+  await assertClipQuestionAvailable(userId, role, clipKey)
+  await incrementClipQuestion(userId, clipKey)
 }
 
 /** Map `/api/fight` action names to the correct daily + per-minute quota bucket. */

@@ -7,7 +7,10 @@ import {
   fightActionConsumesVideoQuota,
   fightActionToQuotaBucket,
   extractChatClipKey,
-  enforceClipQuestionLimit,
+  assertClipQuestionAvailable,
+  incrementClipQuestion,
+  getClipQuestionUsage,
+  QUESTIONS_PER_CLIP,
   resolveVideoTierLimits,
 } from '@/lib/musashiUsage'
 import {
@@ -3602,6 +3605,34 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Missing action parameter' }, { status: 400 })
     }
 
+    // Follow-up counter poll — auth only, no AI quota burn.
+    if (action === 'clip_question_status') {
+      try {
+        const statusUser = await requireUser(req)
+        const ctx = (body?.context || {}) as Record<string, unknown>
+        const key =
+          extractChatClipKey('chat', {
+            context: {
+              videoFileUri: ctx.videoFileUri,
+              normalizedAssetId: ctx.normalizedAssetId,
+              clipAssetRef: ctx.clipAssetRef,
+            },
+          }) ||
+          (typeof body?.clipKey === 'string' ? String(body.clipKey).trim().slice(0, 256) : '')
+        if (!key) {
+          return NextResponse.json({
+            used: 0,
+            limit: QUESTIONS_PER_CLIP,
+            remaining: QUESTIONS_PER_CLIP,
+          })
+        }
+        const usage = await getClipQuestionUsage(statusUser.id, key)
+        return NextResponse.json(usage)
+      } catch (err) {
+        return aiErrorResponse(err)
+      }
+    }
+
     const quotaBucket = fightActionToQuotaBucket(action)
     const guard = await aiGuard(req, quotaBucket, {
       noClipChat: isNoClipChatRequest(action, body),
@@ -3638,10 +3669,12 @@ export async function POST(req: Request) {
     }
 
     // Per-clip follow-up question cap (chat/strategy grounded on an uploaded clip).
+    // Check BEFORE the AI call; increment ONLY after a successful reply so
+    // network/model failures do not consume a follow-up.
     const clipQuestionKey = extractChatClipKey(action, body)
     if (clipQuestionKey) {
       try {
-        await enforceClipQuestionLimit(user.id, user.role, clipQuestionKey)
+        await assertClipQuestionAvailable(user.id, user.role, clipQuestionKey)
       } catch (err) {
         return aiErrorResponse(err)
       }
@@ -3968,6 +4001,30 @@ export async function POST(req: Request) {
         `).bind(sessionId).run()
       } catch (e) {
         logger.warn('Failed to update session timestamp', { error: e instanceof Error ? e.message : String(e) })
+      }
+    }
+
+    // Count a follow-up only after a successful chat/strategy reply.
+    if (
+      clipQuestionKey &&
+      (action === 'chat' || action === 'strategy') &&
+      result &&
+      typeof result === 'object' &&
+      (typeof (result as { message?: unknown }).message === 'string' ||
+        typeof (result as { gameplan?: unknown }).gameplan === 'string')
+    ) {
+      try {
+        const usage = await incrementClipQuestion(user.id, clipQuestionKey)
+        ;(result as { clipFollowUp?: { used: number; limit: number; remaining: number } }).clipFollowUp =
+          {
+            used: usage.used,
+            limit: usage.limit,
+            remaining: Math.max(0, usage.limit - usage.used),
+          }
+      } catch (incErr) {
+        logger.warn('clip follow-up increment failed (non-fatal)', {
+          error: incErr instanceof Error ? incErr.message : String(incErr),
+        })
       }
     }
 

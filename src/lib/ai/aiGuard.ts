@@ -247,7 +247,7 @@ export const aiErrorResponse = (err: unknown): NextResponse => {
       {
         error: 'Question limit reached for this clip.',
         code: 'CLIP_QUESTION_LIMIT',
-        hint: 'Free: 3 questions per clip. Pro: 15 per clip. Upgrade or analyze a new clip for more.',
+        hint: 'Each analyzed clip includes 3 follow-up questions. Analyze a new clip for 3 more.',
       },
       402
     )
