@@ -20,6 +20,12 @@ import { requireUser, type MusashiUser } from '@/lib/musashiAuth'
 import { composeSystemPrompt, DEFAULT_PROMPTS } from '@/lib/aiClient'
 import { getDisciplinePrompt } from '@/lib/disciplinePrompts'
 import { buildCoachBrainBlock } from '@/lib/coachBrain/coachBrain'
+import {
+  formatVisionEvidenceBlock,
+  sanitizeVisionEvidence,
+  type VisionEvidence,
+} from '@/lib/evidence/visionEvidence'
+import { formatFighterNamingBlock, resolveFighterNaming } from '@/lib/fight/fighterNaming'
 import { sanitizeCoachText } from '@/lib/feedback/coachFeedback'
 import {
   isGrapplingClip,
@@ -1224,6 +1230,17 @@ const handleChat = async (body: any, user: any) => {
     userMessages.length === 1 &&
     userMessages[0]?.role === 'user'
 
+  // Vision-first grounded chat: the client sends the Pass-1 evidence ledger
+  // instead of the tape. Chat answers ground on it with ZERO video re-sends.
+  let chatVisionEvidence: VisionEvidence | null = null
+  if (context?.visionEvidence && typeof context.visionEvidence === 'object') {
+    try {
+      chatVisionEvidence = sanitizeVisionEvidence(context.visionEvidence as VisionEvidence)
+    } catch {
+      chatVisionEvidence = null
+    }
+  }
+
   const openaiKey = readSecretEnv('OPENAI_API_KEY')
   const geminiKey = await getServerSecret('GEMINI_API_KEY')
   const provider = (process.env.FIGHT_LLM_PROVIDER || '').toLowerCase()
@@ -1452,7 +1469,8 @@ const handleChat = async (body: any, user: any) => {
   let evidenceStatusBlock = ''
   const clientEvidence = context?.evidence
   const hasVideoAttachment = Boolean(context?.nativeVideo && (context?.videoFileUri || context?.videoData))
-  if (clientEvidence?.clipLoaded && !hasVideoAttachment) {
+  // A Pass-1 evidence ledger IS clip evidence — the honesty gate must not fire.
+  if (clientEvidence?.clipLoaded && !hasVideoAttachment && !chatVisionEvidence) {
     const evidencePoseFrames = Number(clientEvidence.poseFrames) || 0
     const evidenceLedgerEvents = Number(clientEvidence.ledgerEvents) || 0
     if (evidencePoseFrames < 4 && evidenceLedgerEvents === 0) {
@@ -1470,7 +1488,16 @@ const handleChat = async (body: any, user: any) => {
     }
   }
 
-  const focusSystem = focusAwareSystem + evidenceStatusBlock + '\n' + kinematicsBlock + factualLedgerBlock + analysisBlock + strategyBlock + knowledgeBlock + taxonomyBlock + patternBlock + personalizedBlock
+  // Vision evidence block: the primary clip grounding for vision-first chat.
+  const visionEvidenceChatBlock = chatVisionEvidence
+    ? '\n\n' +
+      formatVisionEvidenceBlock(chatVisionEvidence) +
+      '\n\n' +
+      formatFighterNamingBlock(resolveFighterNaming(chatVisionEvidence)) +
+      '\n- You are answering from this evidence ledger (the tape was already watched). Cite timestamps from it. Say plainly when something is outside the evidence.\n'
+    : ''
+
+  const focusSystem = focusAwareSystem + evidenceStatusBlock + visionEvidenceChatBlock + '\n' + kinematicsBlock + factualLedgerBlock + analysisBlock + strategyBlock + knowledgeBlock + taxonomyBlock + patternBlock + personalizedBlock
   const system = focusSystem
 
   try {

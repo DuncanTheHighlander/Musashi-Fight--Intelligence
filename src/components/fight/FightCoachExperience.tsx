@@ -63,6 +63,8 @@ import {
 } from 'lucide-react'
 import { FightAnalyzer } from '@/components/video/FightAnalyzer'
 import { pickByClick } from '@/lib/pose/fighterSelection'
+import { visionFirstClientEnabled } from '@/lib/visionFirst'
+import type { VisionEvidence } from '@/lib/evidence/visionEvidence'
 import { isRtmposeReady, rtmposeRequested } from '@/lib/pose/rtmposeBackend'
 import type { PoseEngineInfo } from '@/lib/pose/poseQuality'
 import { filterFramesByVisibility } from '@/lib/pose/poseQuality'
@@ -645,6 +647,8 @@ export default function FightCoachExperience({
   // every analyze call so the coach softens claims on fallback/weak pose data.
   const [poseEngineInfo, setPoseEngineInfo] = useState<PoseEngineInfo | null>(null)
   const poseEngineInfoRef = useRef<PoseEngineInfo | null>(null)
+  /** Pass-1 vision evidence from the last analyze call — grounds chat with NO video re-send. */
+  const visionEvidenceRef = useRef<VisionEvidence | null>(null)
   const [poseQualityOverride, setPoseQualityOverride] = useState(false)
   const poseQualityOverrideRef = useRef(false)
   poseQualityOverrideRef.current = poseQualityOverride
@@ -1448,6 +1452,7 @@ export default function FightCoachExperience({
     setLocalSessionId(sessionId)
     localSessionIdRef.current = sessionId
     poseEngineInfoRef.current = null
+    visionEvidenceRef.current = null
     setPoseEngineInfo(null)
     setPoseQualityOverride(false)
     fightLangPoseFramesRef.current = []
@@ -2043,6 +2048,33 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
         if (!hasUsableCoachCards(json?.coaching)) {
           throw new Error('Coach Cards response was incomplete. Please retry the analysis.')
         }
+        // Vision-first: capture Pass-1 evidence so chat stays grounded WITHOUT
+        // ever re-sending the tape, and seed the initial chat breakdown from
+        // the same coaching payload (replaces the old separate 3-call comet
+        // pipeline that re-watched the video).
+        if (json?.visionEvidence) {
+          visionEvidenceRef.current = json.visionEvidence as VisionEvidence
+        }
+        if (visionFirstClientEnabled() && json?.coaching) {
+          const c = json.coaching as {
+            mainDiagnosis?: string
+            quickCues?: Array<{ quickCue?: string; text?: string; whatToDoInstead?: string }>
+          }
+          const cueLines = Array.isArray(c.quickCues)
+            ? c.quickCues
+                .slice(0, 3)
+                .map((q) => (q?.quickCue || q?.text ? `• ${q.quickCue || q.text}` : null))
+                .filter(Boolean)
+            : []
+          const seedText = [c.mainDiagnosis, ...cueLines].filter(Boolean).join('\n')
+          if (seedText) {
+            setMessages((prev) =>
+              prev.some((m) => m.role === 'assistant') ? prev : [chatMsg('assistant', seedText)]
+            )
+            setInitialAnalysisReady(true)
+            setInitialAnalysisStatus(null)
+          }
+        }
         setFightLangCoaching(json.coaching)
         if (typeof json?.correctionsAppliedSummary === 'string' && json.correctionsAppliedSummary) {
           setCorrectionsAppliedSummary(json.correctionsAppliedSummary)
@@ -2280,24 +2312,34 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                 : 0,
               playbackStarted: playbackUnlocked,
             },
-            nativeVideo: Boolean(geminiFileUriRef.current || normalizedAssetIdRef.current),
-            ...(geminiFileUriRef.current ? {
-              videoFileUri: geminiFileUriRef.current,
-              videoMimeType: 'video/mp4',
-              clipDuration: selectedWindowDurationSec(),
-              startSec: analysisWindowRef.current.startSec,
-              endSec: analysisWindowRef.current.endSec,
-              videoAnalysisSessionId: videoAnalysisSessionIdRef.current,
-              requestedFPS: geminiVideoFpsForSport(selectedSportRef.current),
-            } : normalizedAssetIdRef.current ? {
-              normalizedAssetId: normalizedAssetIdRef.current,
-              videoMimeType: 'video/mp4',
-              clipDuration: selectedWindowDurationSec(),
-              startSec: analysisWindowRef.current.startSec,
-              endSec: analysisWindowRef.current.endSec,
-              videoAnalysisSessionId: videoAnalysisSessionIdRef.current,
-              requestedFPS: geminiVideoFpsForSport(selectedSportRef.current),
-            } : {}),
+            // COST RULE: with Pass-1 vision evidence in hand, chat is grounded
+            // on the evidence JSON and the tape is NEVER re-sent.
+            ...(visionFirstClientEnabled() && visionEvidenceRef.current
+              ? {
+                  nativeVideo: false,
+                  visionEvidence: visionEvidenceRef.current,
+                  clipDuration: selectedWindowDurationSec(),
+                }
+              : {
+                  nativeVideo: Boolean(geminiFileUriRef.current || normalizedAssetIdRef.current),
+                  ...(geminiFileUriRef.current ? {
+                    videoFileUri: geminiFileUriRef.current,
+                    videoMimeType: 'video/mp4',
+                    clipDuration: selectedWindowDurationSec(),
+                    startSec: analysisWindowRef.current.startSec,
+                    endSec: analysisWindowRef.current.endSec,
+                    videoAnalysisSessionId: videoAnalysisSessionIdRef.current,
+                    requestedFPS: geminiVideoFpsForSport(selectedSportRef.current),
+                  } : normalizedAssetIdRef.current ? {
+                    normalizedAssetId: normalizedAssetIdRef.current,
+                    videoMimeType: 'video/mp4',
+                    clipDuration: selectedWindowDurationSec(),
+                    startSec: analysisWindowRef.current.startSec,
+                    endSec: analysisWindowRef.current.endSec,
+                    videoAnalysisSessionId: videoAnalysisSessionIdRef.current,
+                    requestedFPS: geminiVideoFpsForSport(selectedSportRef.current),
+                  } : {}),
+                }),
             kinematics: kinematicsContext,
             analysis: {
               ...analysis,
@@ -2999,10 +3041,14 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
     if (!fileUri) return
 
     setCoachReady(false)
-    const [initialOk, coachCardsReady] = await Promise.all([
-      runInitialClipAnalysis(fileUri, sourceFile),
-      analyzeFightLangWindow({ mode: 'full' }),
-    ])
+    // Vision-first: ONE grounded pipeline (analyze seeds the chat itself);
+    // the legacy comet chat pass re-watched the tape with 3 extra Gemini calls.
+    const [initialOk, coachCardsReady] = visionFirstClientEnabled()
+      ? await analyzeFightLangWindow({ mode: 'full' }).then((ok) => [ok, ok] as const)
+      : await Promise.all([
+          runInitialClipAnalysis(fileUri, sourceFile),
+          analyzeFightLangWindow({ mode: 'full' }),
+        ])
     if (coachCardsReady || initialOk) {
       setCoachReady(true)
       setInitialAnalysisReady(true)
@@ -3136,11 +3182,14 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
 
         setIngestionStage('analyzing')
         setBootPipelineMessage('Preparing your coach…')
-        // Parallel: initial clip analysis + deep Coach Cards — unlock only when both settle.
-        const [initialOk, coachCardsReady] = await Promise.all([
-          runInitialClipAnalysis(fileUri, file),
-          analyzeFightLangWindow({ mode: 'full' }),
-        ])
+        // Vision-first: one grounded pipeline (analyze seeds chat). Legacy:
+        // parallel initial clip analysis + deep Coach Cards.
+        const [initialOk, coachCardsReady] = visionFirstClientEnabled()
+          ? await analyzeFightLangWindow({ mode: 'full' }).then((ok) => [ok, ok] as const)
+          : await Promise.all([
+              runInitialClipAnalysis(fileUri, file),
+              analyzeFightLangWindow({ mode: 'full' }),
+            ])
         clearVisionWatchdog()
         if (softUnlockedThisBoot || !stillThisClip()) return false
         if (!coachCardsReady) {
@@ -3364,10 +3413,12 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
       }
 
       setBootPipelineMessage('Preparing your coach…')
-      const [initialOk, coachCardsReady] = await Promise.all([
-        runInitialClipAnalysis(tapeHandle, file),
-        analyzeFightLangWindow({ mode: 'full' }),
-      ])
+      const [initialOk, coachCardsReady] = visionFirstClientEnabled()
+        ? await analyzeFightLangWindow({ mode: 'full' }).then((ok) => [ok, ok] as const)
+        : await Promise.all([
+            runInitialClipAnalysis(tapeHandle, file),
+            analyzeFightLangWindow({ mode: 'full' }),
+          ])
       if (!stillThisClip()) return
       if (!coachCardsReady) {
         unlockLocalPlaybackWithoutCoach(

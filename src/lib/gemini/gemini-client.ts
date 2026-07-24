@@ -3,6 +3,7 @@ import type { FightEvidenceLedger } from '@/lib/fightlang/fightlang.types'
 import type { CoachingPayload } from '@/lib/validators/llm-output.validator'
 import { GEMINI_MODEL_DEFAULT, GEMINI_EMBED_MODEL_DEFAULT, isGemini3Model, resolvedModels } from '@/lib/gemini/models'
 import { formatVisionEvidenceBlock, type VisionEvidence } from '@/lib/evidence/visionEvidence'
+import { formatFighterNamingBlock, resolveFighterNaming } from '@/lib/fight/fighterNaming'
 import { getServerSecret, requireGeminiApiKey } from '@/lib/cloudflare/secrets'
 import { getCoachingCache, sha256Hex } from '@/lib/ai/coachingCache'
 import { buildCoachBrainBlock, type CoachBrainContext } from '@/lib/coachBrain/coachBrain'
@@ -249,7 +250,7 @@ ${JSON.stringify(args.temporalEvidence.exchangeWindows, null, 2)}
 
   const visionFirstMode = Boolean(args.visionEvidence)
   const visionEvidenceMainBlock = args.visionEvidence
-    ? `\n${formatVisionEvidenceBlock(args.visionEvidence)}\n`
+    ? `\n${formatVisionEvidenceBlock(args.visionEvidence)}\n\n${formatFighterNamingBlock(resolveFighterNaming(args.visionEvidence))}\n`
     : ''
 
   const criticalContract = visionFirstMode
