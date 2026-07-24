@@ -2350,6 +2350,11 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                   nativeVideo: false,
                   visionEvidence: visionEvidenceRef.current,
                   clipDuration: selectedWindowDurationSec(),
+                  // Clip identity so approved Teach corrections match in chat.
+                  ...(normalizedAssetIdRef.current
+                    ? { normalizedAssetId: normalizedAssetIdRef.current }
+                    : {}),
+                  ...(clipAssetRefRef.current ? { clipAssetRef: clipAssetRefRef.current } : {}),
                 }
               : {
                   nativeVideo: Boolean(geminiFileUriRef.current || normalizedAssetIdRef.current),

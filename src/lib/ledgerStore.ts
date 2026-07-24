@@ -49,6 +49,19 @@ export type StoredAnalysisContext = {
   fighterFocus?: string | null
   poseEngine?: string | null
   poseQuality?: number | string | null
+  /**
+   * Teach Musashi compliance audit: status (clean/retried_clean/overridden/
+   * conflict), the conflicts found, and the RAW pre-enforcement coaching so
+   * admins can compare raw vs final output.
+   */
+  correctionCompliance?: {
+    status: string
+    conflicts?: unknown[]
+    postRetryConflicts?: unknown[]
+    overridesApplied?: number
+    appliedCorrectionIds?: string[]
+    rawCoaching?: unknown
+  } | null
 }
 
 /** Trimmed final coaching payload persisted for admin review (not the raw LLM text). */

@@ -19,13 +19,21 @@ import {
 import { requireUser, type MusashiUser } from '@/lib/musashiAuth'
 import { composeSystemPrompt, DEFAULT_PROMPTS } from '@/lib/aiClient'
 import { getDisciplinePrompt } from '@/lib/disciplinePrompts'
-import { buildCoachBrainBlock } from '@/lib/coachBrain/coachBrain'
+import { buildCoachBrainBlock, resolveSportKey } from '@/lib/coachBrain/coachBrain'
 import {
   formatVisionEvidenceBlock,
   sanitizeVisionEvidence,
   type VisionEvidence,
 } from '@/lib/evidence/visionEvidence'
 import { formatFighterNamingBlock, resolveFighterNaming } from '@/lib/fight/fighterNaming'
+import { fetchApprovedCorrectionsForClip, type AiCorrectionRow } from '@/lib/aiCorrections/store'
+import { formatApprovedCorrectionsBlock } from '@/lib/aiCorrections/formatBlock'
+import { computeVideoFingerprint } from '@/lib/aiCorrections/fingerprint'
+import {
+  applyTextOverride,
+  buildRetryEmphasisBlock,
+  findTextConflicts,
+} from '@/lib/aiCorrections/compliance'
 import { sanitizeCoachText } from '@/lib/feedback/coachFeedback'
 import {
   isGrapplingClip,
@@ -1241,6 +1249,50 @@ const handleChat = async (body: any, user: any) => {
     }
   }
 
+  // Teach Musashi in chat: approved exact-clip corrections (same owner) are
+  // loaded before answering and enforced on the final reply (scan → retry →
+  // targeted override), exactly like Coach Cards.
+  let chatCorrections: AiCorrectionRow[] = []
+  try {
+    const dbCorr = getDbOrNull()
+    const sportKey =
+      resolveSportKey(context?.discipline || context?.sport) ||
+      String(context?.discipline || context?.sport || '').trim()
+    const clipId = String(context?.normalizedAssetId || context?.clipAssetRef || '').trim() || null
+    if (dbCorr && user?.id && sportKey && clipId) {
+      let fingerprint: string | null = null
+      try {
+        fingerprint = await computeVideoFingerprint({
+          db: dbCorr,
+          assetId: clipId,
+          userId: user.id,
+          isAdmin: user.role === 'shogun',
+          durationMs:
+            typeof context?.clipDuration === 'number' && context.clipDuration > 0
+              ? Math.round(context.clipDuration * 1000)
+              : null,
+        })
+      } catch {
+        fingerprint = null
+      }
+      chatCorrections = await fetchApprovedCorrectionsForClip({
+        db: dbCorr,
+        ownerUserId: user.id,
+        clipId,
+        videoFingerprint: fingerprint,
+        sport: sportKey,
+        rangeStartMs: 0,
+        rangeEndMs: null,
+      })
+    }
+  } catch (corrErr) {
+    logger.warn('Chat corrections fetch failed (non-fatal)', {
+      detail: corrErr instanceof Error ? corrErr.message : String(corrErr),
+    })
+  }
+  const chatCorrectionsBlock =
+    chatCorrections.length > 0 ? '\n' + formatApprovedCorrectionsBlock(chatCorrections) + '\n' : ''
+
   const openaiKey = readSecretEnv('OPENAI_API_KEY')
   const geminiKey = await getServerSecret('GEMINI_API_KEY')
   const provider = (process.env.FIGHT_LLM_PROVIDER || '').toLowerCase()
@@ -1497,7 +1549,7 @@ const handleChat = async (body: any, user: any) => {
       '\n- You are answering from this evidence ledger (the tape was already watched). Cite timestamps from it. Say plainly when something is outside the evidence.\n'
     : ''
 
-  const focusSystem = focusAwareSystem + evidenceStatusBlock + visionEvidenceChatBlock + '\n' + kinematicsBlock + factualLedgerBlock + analysisBlock + strategyBlock + knowledgeBlock + taxonomyBlock + patternBlock + personalizedBlock
+  const focusSystem = focusAwareSystem + evidenceStatusBlock + visionEvidenceChatBlock + chatCorrectionsBlock + '\n' + kinematicsBlock + factualLedgerBlock + analysisBlock + strategyBlock + knowledgeBlock + taxonomyBlock + patternBlock + personalizedBlock
   const system = focusSystem
 
   try {
@@ -2035,7 +2087,53 @@ const handleChat = async (body: any, user: any) => {
 
       const text = data?.candidates?.[0]?.content?.parts?.map((p: any) => p.text).filter(Boolean).join('\n') || 'No response.'
       // Never return the internal coaching-JSON contract as a chat message.
-      return { message: sanitizeCoachText(text) }
+      let finalText = sanitizeCoachText(text)
+
+      // Teach compliance for chat: scan → retry once with the violations named
+      // → targeted text override. "Applied" is only reported when the final
+      // reply is actually free of the rejected labels.
+      let chatCompliance: 'no_corrections' | 'clean' | 'retried_clean' | 'overridden' | 'conflict' =
+        chatCorrections.length > 0 ? 'clean' : 'no_corrections'
+      if (chatCorrections.length > 0) {
+        let conflicts = findTextConflicts(finalText, chatCorrections)
+        if (conflicts.length > 0) {
+          logger.warn('Chat reply conflicts with approved corrections — retrying once', {
+            conflicts: conflicts.map((c) => c.incorrectLabel),
+          })
+          systemInstructionText += `\n${buildRetryEmphasisBlock(conflicts)}`
+          try {
+            const retry = await doGeminiChat(model, true)
+            if (retry.resp.ok) {
+              const retryText =
+                retry.data?.candidates?.[0]?.content?.parts?.map((p: any) => p.text).filter(Boolean).join('\n') || ''
+              if (retryText.trim()) {
+                finalText = sanitizeCoachText(retryText)
+                chatCompliance = 'retried_clean'
+              }
+            }
+          } catch {
+            /* retry is best-effort; the override below still enforces */
+          }
+          conflicts = findTextConflicts(finalText, chatCorrections)
+          if (conflicts.length > 0) {
+            const overridden = applyTextOverride(finalText, conflicts)
+            finalText = overridden.text
+            chatCompliance =
+              findTextConflicts(finalText, chatCorrections).length === 0 ? 'overridden' : 'conflict'
+          }
+        }
+      }
+
+      return {
+        message: finalText,
+        ...(chatCompliance !== 'no_corrections'
+          ? {
+              correctionCompliance: chatCompliance,
+              appliedCorrectionIds:
+                chatCompliance === 'conflict' ? [] : chatCorrections.map((c) => c.id),
+            }
+          : {}),
+      }
     }
 
     if (!openaiKey) {

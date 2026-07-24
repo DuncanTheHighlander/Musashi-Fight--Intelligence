@@ -43,6 +43,13 @@ import {
   type VisionEvidence,
   type VisionEvidenceUsage,
 } from '@/lib/evidence/visionEvidence'
+import {
+  applyCoachingOverride,
+  buildRetryEmphasisBlock,
+  findCoachingConflicts,
+  type ComplianceAudit,
+} from '@/lib/aiCorrections/compliance'
+import type { AiCorrectionRow } from '@/lib/aiCorrections/store'
 
 export const maxDuration = 60
 
@@ -504,6 +511,8 @@ export async function POST(request: Request) {
     let llmIssues: any[] = []
     let correctionsAppliedSummary: string | null = null
     let appliedCorrectionIds: string[] = []
+    let correctionCompliance: ComplianceAudit = { status: 'no_corrections', conflicts: [] }
+    let rawCoachingForAudit: CoachingPayload | null = null
 
     if (llmEnabled) {
       try {
@@ -571,11 +580,14 @@ export async function POST(request: Request) {
       // Teach Musashi Phase 1: exact-clip approved corrections (same owner only).
       // Attached beside retrieval — never inside coach-brain text.
       let approvedCorrectionsBlock: string | null = null
+      let appliedCorrections: AiCorrectionRow[] = []
       try {
         const owner = await getCurrentUser(request).catch(() => null)
         const sportKey = resolveSportKey(data.sport) || String(data.sport || '').trim()
+        // ONE consistent clip identity: the normalized analysis asset (the same
+        // id the Teach panel saves) first; legacy asset refs as fallback.
         const clipId =
-          String(data.clip?.assetRef || data.clip?.sourceId || data.normalizedAssetId || '').trim() || null
+          String(data.normalizedAssetId || data.clip?.assetRef || data.clip?.sourceId || '').trim() || null
         if (db && owner?.id && sportKey && (clipId || data.normalizedAssetId)) {
           let fingerprint: string | null = null
           const assetForFp = String(data.normalizedAssetId || clipId || '').trim()
@@ -607,8 +619,10 @@ export async function POST(request: Request) {
           })
           if (corrections.length > 0) {
             approvedCorrectionsBlock = formatApprovedCorrectionsBlock(corrections)
-            appliedCorrectionIds = corrections.map((c) => c.id)
-            correctionsAppliedSummary = formatCorrectionAppliedSummary(corrections)
+            appliedCorrections = corrections
+            // NOTE: appliedCorrectionIds / correctionsAppliedSummary are set
+            // ONLY after the compliance check proves the final output obeys
+            // the corrections — never merely because rows were loaded.
           }
         }
       } catch (corrErr) {
@@ -623,7 +637,7 @@ export async function POST(request: Request) {
       // the failure explicitly so the UI can say "AI coaching unavailable"
       // instead of showing a canned payload.
       try {
-        const gen = await generateGroundedCoaching({
+        const coachingArgs = {
           ledger: coachingLedger,
           retrievedSnippets: retrieved.snippets,
           focusTarget: data.focusTarget,
@@ -648,16 +662,79 @@ export async function POST(request: Request) {
             recurringFaults: recurringFaultLabels,
           },
           approvedCorrectionsBlock,
-        })
+        }
+        const gen = await generateGroundedCoaching(coachingArgs)
         model = gen.model
+        let payload = gen.payload
 
-        const validated = validateCoachingPayloadAgainstLedger({ ledger: coachingLedger, payload: gen.payload })
-        coaching = validated.sanitized ?? gen.payload
+        // Teach Musashi compliance ladder: scan → retry once → targeted
+        // structured override. "Correction applied" is claimed only when the
+        // FINAL output is free of the rejected labels.
+        if (appliedCorrections.length > 0) {
+          correctionCompliance = { status: 'clean', conflicts: [] }
+          rawCoachingForAudit = gen.payload
+          const conflicts = findCoachingConflicts(payload, appliedCorrections)
+          if (conflicts.length > 0) {
+            console.warn(
+              `[TeachCompliance] ${conflicts.length} conflict(s) with approved corrections — retrying once`,
+              conflicts.map((c) => `${c.incorrectLabel}@${c.where}`),
+            )
+            let retried = false
+            try {
+              const retry = await generateGroundedCoaching({
+                ...coachingArgs,
+                approvedCorrectionsBlock: `${approvedCorrectionsBlock ?? ''}\n${buildRetryEmphasisBlock(conflicts)}`,
+              })
+              payload = retry.payload
+              model = retry.model
+              retried = true
+            } catch (retryErr) {
+              console.warn(
+                '[TeachCompliance] retry failed, applying override to original:',
+                retryErr instanceof Error ? retryErr.message : retryErr,
+              )
+            }
+            const postRetryConflicts = findCoachingConflicts(payload, appliedCorrections)
+            if (postRetryConflicts.length === 0 && retried) {
+              correctionCompliance = { status: 'retried_clean', conflicts }
+            } else if (postRetryConflicts.length > 0) {
+              const overridden = applyCoachingOverride(payload, postRetryConflicts)
+              payload = overridden.payload
+              const remaining = findCoachingConflicts(payload, appliedCorrections)
+              correctionCompliance = {
+                status: remaining.length === 0 ? 'overridden' : 'conflict',
+                conflicts,
+                postRetryConflicts,
+                overridesApplied: overridden.overridesApplied,
+              }
+            } else {
+              // retry threw but the original payload turned out clean
+              correctionCompliance = { status: 'clean', conflicts: [] }
+            }
+          }
+          if (correctionCompliance.status !== 'conflict') {
+            appliedCorrectionIds = appliedCorrections.map((c) => c.id)
+            correctionsAppliedSummary = formatCorrectionAppliedSummary(appliedCorrections)
+          } else {
+            llmIssues = [
+              ...llmIssues,
+              {
+                level: 'warn',
+                code: 'correction_conflict',
+                message:
+                  'The coach output still conflicts with an approved correction after retry and override — corrections NOT claimed as applied.',
+              },
+            ]
+          }
+        }
+
+        const validated = validateCoachingPayloadAgainstLedger({ ledger: coachingLedger, payload })
+        coaching = validated.sanitized ?? payload
         if (coaching && appliedCorrectionIds.length > 0) {
           ;(coaching as CoachingPayload & { applied_correction_ids?: string[] }).applied_correction_ids =
             appliedCorrectionIds
         }
-        llmIssues = validated.issues
+        llmIssues = [...llmIssues, ...validated.issues]
       } catch (llmErr) {
         const message = llmErr instanceof Error ? llmErr.message : String(llmErr)
         console.warn('[FightLang] Grounded coaching failed (returning ledger without coaching):', message)
@@ -689,6 +766,23 @@ export async function POST(request: Request) {
               fighterFocus: data.focusTarget ?? null,
               poseEngine: data.pose?.engine ?? null,
               poseQuality: data.pose?.quality ?? null,
+              // Raw + final preserved for audit whenever corrections were in play.
+              ...(correctionCompliance.status !== 'no_corrections'
+                ? {
+                    correctionCompliance: {
+                      status: correctionCompliance.status,
+                      conflicts: correctionCompliance.conflicts,
+                      ...(correctionCompliance.postRetryConflicts
+                        ? { postRetryConflicts: correctionCompliance.postRetryConflicts }
+                        : {}),
+                      ...(typeof correctionCompliance.overridesApplied === 'number'
+                        ? { overridesApplied: correctionCompliance.overridesApplied }
+                        : {}),
+                      appliedCorrectionIds,
+                      rawCoaching: rawCoachingForAudit,
+                    },
+                  }
+                : {}),
             },
             coaching: coaching
               ? {
@@ -748,6 +842,7 @@ export async function POST(request: Request) {
       llmIssues,
       appliedCorrectionIds,
       correctionsAppliedSummary,
+      correctionCompliance: correctionCompliance.status,
       pipelineStats: {
         poseFrames: poseFrames.length,
         actors: ledger.actors,
