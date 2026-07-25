@@ -27,6 +27,44 @@ type RawStructure = {
   clarification_question?: string | null
 }
 
+const CORRECTION_CATEGORIES = [
+  'wrong_technique',
+  'wrong_fighter',
+  'wrong_timestamp',
+  'missed_action',
+  'bad_advice',
+  'other',
+] as const
+
+/**
+ * Strict structured-output schema for RawStructure.
+ *
+ * KEEP THIS ADJACENT TO `RawStructure` — Gemini silently DROPS any field the
+ * schema omits, and the caller persists the result (see the structure route),
+ * so schema/type drift would quietly lose correction data. All nine keys are
+ * listed; `required` stays minimal so a sparse but valid answer is accepted.
+ */
+const STRUCTURE_RESPONSE_SCHEMA: Record<string, unknown> = {
+  type: 'OBJECT',
+  properties: {
+    incorrect_labels: { type: 'ARRAY', items: { type: 'STRING' } },
+    correct_labels: { type: 'ARRAY', items: { type: 'STRING' } },
+    position: { type: 'STRING', nullable: true },
+    transition: { type: 'STRING', nullable: true },
+    // Free-text on purpose: normalizeControllingFighter() below maps
+    // A/B/Blue/Red case-insensitively and rejects anything else.
+    controlling_fighter: { type: 'STRING', nullable: true },
+    correction_categories: {
+      type: 'ARRAY',
+      items: { type: 'STRING', enum: [...CORRECTION_CATEGORIES] },
+    },
+    coaching_note: { type: 'STRING', nullable: true },
+    needs_clarification: { type: 'BOOLEAN' },
+    clarification_question: { type: 'STRING', nullable: true },
+  },
+  required: ['incorrect_labels', 'correct_labels', 'needs_clarification'],
+}
+
 export async function structureCorrectionWithFlash(args: {
   sport: string
   originalText: string
@@ -67,7 +105,12 @@ needs_clarification (boolean), clarification_question (string|null).`
     model: resolvedModels.flash(),
     parts: [{ text: prompt }],
     temperature: 0.1,
-    maxOutputTokens: 1024,
+    // 1024 was too tight once the default model became a Gemini 3.x thinking
+    // model: thinking tokens bill against this budget, so the JSON truncated
+    // mid-object and surfaced to users as "Gemini returned invalid JSON".
+    // generateJson now also pins thinkingLevel LOW, which is the real fix.
+    maxOutputTokens: 4096,
+    responseSchema: STRUCTURE_RESPONSE_SCHEMA,
   })
 
   const mapLabels = (arr?: string[]) =>

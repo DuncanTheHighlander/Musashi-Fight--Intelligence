@@ -6,6 +6,7 @@ import { resolveSportKey } from '@/lib/coachBrain/coachBrain'
 import { computeVideoFingerprint } from '@/lib/aiCorrections/fingerprint'
 import { insertAiCorrection } from '@/lib/aiCorrections/store'
 import { previewSummary, structureCorrectionWithFlash } from '@/lib/aiCorrections/structure'
+import { classifyFailure, failureMessage } from '@/lib/fight/pipelineStatus'
 
 type Body = {
   surface?: 'coach_card' | 'chat'
@@ -80,8 +81,13 @@ export async function POST(request: Request) {
       responseType: surface,
     })
   } catch (err) {
+    // Never surface raw model output to the athlete — a truncated JSON
+    // fragment or leaked chain-of-thought is not an actionable message.
+    // Keep the real detail server-side; send the classified failure text.
+    console.error('[teach-correction/structure] structuring failed:', err)
+    const kind = classifyFailure(err, 'building_coaching')
     return NextResponse.json(
-      { success: false, error: err instanceof Error ? err.message : 'Structure failed' },
+      { success: false, error: failureMessage(kind), failureKind: kind },
       { status: 502 },
     )
   }

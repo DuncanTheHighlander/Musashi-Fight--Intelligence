@@ -35,8 +35,53 @@ export type GeminiClientConfig = Readonly<{
 }>
 
 type GeminiGenerateResponse = {
-  candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>
+  candidates?: Array<{
+    content?: { parts?: Array<{ text?: string; thought?: boolean }> }
+    /** 'STOP' | 'MAX_TOKENS' | 'SAFETY' | 'RECITATION' | … */
+    finishReason?: string
+  }>
   error?: { message?: string }
+}
+
+/**
+ * First usable payload part. Gemini 3.x thinking models can return a thought /
+ * thought-summary part BEFORE the answer, so `parts[0].text` is not safe —
+ * reading it verbatim is how chain-of-thought ("Let's check position…") ended
+ * up being parsed as the JSON payload.
+ *
+ * Returns the FIRST non-thought text part, never a concatenation: with
+ * responseMimeType 'application/json' the payload is a single part, and
+ * joining would corrupt it if a stray part appears alongside.
+ */
+export function firstPayloadText(candidate: NonNullable<GeminiGenerateResponse['candidates']>[number] | undefined): string {
+  const parts = candidate?.content?.parts
+  if (!Array.isArray(parts)) return ''
+  for (const part of parts) {
+    if (part?.thought === true) continue
+    if (typeof part?.text === 'string' && part.text.trim()) return part.text
+  }
+  return ''
+}
+
+/** Non-STOP finish reasons that need their own user-facing message. */
+function finishReasonError(finishReason: string | undefined): Error | null {
+  switch (finishReason) {
+    case 'MAX_TOKENS':
+      return new Error(
+        'Gemini response was cut off before it finished (MAX_TOKENS) — the model ran out of output budget.',
+      )
+    case 'SAFETY':
+      return new Error('Gemini blocked this response (SAFETY).')
+    case 'RECITATION':
+      return new Error('Gemini blocked this response (RECITATION).')
+    default:
+      return null
+  }
+}
+
+/** True when the failure is a truncation we can retry with a bigger budget. */
+export function isMaxTokensError(err: unknown): boolean {
+  return err instanceof Error && err.message.includes('MAX_TOKENS')
 }
 
 const resolveKey = async (explicit?: string): Promise<string> => {
@@ -456,9 +501,27 @@ export async function generateJson<T>(args: {
   topK?: number
   maxOutputTokens?: number
   apiKey?: string
+  /** Optional Gemini v1beta responseSchema for strict structured output. */
+  responseSchema?: Record<string, unknown>
+  /**
+   * Thinking depth for Gemini 3.x models. Defaults to 'LOW' — thinking tokens
+   * bill against maxOutputTokens, and at the server default (HIGH) a modest
+   * budget is consumed before the answer starts, truncating the JSON.
+   */
+  thinkingLevel?: 'LOW' | 'HIGH'
+  /** Internal: set on the single MAX_TOKENS retry so it cannot recurse. */
+  _isRetry?: boolean
 }): Promise<{ model: string; data: T; rawText: string }> {
   const apiKey = await resolveKey(args.apiKey)
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(args.model)}:generateContent`
+
+  const maxOutputTokens = args.maxOutputTokens ?? 2048
+  // Gemini 3.x rejects thinkingBudget:0 ("only works in thinking mode"), so use
+  // thinkingLevel there and keep thinkingBudget for 2.5-era models. Mirrors
+  // attemptCoachingWithModel — generateJson was the only call site missing this.
+  const thinkingConfig = isGemini3Model(args.model)
+    ? { thinkingLevel: args.thinkingLevel ?? 'LOW' }
+    : { thinkingBudget: 0 }
 
   const body = JSON.stringify({
     contents: [{ role: 'user', parts: args.parts }],
@@ -471,8 +534,11 @@ export async function generateJson<T>(args: {
             topP: args.topP ?? 0.95,
             topK: args.topK ?? 40,
           }),
-      maxOutputTokens: args.maxOutputTokens ?? 2048,
+      maxOutputTokens,
       responseMimeType: 'application/json',
+      thinkingConfig,
+      // Omit the key entirely when absent — v1beta 400s on some null config values.
+      ...(args.responseSchema ? { responseSchema: args.responseSchema } : {}),
     },
   })
 
@@ -487,7 +553,20 @@ export async function generateJson<T>(args: {
     throw new Error(json?.error?.message || `Gemini API error: ${resp.status}`)
   }
 
-  const rawText = json?.candidates?.[0]?.content?.parts?.[0]?.text || ''
+  const candidate = json?.candidates?.[0]
+  const rawText = firstPayloadText(candidate)
+
+  // A truncated or blocked response must not be reported as "invalid JSON" —
+  // that sent users a raw fragment of the model's output with no way to act.
+  const retryOnce = async (): Promise<{ model: string; data: T; rawText: string }> =>
+    generateJson<T>({ ...args, maxOutputTokens: maxOutputTokens * 2, thinkingLevel: 'LOW', _isRetry: true })
+
+  const finishError = finishReasonError(candidate?.finishReason)
+  if (finishError) {
+    if (candidate?.finishReason === 'MAX_TOKENS' && !args._isRetry) return retryOnce()
+    throw finishError
+  }
+
   if (!rawText.trim()) {
     throw new Error('Gemini returned an empty response')
   }
@@ -504,7 +583,9 @@ export async function generateJson<T>(args: {
     data = JSON.parse(cleaned) as T
   } catch {
     // Surface the real failure instead of pretending success. Callers can
-    // catch and degrade gracefully if they want a fallback.
+    // catch and degrade gracefully if they want a fallback. NOT retried:
+    // fetchWithRetry already covers transient 429/503, and a parse retry
+    // doubles Gemini spend on a deterministic failure.
     throw new Error(`Gemini returned invalid JSON: ${cleaned.slice(0, 200)}`)
   }
 
