@@ -101,6 +101,19 @@ NEXT_PUBLIC_POSE_PRIMARY_ENGINE = "rtmpose"
 # Bearer token for all three: Secrets Store binding SECRET_POSE_CLOUD (store name
 # PoseCloudToken), or legacy `wrangler secret put MUSASHI_POSE_CLOUD_TOKEN`.
 # Must equal POSE_API_TOKEN in the Modal environment.
+# ── Vision-first pipeline ────────────────────────────────────────────────────
+# Server half of the flag. The client half (NEXT_PUBLIC_MUSASHI_VISION_FIRST_ENABLED)
+# is inlined by Next at BUILD time from .env.local and CANNOT be set here — a
+# NEXT_PUBLIC_* var in [vars] reaches the Worker runtime but never the browser
+# bundle. Both halves must agree: with only the client half set, the browser ran
+# vision-first while /api/fight/analyze ran the legacy pose path.
+# Rollback: delete this line and redeploy.
+MUSASHI_VISION_FIRST_ENABLED = "1"
+# Stable GA model (2026-07-21). Matches the code default in src/lib/gemini/models.ts;
+# pinned here so a future default change cannot silently move production.
+GEMINI_MODEL = "gemini-3.6-flash"
+# Gemini video sampling for the evidence pass. API range is 0 < fps <= 24.
+MUSASHI_GEMINI_VIDEO_FPS = "24"
 NODE_ENV = "production"
 MUSASHI_DISABLE_AUTH = "0"
 # AI coaching requires verified email in production (assertEmailVerified). Override: MUSASHI_REQUIRE_EMAIL_VERIFIED=0
