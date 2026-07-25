@@ -74,7 +74,7 @@ import {
   type ClipFollowUpUsage,
 } from '@/lib/chat/chatGrounding'
 import { QUESTIONS_PER_CLIP } from '@/lib/musashiUsage'
-import { classifyFailure, failureMessage, stageLabel } from '@/lib/fight/pipelineStatus'
+import { classifyFailure, derivePipelineStage, failureMessage, pipelineStatusLabel, stageLabel } from '@/lib/fight/pipelineStatus'
 import { isRtmposeReady, rtmposeRequested } from '@/lib/pose/rtmposeBackend'
 import type { PoseEngineInfo } from '@/lib/pose/poseQuality'
 import { filterFramesByVisibility } from '@/lib/pose/poseQuality'
@@ -4409,18 +4409,40 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
     : bootLastPassFramesCompletedRef.current
   const preScanTotal = preScanProgress?.totalSteps ?? bootLastPassTotalStepsRef.current
   const preScanLabel = preScanTotal > 0 ? `${preScanCompleted}/${preScanTotal}` : 'waiting'
-  const visionFirstActive = isVisionFirstSport(selectedSport)
+  // Two distinct questions, deliberately NOT one flag:
+  //
+  //   visionFirstSportOnly — "is the on-device pose engine pointless here?"
+  //     Sport-only (bjj/wrestling/judo). Governs whether MediaPipe and its HUDs
+  //     are switched off. Kept narrow so turning the vision-first flag on can
+  //     never silently disable pose (and skeleton overlays) for MMA.
+  //
+  //   visionFirstActive — "did the vision pipeline actually produce this
+  //     coaching?" Governs user-facing copy. Must follow the same flag the
+  //     analysis path uses (visionFirstClientEnabled), otherwise the UI claims
+  //     a MediaPipe pre-scan ran when the tape was really analysed by Gemini.
+  const visionFirstSportOnly = isVisionFirstSport(selectedSport)
+  const visionFirstActive = visionFirstClientEnabled() || visionFirstSportOnly
+  // NOTE: bootPipelineFailed (below) detects failure by matching the literal
+  // "Setup failed:" prefix written by the boot pipeline's catch block. If that
+  // message text ever changes, update the regex with it — derivedStage's
+  // failure branch depends on this coupling.
+  const derivedStage = derivePipelineStage({
+    failed: ingestionStage === 'failed' || /^Setup failed:/i.test(bootPipelineMessage),
+    ready: bootPipelineReady,
+    uploading: uploadingVideo,
+    ingestionStage,
+    hasCoaching: Boolean(fightLangCoaching),
+  })
+
   const clipPipelineStep: 'idle' | 'buffering' | 'prescanning' | 'ready' | 'playing' = !videoUrl
     ? 'idle'
     : playbackUnlocked
       ? 'playing'
-      : bootPipelineReady
+      : derivedStage === 'ready'
         ? 'ready'
-        : visionFirstActive && (ingestionStage === 'gemini_ready' || ingestionStage === 'analyzing')
-          ? 'prescanning'
-          : fightLangPreScanBusy || /mapping fighters/i.test(bootPipelineMessage)
-          ? 'prescanning'
-          : 'buffering'
+        : derivedStage === 'uploading'
+          ? 'buffering'
+          : 'prescanning'
 
   const visionAnalyzeCtaLabel =
     resolveSportKey(selectedSport) === 'bjj_grappling' ? 'Analyze this roll' : 'Analyze this match'
@@ -4448,7 +4470,9 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
   const ingestionStatusText = ingestionStage === 'uploading_original'
     ? `${ingestionStageLabel[ingestionStage]} ${uploadTransferLabel}`
     : ingestionStageLabel[ingestionStage]
-  const bootPipelineFailed = ingestionStage === 'failed' || /^Setup failed:/i.test(bootPipelineMessage)
+  const bootPipelineFailed = derivedStage === 'failed'
+  /** The ONE status string for this screen. Every surface renders this. */
+  const pipelineStatusText = pipelineStatusLabel(derivedStage)
 
   // Idle-collapsed: no visible surface at all — the page's own uploader (home
   // hero) is the single upload terminal until a clip loads. min-h-screen would
@@ -4780,19 +4804,21 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                         <p className="font-display truncate text-sm tracking-wide text-foreground sm:text-base">
                           {videoFile.name}
                         </p>
-                        <p className="text-[11px] text-muted-foreground">
-                          {playbackUnlocked
-                            ? poseOverlayOn
-                              ? 'Playback unlocked — skeleton tracking live'
-                              : 'Playback unlocked — skeleton overlay is off'
-                            : bootPipelineReady
-                              ? clipLoadSource === 'restored'
-                                ? 'Restored your last clip — click Play'
-                                : 'Ready — press the play button on the video'
+                        {/* Post-boot info only. The boot-time status lives in the
+                            badge to the right — two independent status strings in
+                            one row is what produced "Uploading…" next to
+                            "PREPARING". */}
+                        {(playbackUnlocked || bootPipelineReady) && (
+                          <p className="text-[11px] text-muted-foreground">
+                            {playbackUnlocked
+                              ? poseOverlayOn
+                                ? 'Playback unlocked — skeleton tracking live'
+                                : 'Playback unlocked — skeleton overlay is off'
                               : clipLoadSource === 'restored'
-                                ? 'Restoring your last clip…'
-                                : bootPipelineMessage || 'Preparing local pose mapping…'}
-                        </p>
+                                ? 'Restored your last clip — click Play'
+                                : 'Ready — press the play button on the video'}
+                          </p>
+                        )}
                       </div>
                     </div>
                     <button
@@ -4857,8 +4883,12 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                     >
                       {!bootPipelineReady ? (
                         <>
-                          <Loader2 className="mr-1.5 h-3 w-3 animate-spin" aria-hidden />
-                          Preparing
+                          {!bootPipelineFailed && (
+                            <Loader2 className="mr-1.5 h-3 w-3 animate-spin" aria-hidden />
+                          )}
+                          {/* The single derived status — no longer a hardcoded
+                              "Preparing" that could contradict the caption. */}
+                          {pipelineStatusText}
                         </>
                       ) : playbackUnlocked ? (
                         <>
@@ -4874,7 +4904,17 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                     </Badge>
                   </div>
                 )}
-                <div className="relative" style={{ lineHeight: 0 }}>
+                {/* While the boot overlay is up the <video> has no intrinsic size
+                    yet, so this box would collapse to the 300x150 replaced-element
+                    default and the absolutely-positioned overlay would spill out of
+                    it — over the header chips. Reserve height and clip, but ONLY
+                    while the overlay renders (same predicate as its own gate), so
+                    playback keeps today's intrinsic-height behaviour. Deliberately
+                    NOT aspect-video: that letterboxes portrait phone clips. */}
+                <div
+                  className={cn('relative', !playbackUnlocked && videoUrl && 'min-h-[26rem] overflow-hidden')}
+                  style={{ lineHeight: 0 }}
+                >
                   {videoUrl && playbackUnlocked && (
                     <div
                       className={cn(
@@ -4994,7 +5034,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                           void analyzeFightLangWindow({ mode: 'full', replayPass: clipEndPassCountRef.current })
                         }
                       }}
-                      className={cn('w-full block', !playbackUnlocked && 'pointer-events-none select-none')} style={{ objectFit: 'contain', pointerEvents: playbackUnlocked ? 'auto' : 'none' }}
+                      className={cn('w-full block', !playbackUnlocked && 'aspect-video pointer-events-none select-none')} style={{ objectFit: 'contain', pointerEvents: playbackUnlocked ? 'auto' : 'none' }}
                       onPause={() => {
                         if (!autoAnalyzeOnPause) return
                         if (analyzing) return
@@ -5044,7 +5084,14 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                       so nothing bubbles to the video. The Play-button state has its own onClick. */}
                   {!playbackUnlocked && videoUrl && (
                     <div
-                      className="absolute inset-0 z-[60] flex flex-col items-center justify-center gap-5 bg-black px-6 text-center"
+                      // leading-normal resets the inherited lineHeight:0 from the
+                      // wrapper (Tailwind's text-[10px] sets font-size only, so the
+                      // stepper chips below were collapsing to a zero-height line
+                      // box). overflow-y-auto is the safety net: if content ever
+                      // exceeds the reserved height it scrolls instead of spilling
+                      // over the header. z-index is NOT the fix here — the wrapper
+                      // is z-index:auto so it is not a stacking context.
+                      className="absolute inset-0 z-[60] flex flex-col items-center justify-center gap-4 overflow-y-auto bg-black px-6 py-6 text-center leading-normal"
                       style={{ pointerEvents: 'auto' }}
                       onClick={(e) => { if (!bootPipelineReady) { e.preventDefault(); e.stopPropagation() } }}
                       onMouseDown={(e) => { if (!bootPipelineReady) { e.preventDefault(); e.stopPropagation() } }}
@@ -5056,9 +5103,13 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                             ? <AlertTriangle className="h-10 w-10 text-amber-400" />
                             : <Loader2 className="h-10 w-10 animate-spin text-primary" />}
                           <p className="font-display text-lg tracking-wide text-white">
-                            {clipLoadSource === 'restored' ? 'Restoring your last clip' : 'Preparing your coach…'}
+                            {clipLoadSource === 'restored' ? 'Restoring your last clip' : pipelineStatusText}
                           </p>
-                          <p className="max-w-xs text-sm text-white/75">{bootPipelineMessage || 'Preparing your coach…'}</p>
+                          {/* Detail line: only carries the failure reason now, so
+                              it can never contradict the stage above it. */}
+                          {bootPipelineFailed && bootPipelineMessage && (
+                            <p className="max-w-xs text-sm text-amber-200/90">{bootPipelineMessage}</p>
+                          )}
                           <div className="flex flex-wrap items-center justify-center gap-2 text-[10px] font-semibold uppercase tracking-wide">
                             {(['buffering', 'prescanning', 'ready'] as const).map((step) => {
                               const labels = {
@@ -5268,7 +5319,10 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                   {/* FightAnalyzer (pose detection engine) */}
                   <FightAnalyzer
                     videoRef={videoRef}
-                    enabled={Boolean(videoUrl) && !visionFirstActive}
+                    // Narrow gate on purpose: the vision-first flag must not turn
+                    // MediaPipe off for MMA — skeleton overlays and the pose
+                    // sidecar keep working, they are just no longer authoritative.
+                    enabled={Boolean(videoUrl) && !visionFirstSportOnly}
                     preScanOnLoad
                     preScanPasses={BOOT_PIPELINE_PASSES}
                     preScanResetKey={videoUrl ?? ''}
@@ -5504,19 +5558,16 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                 <Button size="sm" variant={reflexOn ? 'default' : 'ghost'} className="h-8 text-xs" onClick={() => setReflexOn((r) => !r)}>
                   {reflexOn ? 'Reflex ON' : 'Reflex'}
                 </Button>
-                {kinematicsUi?.range && !visionFirstActive && (
+                {kinematicsUi?.range && !visionFirstSportOnly && (
                   <span className="text-[11px] text-muted-foreground ml-auto">Range: {kinematicsUi.range.band}</span>
                 )}
               </div>
 
               {/* AI Coaching Panel — all-at-once: cards + ratings only after coachReady */}
               <div>
-                {!coachReady && videoUrl && (fightLangLoading || uploadingVideo || initialAnalysisLoading || !bootPipelineReady) && (
-                  <div className="mb-3 flex items-center gap-2 rounded-xl border border-cyan-500/30 bg-cyan-950/40 px-4 py-3">
-                    <Loader2 className="h-4 w-4 animate-spin text-cyan-400" />
-                    <span className="text-sm font-medium text-cyan-100">Preparing your coach…</span>
-                  </div>
-                )}
+                {/* Removed: a fifth "Preparing your coach…" spinner that duplicated
+                    the boot overlay and the header badge under a fourth, unrelated
+                    gate. Boot status now lives in exactly one place per surface. */}
                 {correctionsAppliedSummary && coachReady && (
                   <div className="mb-3 rounded-xl border border-emerald-500/30 bg-emerald-950/40 px-4 py-2 text-sm text-emerald-100">
                     {correctionsAppliedSummary}
@@ -5590,7 +5641,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
               </div>
 
               {/* Pipeline Stats (compact) — hide empty striking counters for vision-first */}
-              {pipelineStats && !visionFirstActive && (
+              {pipelineStats && !visionFirstSportOnly && (
                 <div className="rounded-xl border border-border/40 bg-card/30 p-3 text-[11px] text-muted-foreground">
                   <div className="grid grid-cols-2 gap-2">
                     <div><span className="font-medium text-foreground">Frames:</span> {pipelineStats.poseFrames}</div>
@@ -5655,7 +5706,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                       <div className="font-medium text-foreground">Skeleton</div>
                       <label className="flex items-center gap-2"><input type="checkbox" checked={skeletonVisible.A} onChange={(e) => setSkeletonVisible((p) => ({ ...p, A: e.target.checked }))} /><span className="inline-block h-2 w-2 rounded-full bg-blue-500" />Blue corner</label>
                       <label className="flex items-center gap-2"><input type="checkbox" checked={skeletonVisible.B} onChange={(e) => setSkeletonVisible((p) => ({ ...p, B: e.target.checked }))} /><span className="inline-block h-2 w-2 rounded-full bg-red-500" />Red corner</label>
-                      {!visionFirstActive && (
+                      {!visionFirstSportOnly && (
                         <label className="flex items-center gap-2"><input type="checkbox" checked={kinematicsHudOn} onChange={(e) => setKinematicsHudOn(e.target.checked)} />Kinematics HUD</label>
                       )}
                       <div className="pt-1">
@@ -5781,7 +5832,10 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
                 <div className="rounded-xl border border-border/40 bg-card/30 px-4 py-3">
                   <div className="text-sm font-medium truncate">{videoFile.name}</div>
                   <div className="mt-1 text-xs text-muted-foreground">
-                  {uploadingVideo ? ingestionStatusText : initialAnalysisStatus || (initialAnalysisReady ? 'Analysis complete' : initialAnalysisLoading ? 'AI analyzing clip…' : 'Waiting to analyze')}
+                  {/* Same derived stage as the header/overlay, plus the byte
+                      detail the taxonomy deliberately does not carry. */}
+                  {coachReady && initialAnalysisReady ? 'Analysis complete' : pipelineStatusText}
+                  {derivedStage === 'uploading' && uploadByteProgress ? ` · ${uploadTransferLabel}` : ''}
                   </div>
                   {(uploadingVideo || initialAnalysisLoading) && (
                     <div className="mt-2 h-1 rounded-full bg-muted overflow-hidden">
@@ -6034,7 +6088,7 @@ IMPORTANT: Map fighters by their horizontal position in the frame - left side is
               </div>
 
               {/* Kinematics HUD — striking only; vision-first sports have empty pose metrics */}
-              {kinematicsHudOn && kinematicsUi && !visionFirstActive && (
+              {kinematicsHudOn && kinematicsUi && !visionFirstSportOnly && (
                 <div className="rounded-xl border border-border/40 bg-card/30 p-3">
                   <div className="text-xs font-medium mb-2">Kinematics</div>
                   <div className="grid grid-cols-2 gap-2 text-[11px]">

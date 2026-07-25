@@ -98,6 +98,60 @@ export function classifyFailure(err: unknown, stage: PipelineStage): FailureKind
   }
 }
 
+/**
+ * Single derived answer to "what is the pipeline doing right now?".
+ *
+ * The Fight Lab screen historically carried FOUR competing status vocabularies
+ * (a free-form boot message, the 11-value ingestion stage, a step enum derived
+ * by regex-matching the boot message, and a streaming phase). They could each
+ * be true at once, which is how the header showed "Uploading…" and "PREPARING"
+ * side by side. Every status surface now derives from this one function.
+ *
+ * Precedence is deliberate: a terminal outcome (failed / ready) always wins, so
+ * a spinner can never coexist with "Ready".
+ */
+export function derivePipelineStage(input: {
+  failed?: boolean
+  ready?: boolean
+  uploading?: boolean
+  ingestionStage?: string | null
+  /** Coaching already returned — distinguishes "watching" from "building". */
+  hasCoaching?: boolean
+}): PipelineStage | 'failed' {
+  if (input.failed) return 'failed'
+  if (input.ready) return 'ready'
+
+  const stage = input.ingestionStage ?? ''
+
+  // Explicit upload signals beat everything below.
+  if (input.uploading || stage === 'selected' || stage === 'uploading_original') return 'uploading'
+
+  switch (stage) {
+    case 'original_uploaded':
+    case 'normalizing':
+    case 'normalized':
+    case 'uploading_to_gemini':
+    case 'gemini_processing':
+      return 'preparing_video'
+    case 'gemini_ready':
+      return 'building_coaching'
+    case 'analyzing':
+      // The evidence pass runs before any coaching exists.
+      return input.hasCoaching ? 'building_coaching' : 'watching'
+    case 'complete':
+      return 'ready'
+    case 'failed':
+      return 'failed'
+    default:
+      return 'preparing_video'
+  }
+}
+
+/** Label for a stage or the terminal failure state. */
+export function pipelineStatusLabel(stage: PipelineStage | 'failed'): string {
+  return stage === 'failed' ? 'Analysis failed' : stageLabel(stage)
+}
+
 /** Map legacy ingestion failure codes to the new failure kinds. */
 export function failureKindFromIngestionCode(code: string): FailureKind {
   if (code.startsWith('ORIGINAL_UPLOAD')) return 'upload'
