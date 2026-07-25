@@ -1937,7 +1937,12 @@ export function FightAnalyzer({
             denseTrackRef.current = pruneGhostRuns(track)
             denseTrackReadyRef.current = true
             onDenseTrackReadyRef.current?.(track.length, {
-              engine: cloudOptions.mode === 'rtmpose' ? 'rtmpose-cloud' : 'mediapipe-cloud',
+              engine:
+                cloudOptions.mode === 'sam2'
+                  ? 'sam2-cloud'
+                  : cloudOptions.mode === 'rtmpose'
+                    ? 'rtmpose-cloud'
+                    : 'mediapipe-cloud',
               quality,
             })
             if (process.env.NODE_ENV !== 'production') {

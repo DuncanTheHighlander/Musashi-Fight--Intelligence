@@ -14,6 +14,7 @@
  */
 
 export type PoseEngine =
+  | 'sam2-cloud'
   | 'rtmpose-cloud'
   | 'mediapipe-cloud'
   | 'rtmpose-local'
@@ -36,6 +37,19 @@ export type PoseQualitySummary = {
   footConfidence: number
   /** Mean visibility of wrists across present fighters (0..1). */
   wristConfidence: number
+  /**
+   * Fraction of adjacent-sample transitions where a fighter's torso stayed put
+   * rather than teleporting (0..1), taken from the WORST of the two slots.
+   * 1 means neither slot ever jumped bodies.
+   *
+   * The audit's sharpest finding was that this grading could not tell a
+   * perfectly-tracked SPECTATOR from a fighter — coverage and joint visibility
+   * both read "high" for a skeleton welded to the wrong person. This does not
+   * fix that on its own (a stationary spectator scores 1.0), but it is the
+   * first signal here that measures identity at all, and it catches the other
+   * half: a slot that keeps swapping between bodies.
+   */
+  identityStability: number
   recommendation: 'safe_to_analyze' | 'analyze_with_caution' | 'request_better_clip'
 }
 
@@ -48,6 +62,13 @@ type QualitySample = {
 
 const FOOT_JOINTS = [27, 28, 29, 30, 31, 32]
 const WRIST_JOINTS = [15, 16]
+const TORSO_JOINTS = [11, 12, 23, 24]
+/**
+ * Normalized torso-anchor movement between adjacent samples that no real
+ * fighter produces — at dense-track cadence this is a body swap, not motion.
+ * Matches LOCK_SEPARATION_DIST in identityTracking.ts.
+ */
+const IDENTITY_TELEPORT_DIST = 0.12
 
 function meanVisibility(pose: QualityLandmark[], joints: number[]): number | null {
   let sum = 0
@@ -59,6 +80,20 @@ function meanVisibility(pose: QualityLandmark[], joints: number[]): number | nul
     n++
   }
   return n > 0 ? sum / n : null
+}
+
+function torsoAnchor(pose: QualityLandmark[]): { x: number; y: number } | null {
+  let x = 0
+  let y = 0
+  let n = 0
+  for (const idx of TORSO_JOINTS) {
+    const lm = pose[idx]
+    if (!lm) continue
+    x += lm.x
+    y += lm.y
+    n++
+  }
+  return n > 0 ? { x: x / n, y: y / n } : null
 }
 
 /**
@@ -75,8 +110,29 @@ export function assessDenseTrackQuality(
   let bothFighters = 0
   const foot: number[] = []
   const wrist: number[] = []
+  const transitions: Record<'A' | 'B', number> = { A: 0, B: 0 }
+  const teleports: Record<'A' | 'B', number> = { A: 0, B: 0 }
+  const lastAnchor: Record<'A' | 'B', { x: number; y: number } | null> = { A: null, B: null }
 
   for (const sample of track) {
+    for (const slot of ['A', 'B'] as const) {
+      const pose = sample[slot]
+      if (!pose) {
+        // A genuine gap is not a swap — resume comparison from the next
+        // sighting rather than charging the re-entry as a teleport.
+        lastAnchor[slot] = null
+        continue
+      }
+      const anchor = torsoAnchor(pose)
+      if (anchor && lastAnchor[slot]) {
+        transitions[slot]++
+        const dx = anchor.x - lastAnchor[slot]!.x
+        const dy = anchor.y - lastAnchor[slot]!.y
+        if (Math.hypot(dx, dy) > IDENTITY_TELEPORT_DIST) teleports[slot]++
+      }
+      lastAnchor[slot] = anchor
+    }
+
     const poses = [sample.A, sample.B].filter(Boolean) as QualityLandmark[][]
     if (poses.length === 0) continue
     anyFighter++
@@ -88,6 +144,14 @@ export function assessDenseTrackQuality(
       if (w !== null) wrist.push(w)
     }
   }
+
+  // Worst slot, not the pooled average: one slot welded to a bystander while
+  // the other flails is precisely the failure mode this is here to catch, and
+  // averaging lets the stable slot hide it.
+  const slotStability = (['A', 'B'] as const)
+    .filter((slot) => transitions[slot] > 0)
+    .map((slot) => 1 - teleports[slot] / transitions[slot])
+  const identityStability = slotStability.length > 0 ? Math.min(...slotStability) : 1
 
   const coverage = expectedSamples > 0 ? Math.min(1, anyFighter / expectedSamples) : 0
   const both = anyFighter > 0 ? bothFighters / anyFighter : 0
@@ -107,12 +171,23 @@ export function assessDenseTrackQuality(
     recommendation = 'request_better_clip'
   }
 
+  // Deliberately a floor, not a grading input: a track whose slots swap bodies
+  // more often than not is unusable no matter how clean its joints look. It sits
+  // far below anything the existing engines produce (clip3's worst MediaPipe run
+  // still clears ~0.8), so this rejects genuine breakage without demoting tracks
+  // that pass today.
+  if (identityStability < 0.5) {
+    overall = 'low'
+    recommendation = 'request_better_clip'
+  }
+
   return {
     overall,
     coverage: +coverage.toFixed(3),
     bothFighters: +both.toFixed(3),
     footConfidence: +footConfidence.toFixed(3),
     wristConfidence: +wristConfidence.toFixed(3),
+    identityStability: +identityStability.toFixed(3),
     recommendation,
   }
 }

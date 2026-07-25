@@ -61,6 +61,13 @@ export type ReplayInFrame = {
       upper?: unknown
       lower?: { r: number; g: number; b: number } | null
     } | null
+    /**
+     * Stable object id from a real tracker (cloud/sam_pipeline.py, SAM 2.1).
+     * When present on every candidate, identity is a FACT carried from the
+     * tracker's object memory rather than something this module has to infer
+     * from colour, scale and pose shape — see replayTrackedCandidates below.
+     */
+    trackId?: number
   }>
 }
 
@@ -466,6 +473,98 @@ class IdentityReplayer {
 }
 
 /**
+ * True when every candidate in every frame carries a tracker object id, i.e.
+ * the upstream actually tracked objects instead of emitting loose detections.
+ * Anything less and we must not trust partial ids, so the heuristic replayer
+ * stays in charge.
+ */
+export function hasTrackIds(frames: ReplayInFrame[]): boolean {
+  let seen = false
+  for (const frame of frames) {
+    for (const candidate of frame.candidates) {
+      if (typeof candidate.trackId !== 'number') return false
+      seen = true
+    }
+  }
+  return seen
+}
+
+/**
+ * Deterministic replay for tracker-supplied identity (SAM 2.1).
+ *
+ * The heuristic replayer exists to answer "which of these poses is the same
+ * person as last frame?" — a question a tracker with object memory has already
+ * answered. So this path does none of it: no colour profiles, no Kalman
+ * prediction, no crossing phases, no claim gates, no occlusion holds.
+ *
+ * Two deliberate choices:
+ *
+ *  - A is the LEFT track, B the RIGHT (by mean torso x over the clip). That
+ *    matches the vision-first convention documented in the pipeline audit,
+ *    where "A = LEFT of screen"; the tracker no longer invents a third naming
+ *    system alongside blue/red and left/right.
+ *  - A frame where a track has no candidate emits null, with NO hold or coast.
+ *    An empty SAM mask means that fighter genuinely is not visible, and holds
+ *    are exactly what produced the frozen ghost skeletons in the 2026-06-10
+ *    baseline. The overlay's own stale-fade handles the gap honestly.
+ */
+export function replayTrackedCandidates(
+  frames: ReplayInFrame[],
+  opts?: { round?: boolean }
+): DenseTrackSample[] {
+  const sorted = [...frames].sort((a, b) => a.f - b.f)
+
+  // Rank tracks by how much of the clip they appear in; ties break on id so the
+  // result never depends on Map iteration order.
+  const presence = new Map<number, number>()
+  const sumX = new Map<number, number>()
+  for (const frame of sorted) {
+    for (const candidate of frame.candidates) {
+      const id = candidate.trackId as number
+      presence.set(id, (presence.get(id) ?? 0) + 1)
+      const anchor = candidate.anchor ?? getPoseAnchor(candidate.pose)
+      if (anchor) sumX.set(id, (sumX.get(id) ?? 0) + anchor.x)
+    }
+  }
+  const ranked = [...presence.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0] - b[0])
+    .slice(0, 2)
+    .map(([id]) => id)
+
+  const meanX = (id: number) => (sumX.get(id) ?? 0) / Math.max(1, presence.get(id) ?? 1)
+  const ordered = ranked.length === 2 && meanX(ranked[1]) < meanX(ranked[0])
+    ? [ranked[1], ranked[0]]
+    : ranked
+  const slotOf = new Map<number, FighterKey>()
+  if (ordered[0] !== undefined) slotOf.set(ordered[0], 'A')
+  if (ordered[1] !== undefined) slotOf.set(ordered[1], 'B')
+
+  // Temporal smoothing still earns its keep — SAM fixes WHO, not RTMPose's
+  // frame-to-frame keypoint jitter. Each slot smooths against its own history.
+  const alpha = crossingSmoothAlpha('tracking')
+  const previous: Record<FighterKey, NormalizedLandmark[] | null> = { A: null, B: null }
+  const out: DenseTrackSample[] = []
+
+  for (const frame of sorted) {
+    const raw: Record<FighterKey, NormalizedLandmark[] | null> = { A: null, B: null }
+    for (const candidate of frame.candidates) {
+      const slot = slotOf.get(candidate.trackId as number)
+      if (slot) raw[slot] = candidate.pose
+    }
+    const smoothedA = raw.A ? smoothLandmarks(raw.A, previous.A, alpha) : null
+    const smoothedB = raw.B ? smoothLandmarks(raw.B, previous.B, alpha) : null
+    previous.A = raw.A ?? null
+    previous.B = raw.B ?? null
+    out.push({
+      tMs: opts?.round === false ? frame.tMs : Math.round(frame.tMs),
+      A: smoothedA,
+      B: smoothedB,
+    })
+  }
+  return out
+}
+
+/**
  * Replay an ordered list of candidate frames into a dense A/B track.
  * `round` matches the in-browser dense pass which stores Math.round(tMs).
  */
@@ -473,6 +572,7 @@ export function replayCandidatesToDenseTrack(
   frames: ReplayInFrame[],
   opts?: { round?: boolean }
 ): DenseTrackSample[] {
+  if (hasTrackIds(frames)) return replayTrackedCandidates(frames, opts)
   const sorted = [...frames].sort((a, b) => a.f - b.f)
   const replayer = new IdentityReplayer()
   const out: DenseTrackSample[] = []

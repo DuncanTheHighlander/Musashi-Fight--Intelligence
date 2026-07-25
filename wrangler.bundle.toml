@@ -92,6 +92,15 @@ MUSASHI_MARKETPLACE_PAYMENTS = "stripe"
 MUSASHI_STORAGE_MODE = "r2"
 GEMINI_EMBED_DIMENSION = "1536"
 MUSASHI_VIDEO_NORMALIZER_URL = "https://duncanazsmith--musashi-pose-api-normalize-video.modal.run"
+# Cloud pose backends (cloud/modal_app.py). Without these the Worker has no cloud
+# pose config and every upload silently falls back to the on-device MediaPipe pass.
+MUSASHI_POSE_CLOUD_GPU_URL = "https://duncanazsmith--musashi-pose-api-analyze-pose.modal.run"
+MUSASHI_POSE_CLOUD_CPU_URL = "https://duncanazsmith--musashi-pose-api-cpu-analyze-pose.modal.run"
+MUSASHI_POSE_CLOUD_SAM_URL = "https://duncanazsmith--musashi-pose-api-analyze-pose-sam.modal.run"
+NEXT_PUBLIC_POSE_PRIMARY_ENGINE = "rtmpose"
+# Bearer token for all three: Secrets Store binding SECRET_POSE_CLOUD (store name
+# PoseCloudToken), or legacy `wrangler secret put MUSASHI_POSE_CLOUD_TOKEN`.
+# Must equal POSE_API_TOKEN in the Modal environment.
 NODE_ENV = "production"
 MUSASHI_DISABLE_AUTH = "0"
 # AI coaching requires verified email in production (assertEmailVerified). Override: MUSASHI_REQUIRE_EMAIL_VERIFIED=0

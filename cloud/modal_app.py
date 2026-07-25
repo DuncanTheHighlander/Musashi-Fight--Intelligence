@@ -36,7 +36,12 @@ APP_ROOT = Path("/root/musashi")
 MODEL_PATH = Path("/models/rtmpose-halpe26.onnx")
 REMOTE_PIPELINE_PATH = "/root/musashi/cloud/pose_pipeline.py"
 REMOTE_LIFTER_PATH = "/root/musashi/cloud/pose3d_lifter.py"
+REMOTE_DECODER_PATH = "/root/musashi/cloud/rtmpose_decoder.py"
+REMOTE_DETECTOR_PATH = "/root/musashi/cloud/detector.py"
+REMOTE_SAM_PIPELINE_PATH = "/root/musashi/cloud/sam_pipeline.py"
 REMOTE_MODEL_PATH = "/models/rtmpose-halpe26.onnx"
+
+SAM_MODEL_ID = "facebook/sam2.1-hiera-small"
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
@@ -50,6 +55,48 @@ image = (
     )
     .add_local_file("cloud/pose_pipeline.py", REMOTE_PIPELINE_PATH)
     .add_local_file("cloud/pose3d_lifter.py", REMOTE_LIFTER_PATH)
+    .add_local_file("cloud/rtmpose_decoder.py", REMOTE_DECODER_PATH)
+    .add_local_file("public/models/rtmpose-halpe26.onnx", REMOTE_MODEL_PATH)
+)
+
+
+def _prefetch_sam_weights() -> None:
+    """Bake SAM 2.1 + the torchvision detector into the image layer.
+
+    Both would otherwise download on first request, adding minutes to a cold
+    start — the same trap that made the video normalizer its own image.
+    """
+    from sam2.sam2_video_predictor import SAM2VideoPredictor
+    from torchvision.models.detection import (
+        FasterRCNN_MobileNet_V3_Large_FPN_Weights,
+        fasterrcnn_mobilenet_v3_large_fpn,
+    )
+
+    SAM2VideoPredictor.from_pretrained(SAM_MODEL_ID, device="cpu")
+    fasterrcnn_mobilenet_v3_large_fpn(weights=FasterRCNN_MobileNet_V3_Large_FPN_Weights.DEFAULT)
+
+
+# SAM 2.1 needs torch + torchvision, which roughly triples image size. Keeping
+# it out of the RTMPose image above preserves that path's cold start, and keeps
+# MediaPipe out of this one — the SAM path must never fall back to the detector
+# whose bystander lock it exists to fix.
+sam_image = (
+    modal.Image.debian_slim(python_version="3.11")
+    .apt_install("ffmpeg", "libglib2.0-0", "libgl1", "libgomp1")
+    .pip_install(
+        "fastapi[standard]>=0.115,<1",
+        "torch>=2.5.1",
+        "torchvision>=0.20",
+        "sam2>=1.1",
+        "huggingface_hub>=0.26",
+        "numpy<2",
+        "onnxruntime-gpu>=1.20,<1.23",
+        "opencv-python-headless>=4.10,<5",
+    )
+    .run_function(_prefetch_sam_weights)
+    .add_local_file("cloud/rtmpose_decoder.py", REMOTE_DECODER_PATH)
+    .add_local_file("cloud/detector.py", REMOTE_DETECTOR_PATH)
+    .add_local_file("cloud/sam_pipeline.py", REMOTE_SAM_PIPELINE_PATH)
     .add_local_file("public/models/rtmpose-halpe26.onnx", REMOTE_MODEL_PATH)
 )
 
@@ -67,6 +114,24 @@ app = modal.App("musashi-pose-api")
 auth_secret = modal.Secret.from_local_environ(["POSE_API_TOKEN"])
 
 _pipelines = {}
+_sam_pipeline = {}
+
+
+def _sam():
+    """Lazy-load the SAM stack once per warm container."""
+    if "pipe" in _sam_pipeline:
+        return _sam_pipeline["pipe"]
+
+    sys.path.insert(0, str(APP_ROOT / "cloud"))
+    from sam_pipeline import SamPipeline
+
+    pipe = SamPipeline(
+        str(MODEL_PATH),
+        sam_model_id=SAM_MODEL_ID,
+        providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
+    )
+    _sam_pipeline["pipe"] = pipe
+    return pipe
 
 
 def _pipeline(use_rtmpose: bool):
@@ -226,6 +291,80 @@ async def analyze_pose(request: Request):
         },
         "frames": frames,
         "pose3DFrames": pose3d_frames,
+    }
+
+
+@app.function(
+    image=sam_image,
+    secrets=[auth_secret],
+    # L4 first (sm_89, bfloat16). T4 stays a capacity fallback; sam_pipeline
+    # drops to float16 there. SAM's video predictor holds per-frame state, so
+    # this needs more headroom than the RTMPose-only endpoint.
+    gpu=["L4", "T4"],
+    timeout=900,
+    memory=16384,
+    scaledown_window=120,
+)
+@modal.fastapi_endpoint(method="POST")
+async def analyze_pose_sam(request: Request):
+    """POST multipart form-data with a `video` file.
+
+    SAM 2.1 detects and tracks the two fighters with real object memory, then
+    RTMPose decodes keypoints inside those identity-locked masks. Returns the
+    same per-frame candidate JSON as analyze_pose, with `trackId` on each
+    candidate so the client can skip heuristic A/B assignment.
+
+    Optional fields:
+      fps=30  -> fallback FPS when OpenCV cannot read container FPS
+    """
+    from fastapi import HTTPException
+
+    expected = os.environ.get("POSE_API_TOKEN")
+    if expected and _bearer_token(request.headers) != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    form = await request.form()
+    upload = form.get("video")
+    if upload is None or not hasattr(upload, "read"):
+        raise HTTPException(status_code=400, detail="Expected multipart field `video`")
+
+    try:
+        fps = float(form.get("fps", 30))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="`fps` must be numeric")
+
+    suffix = Path(getattr(upload, "filename", "") or "clip.mp4").suffix or ".mp4"
+    started = time.time()
+    data = await upload.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="Uploaded video is empty")
+
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp_path = tmp.name
+        tmp.write(data)
+
+    try:
+        frames = _sam().process_video(tmp_path, fps=fps)
+    finally:
+        _cleanup_files(tmp_path)
+
+    candidate_frames = sum(1 for frame in frames if frame.get("candidates"))
+    two_fighter_frames = sum(1 for frame in frames if len(frame.get("candidates", [])) >= 2)
+    track_ids = sorted({c["trackId"] for f in frames for c in f.get("candidates", [])})
+
+    return {
+        "version": "musashi-pose-api-v1",
+        "backend": "sam2",
+        "meta": {
+            "frames": len(frames),
+            "candidateFrames": candidate_frames,
+            "twoFighterFrames": two_fighter_frames,
+            "elapsedMs": round((time.time() - started) * 1000),
+            "pose3DEnabled": False,
+            "trackIds": track_ids,
+        },
+        "frames": frames,
+        "pose3DFrames": None,
     }
 
 

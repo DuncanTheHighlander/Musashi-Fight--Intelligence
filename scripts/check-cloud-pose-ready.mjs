@@ -101,6 +101,9 @@ function add(name, ok, note) {
 for (const [path, opts] of [
   ['public/models/rtmpose-halpe26.onnx', { minBytes: 40 * 1024 * 1024 }],
   ['cloud/pose_pipeline.py', {}],
+  ['cloud/rtmpose_decoder.py', {}],
+  ['cloud/detector.py', {}],
+  ['cloud/sam_pipeline.py', {}],
   ['cloud/modal_app.py', {}],
   ['cloud/modal_cpu_app.py', {}],
   ['src/app/api/fight/cloud-pose/route.ts', {}],
@@ -156,6 +159,11 @@ add(
   hasSecret('MUSASHI_POSE_CLOUD_CPU_URL'),
   hasSecret('MUSASHI_POSE_CLOUD_CPU_URL') ? 'set' : 'optional, missing'
 )
+add(
+  'MUSASHI_POSE_CLOUD_SAM_URL',
+  hasSecret('MUSASHI_POSE_CLOUD_SAM_URL'),
+  hasSecret('MUSASHI_POSE_CLOUD_SAM_URL') ? 'set' : 'optional, missing until SAM deploy'
+)
 add('Gemini API key', hasSecret('GEMINI_API_KEY'), hasSecret('GEMINI_API_KEY') ? 'set' : 'missing')
 add('R2 endpoint', hasSecret('STORAGE_SERVICE_URL'), hasSecret('STORAGE_SERVICE_URL') ? 'set' : 'missing')
 add('R2 access key', hasSecret('STORAGE_ACCESS_KEY'), hasSecret('STORAGE_ACCESS_KEY') ? 'set' : 'missing')
@@ -190,6 +198,10 @@ if (!hasSecret('MUSASHI_POSE_CLOUD_GPU_URL')) {
 }
 if (!hasSecret('MUSASHI_POSE_CLOUD_TOKEN')) {
   console.log('  Set MUSASHI_POSE_CLOUD_TOKEN in .env.local to the same value as POSE_API_TOKEN.')
+}
+if (!hasSecret('MUSASHI_POSE_CLOUD_SAM_URL')) {
+  console.log('  Optional: deploy analyze_pose_sam (cloud/modal_app.py) and paste the SAM endpoint')
+  console.log('  into MUSASHI_POSE_CLOUD_SAM_URL to enable ?poseCloudMode=sam2.')
 }
 
 process.exit(missingRequired.length ? 1 : 0)

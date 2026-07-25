@@ -61,4 +61,28 @@ describe('cloudPose options', () => {
     })
     expect(getCloudPoseOptions()).toEqual({ target: 'auto', mode: 'rtmpose' })
   })
+
+  it('selects the SAM 2.1 tracker per session via the query string', () => {
+    stubWindow('?poseCloudMode=sam2')
+    expect(getCloudPoseOptions()).toEqual({ target: 'auto', mode: 'sam2' })
+  })
+
+  it('makes sam2 the default mode when it is the configured primary engine', () => {
+    process.env.NEXT_PUBLIC_POSE_PRIMARY_ENGINE = 'sam2'
+    stubWindow('')
+    expect(cloudPoseRequested()).toBe(true)
+    expect(getCloudPoseOptions()).toEqual({ target: 'auto', mode: 'sam2' })
+  })
+
+  it('lets an explicit mode override a sam2 primary', () => {
+    process.env.NEXT_PUBLIC_POSE_PRIMARY_ENGINE = 'sam2'
+    stubWindow('?poseCloudMode=rtmpose')
+    expect(getCloudPoseOptions()).toEqual({ target: 'auto', mode: 'rtmpose' })
+  })
+
+  it('still respects an on-device backend choice when sam2 is primary', () => {
+    process.env.NEXT_PUBLIC_POSE_PRIMARY_ENGINE = 'sam2'
+    stubWindow('?poseBackend=local')
+    expect(getCloudPoseOptions()).toBeNull()
+  })
 })

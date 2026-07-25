@@ -24,8 +24,12 @@ const CLOUD_POSE_ENDPOINT = '/api/fight/cloud-pose'
 /** Client-side ceiling for one cloud dense pass (proxy upstream timeout is 290s). */
 const CLOUD_POSE_TIMEOUT_MS = 300_000
 
+export type CloudPoseMode = 'rtmpose' | 'mediapipe' | 'sam2'
+
+const CLOUD_POSE_MODES = ['rtmpose', 'mediapipe', 'sam2'] as const
+
 export type CloudPoseOptions = {
-  mode: 'rtmpose' | 'mediapipe'
+  mode: CloudPoseMode
   target: 'auto' | 'gpu' | 'cpu'
 }
 
@@ -50,16 +54,16 @@ export function getCloudPoseOptions(): CloudPoseOptions | null {
     const params = new URLSearchParams(window.location.search)
     const backend = params.get('poseBackend') || window.localStorage.getItem('musashiPoseBackend')
     if (backend && backend !== 'cloud') return null
+    const primary = (process.env.NEXT_PUBLIC_POSE_PRIMARY_ENGINE || 'rtmpose').toLowerCase()
     if (!backend) {
-      // No explicit backend: cloud runs only while RTMPose is the configured primary.
-      const primary = (process.env.NEXT_PUBLIC_POSE_PRIMARY_ENGINE || 'rtmpose').toLowerCase()
-      if (primary !== 'rtmpose') return null
+      // No explicit backend: cloud runs only while a cloud engine is primary.
+      if (primary !== 'rtmpose' && primary !== 'sam2') return null
     }
     return {
       mode: parseChoice(
         params.get('poseCloudMode') || params.get('poseMode') || window.localStorage.getItem('musashiPoseCloudMode'),
-        ['rtmpose', 'mediapipe'] as const,
-        'rtmpose'
+        CLOUD_POSE_MODES,
+        primary === 'sam2' ? 'sam2' : 'rtmpose'
       ),
       target: parseChoice(
         params.get('poseCloudTarget') || params.get('poseTarget') || window.localStorage.getItem('musashiPoseCloudTarget'),
@@ -174,7 +178,7 @@ function expectedSamplesFor(track: DenseTrackSample[], durationMs: number): numb
  */
 export async function fetchCloudDenseTrack(opts: {
   videoUrl: string
-  mode?: 'rtmpose' | 'mediapipe'
+  mode?: CloudPoseMode
   target?: 'auto' | 'gpu' | 'cpu'
   fps?: number
   filename?: string
@@ -231,7 +235,7 @@ export async function fetchCloudDenseTrack(opts: {
         : undefined
     return {
       track,
-      backend: json.upstream?.backend ?? 'rtmpose',
+      backend: json.upstream?.backend ?? opts.mode ?? 'rtmpose',
       target: json.target ?? 'auto',
       meta: json.upstream?.meta,
       quality,

@@ -13,6 +13,7 @@ type JsonBody = {
   configured?: {
     gpu: boolean
     cpu: boolean
+    sam: boolean
     token: boolean
   }
 }
@@ -217,5 +218,75 @@ describe('/api/fight/cloud-pose', () => {
     expect(body.target).toBe('cpu')
     expect(body.fallbackFrom).toMatchObject({ target: 'gpu', status: 503 })
     expect(body.upstream).toEqual({ backend: 'rtmpose', frames: [] })
+  })
+
+  it('routes mode=sam2 to the SAM endpoint, not the RTMPose GPU one', async () => {
+    vi.stubEnv('MUSASHI_POSE_CLOUD_TOKEN', 'test-token')
+    vi.stubEnv('MUSASHI_POSE_CLOUD_GPU_URL', 'https://gpu.example')
+    vi.stubEnv('MUSASHI_POSE_CLOUD_CPU_URL', 'https://cpu.example')
+    vi.stubEnv('MUSASHI_POSE_CLOUD_SAM_URL', 'https://sam.example')
+
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(_input)).toBe('https://sam.example')
+      expect((init?.headers as Record<string, string>).Authorization).toBe('Bearer test-token')
+      expect((init?.body as FormData).get('mode')).toBe('sam2')
+      return new Response(JSON.stringify({ backend: 'sam2', frames: [] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const response = await POST(multipartRequest(clipForm({ mode: 'sam2' })))
+    const body = (await response.json()) as JsonBody
+
+    expect(response.status).toBe(200)
+    expect(body.target).toBe('gpu')
+    expect(body.upstream).toEqual({ backend: 'sam2', frames: [] })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('never falls back to the CPU RTMPose backend for a failed SAM run', async () => {
+    vi.stubEnv('MUSASHI_POSE_CLOUD_TOKEN', 'test-token')
+    vi.stubEnv('MUSASHI_POSE_CLOUD_CPU_URL', 'https://cpu.example')
+    vi.stubEnv('MUSASHI_POSE_CLOUD_SAM_URL', 'https://sam.example')
+
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      new Response(JSON.stringify({ error: 'sam oom' }), {
+        status: 503,
+        headers: { 'content-type': 'application/json' },
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const response = await POST(multipartRequest(clipForm({ mode: 'sam2', target: 'auto' })))
+
+    expect(response.status).toBe(503)
+    // A silent CPU MediaPipe fallback would be a wrong-but-confident track.
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(String(fetchMock.mock.calls[0][0])).toBe('https://sam.example')
+  })
+
+  it('rejects mode=sam2 when the SAM endpoint is not configured', async () => {
+    vi.stubEnv('MUSASHI_POSE_CLOUD_TOKEN', 'test-token')
+    vi.stubEnv('MUSASHI_POSE_CLOUD_GPU_URL', 'https://gpu.example')
+    vi.stubEnv('MUSASHI_POSE_CLOUD_SAM_URL', '')
+
+    const response = await POST(multipartRequest(clipForm({ mode: 'sam2' })))
+    const body = (await response.json()) as JsonBody
+
+    expect(response.status).toBe(500)
+    expect(body.error).toContain('SAM')
+  })
+
+  it('rejects an unknown mode', async () => {
+    vi.stubEnv('MUSASHI_POSE_CLOUD_TOKEN', 'test-token')
+    vi.stubEnv('MUSASHI_POSE_CLOUD_GPU_URL', 'https://gpu.example')
+
+    const response = await POST(multipartRequest(clipForm({ mode: 'sam3' })))
+    const body = (await response.json()) as JsonBody
+
+    expect(response.status).toBe(400)
+    expect(body.error).toContain('sam2')
   })
 })
