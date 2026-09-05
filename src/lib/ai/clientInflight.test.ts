@@ -29,6 +29,30 @@ describe('dedupeInflight', () => {
     expect(factory2).toHaveBeenCalledTimes(1)
   })
 
+  it('gives each concurrent caller an independently readable Response body', async () => {
+    __resetInflightForTests()
+
+    let resolveInner: ((v: Response) => void) | null = null
+    const factory = vi.fn(
+      () =>
+        new Promise<Response>((res) => {
+          resolveInner = res
+        })
+    )
+
+    const p1 = dedupeInflight('resp', factory)
+    const p2 = dedupeInflight('resp', factory)
+    expect(factory).toHaveBeenCalledTimes(1)
+
+    resolveInner!(new Response(JSON.stringify({ ok: true }), { status: 200 }))
+
+    const [r1, r2] = await Promise.all([p1, p2])
+    // Both callers must be able to read the body without
+    // "body stream already read".
+    await expect(r1.json()).resolves.toEqual({ ok: true })
+    await expect(r2.json()).resolves.toEqual({ ok: true })
+  })
+
   it('removes the in-flight entry even when the factory rejects', async () => {
     __resetInflightForTests()
 

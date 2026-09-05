@@ -32,6 +32,22 @@ const sweepStale = (now: number): void => {
 }
 
 /**
+ * A `Response` body is a one-shot stream: whoever calls `.json()`/`.text()`
+ * first drains it, and every later reader throws
+ * `TypeError: Failed to execute 'text' on 'Response': body stream already read`.
+ * Because we share one settled value across all callers of a key, hand each
+ * caller an independent `clone()` so concurrent consumers can each read the
+ * body. The shared original is never read, so repeated clones stay valid.
+ * Non-`Response` values are returned unchanged.
+ */
+const perCallerValue = <T>(value: T): T => {
+  if (typeof Response !== 'undefined' && value instanceof Response) {
+    return value.clone() as unknown as T
+  }
+  return value
+}
+
+/**
  * If a promise for `key` is already running, await it. Otherwise call
  * `factory()` once and share its promise with any other callers that arrive
  * before it settles.
@@ -47,7 +63,7 @@ export const dedupeInflight = async <T>(key: string, factory: () => Promise<T>):
 
   const existing = inflightMap.get(key) as InflightEntry<T> | undefined
   if (existing) {
-    return existing.promise
+    return perCallerValue(await existing.promise)
   }
 
   const promise = (async () => {
@@ -59,7 +75,7 @@ export const dedupeInflight = async <T>(key: string, factory: () => Promise<T>):
   })()
 
   inflightMap.set(key, { promise, startedAt: now })
-  return promise
+  return perCallerValue(await promise)
 }
 
 /**
