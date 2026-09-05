@@ -2,13 +2,13 @@
  * POST /api/social/analyst/connect/refresh — refresh Stripe Connect payout readiness.
  */
 import { NextResponse } from 'next/server'
-import { enforceUsage } from '@/lib/musashiUsage'
+import { requireUser } from '@/lib/musashiAuth'
 import { getDb } from '@/lib/marketplace/types'
 import { refreshConnectPayoutStatus } from '@/lib/marketplace/connect'
 
 export async function POST(req: Request) {
   try {
-    const user = await enforceUsage(req, 'chat')
+    const user = await requireUser(req)
     const result = await refreshConnectPayoutStatus(getDb(), user.id)
     return NextResponse.json({
       stripePayoutsEnabled: result.stripePayoutsEnabled,

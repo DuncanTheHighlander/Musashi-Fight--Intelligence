@@ -75,13 +75,13 @@ export function middleware(request: NextRequest) {
   if (!isPublicPath(pathname)) {
     const sessionCookie = request.cookies.get('musashi_session')
     if (!sessionCookie?.value) {
-      // API routes return 401, page routes redirect to login
+      // API routes return 401, page routes redirect to auth front door
       if (pathname.startsWith('/api/')) {
         return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
       }
-      const loginUrl = new URL('/login', request.url)
-      loginUrl.searchParams.set('redirect', pathname)
-      return NextResponse.redirect(loginUrl)
+      const welcomeUrl = new URL('/welcome', request.url)
+      welcomeUrl.searchParams.set('redirect', pathname)
+      return NextResponse.redirect(welcomeUrl)
     }
   }
 
@@ -90,7 +90,13 @@ export function middleware(request: NextRequest) {
 
 export const config = {
   matcher: [
-    // Match all routes except static files
-    '/((?!_next/static|_next/image|favicon.ico).*)',
+    // Match all routes except static files and large binary upload paths.
+    // Next 15.5 clones request bodies for middleware (default 10MB) and truncates
+    // the rest → FormData boundary errors / Gemini upload 413. These routes
+    // enforce auth inside the handler; exclude them from the body clone.
+    //   - api/uploads/.../content — mock/R2 PUT of clip bytes
+    //   - api/fight — Gemini tape upload (multipart) + fight actions
+    //   - api/fight/cloud-pose — video proxy to Modal
+    '/((?!_next/static|_next/image|favicon.ico|api/uploads/[^/]+/content$|api/fight$|api/fight/cloud-pose$).*)',
   ],
 }

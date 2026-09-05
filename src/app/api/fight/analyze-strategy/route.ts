@@ -12,6 +12,7 @@ import { generateJson } from '@/lib/gemini/gemini-client'
 import { resolvedModels } from '@/lib/gemini/models'
 import { aiGuard, aiErrorResponse } from '@/lib/ai/aiGuard'
 import { maybeEnforceVideoFromAnalyzeRequest } from '@/lib/musashiUsage'
+import { buildCoachBrainBlock } from '@/lib/coachBrain/coachBrain'
 
 interface PoseTimelineEntry {
   tMs: number
@@ -33,6 +34,9 @@ interface StrategyAnalysisRequest {
   frames?: string[]                   // Base64 frames (fallback)
   videoFileUri?: string               // Gemini Files API URI (preferred)
   focusTarget: 'A' | 'B' | 'both'
+  discipline?: string
+  sport?: string
+  clipType?: string
   analysis?: any                      // Current frame analysis
   kinematics?: any                    // Current kinematics snapshot
   patterns?: string                   // Pattern analysis formatted for AI
@@ -207,6 +211,12 @@ export async function POST(request: Request) {
     }
     
     const model = resolvedModels.strategy()
+    const sport = data.sport || data.discipline
+    const coachBrainBlock = buildCoachBrainBlock({
+      selectedSport: sport,
+      clipType: data.clipType,
+      fighterFocus: data.focusTarget,
+    })
 
     // Build multimodal payload
     const parts: Array<Record<string, unknown>> = []
@@ -214,6 +224,7 @@ export async function POST(request: Request) {
       parts.push({ fileData: { fileUri: data.videoFileUri, mimeType: 'video/mp4' } })
     }
     parts.push({ text: STRATEGY_ANALYSIS_PROMPT })
+    parts.push({ text: coachBrainBlock })
     
     // Add keyframe images
     if (data.keyframes && data.keyframes.length > 0) {

@@ -3,6 +3,18 @@ name = "app"
 main = "src/cloudflare-worker.ts"
 compatibility_date = "2024-09-23"
 compatibility_flags = ["nodejs_compat"]
+find_additional_modules = true
+preserve_file_names = true
+
+[[rules]]
+type = "ESModule"
+globs = [".open-next/**/*.js", ".open-next/**/*.mjs"]
+fallthrough = true
+
+[[rules]]
+type = "Text"
+globs = [".open-next/**/*.sql", ".open-next/**/*.html"]
+fallthrough = true
 
 [triggers]
 crons = ["*/5 * * * *"]
@@ -11,6 +23,9 @@ crons = ["*/5 * * * *"]
 directory = ".open-next/assets"
 binding = "ASSETS"
 
+[alias]
+sqlite = "./src/lib/workerEmptyModule.ts"
+
 [[services]]
 binding = "WORKER_SELF_REFERENCE"
 service = "app"
@@ -18,8 +33,16 @@ service = "app"
 [[d1_databases]]
 binding = "DB"
 database_name = "musashi-db"
-database_id = "eda3460e-70ab-4eef-b273-0efc52007c82"
+database_id = "c567e219-abc3-4ebb-868a-6c3b4cc4e5ae"
 migrations_dir = "migrations"
+
+[[r2_buckets]]
+binding = "MUSASHI_BUCKET"
+bucket_name = "musashi"
+
+[[r2_buckets]]
+binding = "MUSASHI_UPLOADS_BUCKET"
+bucket_name = "musashi-uploads"
 
 [[vectorize]]
 binding = "VECTORIZE"
@@ -27,23 +50,6 @@ index_name = "musashi-knowledge"
 
 [ai]
 binding = "AI"
-
-[secrets]
-required = [
-  "MUSASHI_SESSION_SECRET",
-  "MUSASHI_SHOGUN_EMAIL",
-  "MUSASHI_SHOGUN_PASSWORD",
-  "MUSASHI_CRON_SECRET",
-  "MUSASHI_APP_URL",
-  "STRIPE_WEBHOOK_SECRET",
-  "STORAGE_SERVICE_URL",
-  "STORAGE_ACCESS_KEY",
-  "STORAGE_SECRET_KEY",
-  "STORAGE_BUCKET_NAME",
-  "MUSASHI_POSE_CLOUD_GPU_URL",
-  "MUSASHI_POSE_CLOUD_CPU_URL",
-  "MUSASHI_POSE_CLOUD_TOKEN",
-]
 
 # Cloudflare Secrets Store — store_id identifies the account store (not a credential).
 # Workers read values via binding names + async env.BINDING.get().
@@ -77,11 +83,33 @@ binding = "SECRET_SUPABASE"
 store_id = "3a6ee7307f0b482ab4b3f3dd6794168c"
 secret_name = "Supabase"
 
+[[secrets_store_secrets]]
+binding = "SECRET_EMAIL"
+store_id = "3a6ee7307f0b482ab4b3f3dd6794168c"
+secret_name = "ResendEmail"
+
 # Production vars (per-Worker secrets via `wrangler secret put` — see docs/MARKETPLACE_LAUNCH.md)
 # Set STRIPE_* and STORAGE_* secrets before deploy; mock modes are for local dev only.
 [vars]
 MUSASHI_MARKETPLACE_PAYMENTS = "stripe"
 MUSASHI_STORAGE_MODE = "r2"
+GEMINI_EMBED_DIMENSION = "1536"
+MUSASHI_VIDEO_NORMALIZER_URL = "https://duncanazsmith--musashi-pose-api-normalize-video.modal.run"
+# Cloud pose backends (cloud/modal_app.py). Without these the Worker has no cloud
+# pose config and every upload silently falls back to the on-device MediaPipe pass.
+MUSASHI_POSE_CLOUD_GPU_URL = "https://duncanazsmith--musashi-pose-api-analyze-pose.modal.run"
+MUSASHI_POSE_CLOUD_CPU_URL = "https://duncanazsmith--musashi-pose-api-cpu-analyze-pose.modal.run"
+MUSASHI_POSE_CLOUD_SAM_URL = "https://duncanazsmith--musashi-pose-api-analyze-pose-sam.modal.run"
+NEXT_PUBLIC_POSE_PRIMARY_ENGINE = "rtmpose"
+# Bearer token for all three: Secrets Store binding SECRET_POSE_CLOUD (store name
+# PoseCloudToken), or legacy `wrangler secret put MUSASHI_POSE_CLOUD_TOKEN`.
+# Must equal POSE_API_TOKEN in the Modal environment.
 NODE_ENV = "production"
+# Email verification is required for AI coaching when NODE_ENV=production (see assertEmailVerified).
+# Set MUSASHI_REQUIRE_EMAIL_VERIFIED=0 only as an emergency override (not recommended).
+# Resend API key: Secrets Store binding SECRET_EMAIL (store name ResendEmail), or legacy
+# `wrangler secret put EMAIL_API_KEY`. EMAIL_FROM_ADDRESS domain must be verified in Resend.
+EMAIL_SERVICE_URL = "https://api.resend.com"
+EMAIL_FROM_ADDRESS = "noreply@musashi.ai"
 # Set your live URL after first deploy (Workers subdomain or custom domain):
 # MUSASHI_APP_URL = "https://app.yourdomain.com"

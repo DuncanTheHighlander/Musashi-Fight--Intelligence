@@ -6,7 +6,6 @@
  */
 import { NextResponse } from 'next/server'
 import { requireUser } from '@/lib/musashiAuth'
-import { enforceUsage } from '@/lib/musashiUsage'
 import { getDb } from '@/lib/marketplace/types'
 import type { MarketplaceDisputeRow } from '@/lib/marketplace/types'
 
@@ -21,7 +20,7 @@ const VALID_STATUSES = [
 
 export async function GET(req: Request) {
   try {
-    const user = await enforceUsage(req, 'chat')
+    const user = await requireUser(req)
     const { searchParams } = new URL(req.url)
     const status = searchParams.get('status')
     const mine = searchParams.get('mine') === '1'

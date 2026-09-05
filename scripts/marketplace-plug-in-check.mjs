@@ -37,6 +37,7 @@ const isPlaceholder = (v) =>
 const has = (key) => !isPlaceholder(process.env[key]?.trim())
 
 const paymentMode = String(process.env.MUSASHI_MARKETPLACE_PAYMENTS || 'mock').toLowerCase()
+const emailVerificationRequired = process.env.MUSASHI_REQUIRE_EMAIL_VERIFIED !== '0'
 const storageMode =
   String(process.env.MUSASHI_STORAGE_MODE || '').toLowerCase() ||
   (has('STORAGE_SERVICE_URL') &&
@@ -56,6 +57,9 @@ const groups = [
       { key: 'MUSASHI_SHOGUN_PASSWORD', label: 'Admin password (or hash)' },
       { key: 'MUSASHI_CRON_SECRET', label: 'Cron secret' },
       { key: 'MUSASHI_APP_URL', label: 'Public app URL (Connect return links)' },
+      ...(emailVerificationRequired
+        ? [{ key: 'EMAIL_API_KEY', label: 'Email (required for verify/reset)' }]
+        : []),
     ],
   },
   {
@@ -91,7 +95,9 @@ const groups = [
   {
     title: 'Optional later',
     items: [
-      { key: 'EMAIL_API_KEY', label: 'Email (verify/reset)', optional: true },
+      ...(!emailVerificationRequired
+        ? [{ key: 'EMAIL_API_KEY', label: 'Email (verify/reset)', optional: true }]
+        : []),
       { key: 'MUSASHI_STRIPE_PRICE_ID_PRO', label: 'Pro subscription price', optional: true },
       { key: 'FAL_KEY', label: 'fal.ai segmentation', optional: true },
     ],
@@ -121,6 +127,16 @@ for (const group of groups) {
 if (process.env.MUSASHI_DISABLE_AUTH === '1') {
   blockers.push('MUSASHI_DISABLE_AUTH must be off in production')
   console.log('  ✗ MUSASHI_DISABLE_AUTH=1 — remove before launch\n')
+}
+
+if (strict && paymentMode !== 'stripe') {
+  blockers.push('MUSASHI_MARKETPLACE_PAYMENTS must be stripe')
+  console.log('  âœ— Strict launch requires MUSASHI_MARKETPLACE_PAYMENTS=stripe\n')
+}
+
+if (strict && storageMode !== 'r2') {
+  blockers.push('MUSASHI_STORAGE_MODE must be r2')
+  console.log('  âœ— Strict launch requires MUSASHI_STORAGE_MODE=r2\n')
 }
 
 const shogunPw = process.env.MUSASHI_SHOGUN_PASSWORD || ''

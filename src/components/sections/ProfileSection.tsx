@@ -1,24 +1,241 @@
 'use client'
 
-import React, { useEffect } from 'react'
+import React, { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import { useAuth } from '@/hooks/useAuth'
-import { User, Mail, Shield, Calendar, Activity } from 'lucide-react'
+import { useToast } from '@/hooks/use-toast'
+import { User, Mail, Shield, Calendar, Activity, Loader2, TriangleAlert, LogOut } from 'lucide-react'
 import { useSection } from '@/contexts/SectionContext'
 import { SectionShell } from '@/components/ui/section-header'
+import { parseApiResponse } from '@/lib/safeJson'
+import { sendVerificationEmail } from '@/lib/auth'
+import Link from 'next/link'
+
+type ProfileActivity = {
+  videosAnalyzed: number
+  aiQuestions: number
+  techniquesTracked: number
+  trainingSessions: number
+}
+
+/** In-app account deletion — required by Apple 5.1.1(v) and Google Play for
+ *  apps with account creation. Two-step: reveal, then password + confirm. */
+function DangerZoneCard({ isAdmin }: { isAdmin: boolean }) {
+  const [open, setOpen] = useState(false)
+  const [password, setPassword] = useState('')
+  const [deleting, setDeleting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const onDelete = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setError(null)
+    setDeleting(true)
+    try {
+      const res = await fetch('/api/auth/account', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password }),
+      })
+      const data = (await res.json().catch(() => ({}))) as { error?: string }
+      if (!res.ok) throw new Error(data?.error || 'Unable to delete account')
+      // Session is revoked server-side; full reload clears all client state.
+      window.location.href = '/'
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to delete account')
+      setDeleting(false)
+    }
+  }
+
+  return (
+    <Card className="mt-5 border-destructive/30">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-lg text-destructive">
+          <TriangleAlert className="h-5 w-5" />
+          Danger Zone
+        </CardTitle>
+        <CardDescription>
+          Permanently delete your account, videos, analyses, and personal data. This cannot be undone.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        {isAdmin ? (
+          <p className="text-sm text-muted-foreground">Admin accounts cannot be deleted from the app.</p>
+        ) : !open ? (
+          <Button variant="outline" className="h-10 border-destructive/40 text-destructive hover:bg-destructive/10 hover:text-destructive" onClick={() => setOpen(true)}>
+            Delete account…
+          </Button>
+        ) : (
+          <form className="max-w-sm space-y-3" onSubmit={onDelete}>
+            <div className="space-y-2">
+              <Label htmlFor="delete-password">Confirm your password to delete your account</Label>
+              <Input
+                id="delete-password"
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                autoComplete="current-password"
+                className="h-10"
+                required
+              />
+            </div>
+            {error && (
+              <div role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+                {error}
+              </div>
+            )}
+            <div className="flex gap-2">
+              <Button type="submit" variant="destructive" className="h-10" disabled={deleting || !password}>
+                {deleting && <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" />}
+                {deleting ? 'Deleting…' : 'Permanently delete'}
+              </Button>
+              <Button type="button" variant="ghost" className="h-10" disabled={deleting} onClick={() => { setOpen(false); setPassword(''); setError(null) }}>
+                Cancel
+              </Button>
+            </div>
+          </form>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+/** Prompt unverified users to confirm email (required for AI coaching in production). */
+function EmailVerificationCard({
+  email,
+  verified,
+  required,
+  onVerifiedRefresh,
+}: {
+  email: string
+  verified: boolean
+  required: boolean
+  onVerifiedRefresh: () => Promise<void>
+}) {
+  const { toast } = useToast()
+  const [sending, setSending] = useState(false)
+
+  if (verified) {
+    return (
+      <Card className="border-border/50">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-lg">
+            <Mail className="h-5 w-5 text-primary" />
+            Email
+          </CardTitle>
+          <CardDescription>
+            <span className="text-emerald-600 dark:text-emerald-400">Verified</span> — {email}
+          </CardDescription>
+        </CardHeader>
+      </Card>
+    )
+  }
+
+  const onResend = async () => {
+    setSending(true)
+    try {
+      const result = await sendVerificationEmail()
+      if (result.alreadyVerified) {
+        await onVerifiedRefresh()
+        toast({ title: 'Email already verified' })
+        return
+      }
+      toast({
+        title: 'Verification email sent',
+        description: result.dryRun
+          ? 'Email provider is in dry-run mode (dev). Check server logs for the link.'
+          : `Check ${email} for a Musashi verification link.`,
+      })
+    } catch (err) {
+      toast({
+        title: 'Could not send email',
+        description: err instanceof Error ? err.message : 'Try again later',
+        variant: 'destructive',
+      })
+    } finally {
+      setSending(false)
+    }
+  }
+
+  return (
+    <Card className="border-amber-500/30 bg-amber-500/5">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-lg">
+          <Mail className="h-5 w-5 text-amber-600" />
+          Verify your email
+        </CardTitle>
+        <CardDescription>
+          {required ? (
+            <>Confirm <strong>{email}</strong> to unlock AI coaching analysis. Marketplace browsing still works.</>
+          ) : (
+            <>Confirm <strong>{email}</strong> to protect account recovery. AI coaching remains available while verification is not enforced.</>
+          )}
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <Button type="button" onClick={() => void onResend()} disabled={sending} className="h-10">
+          {sending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+          {sending ? 'Sending…' : 'Resend verification email'}
+        </Button>
+      </CardContent>
+    </Card>
+  )
+}
 
 export default function ProfileSection() {
   const router = useRouter()
-  const { user, loading } = useAuth()
+  const { user, loading, checkSession, logout } = useAuth()
   const { setActiveSection } = useSection()
+  const [activity, setActivity] = useState<ProfileActivity | null>(null)
+  const [activityError, setActivityError] = useState(false)
+  const [loggingOut, setLoggingOut] = useState(false)
+
+  const onLogout = async () => {
+    if (loggingOut) return
+    setLoggingOut(true)
+    try {
+      await logout()
+      router.push('/welcome')
+    } catch {
+      setLoggingOut(false)
+    }
+  }
 
   useEffect(() => {
-    if (!loading && !user) router.push('/login')
+    if (!loading && !user) router.push('/welcome')
   }, [loading, router, user])
+
+  useEffect(() => {
+    if (!user?.id) {
+      setActivity(null)
+      setActivityError(false)
+      return
+    }
+
+    let cancelled = false
+    setActivityError(false)
+    ;(async () => {
+      try {
+        const res = await fetch('/api/profile/activity', {
+          credentials: 'include',
+          cache: 'no-store',
+        })
+        const data = await parseApiResponse<ProfileActivity>(res)
+        if (!cancelled) setActivity(data)
+      } catch {
+        if (!cancelled) setActivityError(true)
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [user?.id])
 
   if (loading) {
     return (
@@ -111,10 +328,10 @@ export default function ProfileSection() {
           </CardHeader>
           <CardContent className="space-y-1">
             {[
-              { label: 'Videos Analyzed', value: 0 },
-              { label: 'AI Conversations', value: 0 },
-              { label: 'Techniques Saved', value: 0 },
-              { label: 'Training Sessions', value: 0 },
+              { label: 'Videos Analyzed', value: activity ? String(activity.videosAnalyzed) : 0 },
+              { label: 'AI Questions', value: activity ? String(activity.aiQuestions) : 0 },
+              { label: 'Techniques Tracked', value: activity ? String(activity.techniquesTracked) : 0 },
+              { label: 'Training Sessions', value: activity ? String(activity.trainingSessions) : 0 },
             ].map((row, i, arr) => (
               <div
                 key={row.label}
@@ -127,7 +344,9 @@ export default function ProfileSection() {
               </div>
             ))}
             <p className="pt-3 text-xs text-muted-foreground/80">
-              Activity totals update after your first analysis, conversation, or saved technique.
+              {activityError
+                ? 'Activity totals are temporarily unavailable. Refresh to try again.'
+                : 'Lifetime totals update after completed coaching and training activity.'}
             </p>
           </CardContent>
         </Card>
@@ -139,19 +358,42 @@ export default function ProfileSection() {
           <CardDescription>Manage your account and preferences</CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
             <Button variant="outline" className="justify-start h-10" onClick={() => setActiveSection('coach')}>
               Start Analysis
             </Button>
             <Button variant="outline" className="justify-start h-10" onClick={() => setActiveSection('library')}>
               View Library
             </Button>
-            <Button variant="outline" className="justify-start h-10" disabled>
-              Account Settings (Coming Soon)
+            <Button variant="outline" className="justify-start h-10" asChild>
+              <Link href="/pricing">Billing &amp; plans</Link>
+            </Button>
+            <Button
+              variant="outline"
+              className="justify-start h-10"
+              disabled={loggingOut}
+              onClick={() => void onLogout()}
+            >
+              {loggingOut ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" />
+              ) : (
+                <LogOut className="mr-2 h-4 w-4" aria-hidden="true" />
+              )}
+              {loggingOut ? 'Logging out…' : 'Log out'}
             </Button>
           </div>
         </CardContent>
       </Card>
+
+      {user.role !== 'shogun' && (
+        <EmailVerificationCard
+          email={user.email}
+          verified={Boolean(user.emailVerifiedAt)}
+          required={Boolean(user.emailVerificationRequired)}
+          onVerifiedRefresh={checkSession}
+        />
+      )}
+      <DangerZoneCard isAdmin={user.role === 'shogun'} />
     </SectionShell>
   )
 }

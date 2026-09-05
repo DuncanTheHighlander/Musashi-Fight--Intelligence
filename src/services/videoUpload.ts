@@ -5,6 +5,7 @@
 
 import { logger } from '@/lib/logger'
 import { safeParseResponse } from '@/lib/safeJson'
+import { getServerSecret } from '@/lib/cloudflare/secrets'
 
 interface GeminiFile {
   name: string // Format: files/{fileId}
@@ -43,7 +44,7 @@ export async function uploadVideoToGemini(
     pollIntervalMs = 2000
   } = options
 
-  const geminiKey = process.env.GEMINI_API_KEY
+  const geminiKey = await getServerSecret('GEMINI_API_KEY')
   if (!geminiKey) {
     throw new Error('GEMINI_API_KEY not configured')
   }
@@ -220,7 +221,7 @@ async function checkFileStatus(fileName: string, apiKey: string): Promise<Gemini
  * Call this after analysis to clean up
  */
 export async function deleteGeminiFile(fileName: string): Promise<void> {
-  const geminiKey = process.env.GEMINI_API_KEY
+  const geminiKey = await getServerSecret('GEMINI_API_KEY')
   if (!geminiKey) {
     throw new Error('GEMINI_API_KEY not configured')
   }
@@ -242,7 +243,7 @@ export async function deleteGeminiFile(fileName: string): Promise<void> {
  * List all uploaded files
  */
 export async function listGeminiFiles(): Promise<GeminiFile[]> {
-  const geminiKey = process.env.GEMINI_API_KEY
+  const geminiKey = await getServerSecret('GEMINI_API_KEY')
   if (!geminiKey) {
     throw new Error('GEMINI_API_KEY not configured')
   }

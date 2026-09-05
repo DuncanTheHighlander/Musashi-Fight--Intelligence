@@ -20,7 +20,7 @@
  * is already stored so the UI can show the right status.
  */
 import { NextResponse } from 'next/server'
-import { enforceUsage } from '@/lib/musashiUsage'
+import { requireUser } from '@/lib/musashiAuth'
 import { getDb } from '@/lib/marketplace/types'
 import { ensureAnalystProfile } from '@/lib/marketplace/jobs'
 import { canEnableDirectHire, maxCapacity as tierMaxCapacity } from '@/lib/marketplace/beltTier'
@@ -29,7 +29,7 @@ import { resolveMarketplacePaymentMode } from '@/lib/marketplace/payments'
 
 export async function GET(req: Request) {
   try {
-    const user = await enforceUsage(req, 'chat')
+    const user = await requireUser(req)
     const db = getDb()
     const profile = await ensureAnalystProfile(db, user.id)
 
@@ -80,7 +80,7 @@ export async function GET(req: Request) {
 
 export async function PATCH(req: Request) {
   try {
-    const user = await enforceUsage(req, 'chat')
+    const user = await requireUser(req)
     const body = (await req.json()) as Record<string, unknown>
 
     const db = getDb()

@@ -13,6 +13,8 @@ export type SecretsStoreBinding =
   | 'SECRET_REVCAT2'
   | 'SECRET_STRIPE'
   | 'SECRET_SUPABASE'
+  | 'SECRET_EMAIL'
+  | 'SECRET_POSE_CLOUD'
 
 /** Env var name → Secrets Store binding (for migrating existing server code). */
 export const ENV_KEY_TO_BINDING: Partial<Record<string, SecretsStoreBinding>> = {
@@ -22,6 +24,8 @@ export const ENV_KEY_TO_BINDING: Partial<Record<string, SecretsStoreBinding>> = 
   REVENUECAT_API_KEY_SECONDARY: 'SECRET_REVCAT2',
   STRIPE_SECRET_KEY: 'SECRET_STRIPE',
   SUPABASE_SERVICE_ROLE_KEY: 'SECRET_SUPABASE',
+  EMAIL_API_KEY: 'SECRET_EMAIL',
+  MUSASHI_POSE_CLOUD_TOKEN: 'SECRET_POSE_CLOUD',
 }
 
 /** Secrets Store binding → env var name used by existing server code / .dev.vars */
@@ -32,6 +36,8 @@ export const SECRET_ENV_ALIASES: Record<SecretsStoreBinding, string> = {
   SECRET_REVCAT2: 'REVENUECAT_API_KEY_SECONDARY',
   SECRET_STRIPE: 'STRIPE_SECRET_KEY',
   SECRET_SUPABASE: 'SUPABASE_SERVICE_ROLE_KEY',
+  SECRET_EMAIL: 'EMAIL_API_KEY',
+  SECRET_POSE_CLOUD: 'MUSASHI_POSE_CLOUD_TOKEN',
 }
 
 function readLocalFallback(binding: SecretsStoreBinding): string | undefined {
@@ -90,7 +96,12 @@ export async function getSecretsStoreValue(
 ): Promise<string | undefined> {
   try {
     const { env } = await getCloudflareContext({ async: true })
-    const storeBinding = env[binding] as SecretsStoreSecret | undefined
+    // Not every binding exists in every deploy — a Worker deployed before a
+    // given Secrets Store entry was created simply falls through to the local
+    // env below, which is exactly the intended behaviour.
+    const storeBinding = (env as unknown as Record<string, unknown>)[binding] as
+      | SecretsStoreSecret
+      | undefined
     if (storeBinding?.get) {
       const value = (await storeBinding.get()).trim()
       return value || undefined

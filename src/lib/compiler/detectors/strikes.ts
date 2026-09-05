@@ -15,6 +15,25 @@ import type {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/** Hip midpoint Z displacement in shoulder-width units (requires 3D-lifted landmarks). */
+export function hipZDisplacementBw(
+  current: ReadonlyArray<PoseLandmark>,
+  prev: ReadonlyArray<PoseLandmark>
+): number | null {
+  const lh = current[POSE_LANDMARKS.LEFT_HIP]
+  const rh = current[POSE_LANDMARKS.RIGHT_HIP]
+  const plh = prev[POSE_LANDMARKS.LEFT_HIP]
+  const prh = prev[POSE_LANDMARKS.RIGHT_HIP]
+  if (!lh || !rh || !plh || !prh) return null
+  if (typeof lh.z !== 'number' || typeof rh.z !== 'number') return null
+  if (typeof plh.z !== 'number' || typeof prh.z !== 'number') return null
+  const sw = shoulderWidth(current)
+  if (!sw || sw <= 1e-6) return null
+  const midZ = (lh.z + rh.z) / 2
+  const prevMidZ = (plh.z + prh.z) / 2
+  return Math.abs(midZ - prevMidZ) / sw
+}
+
 function lm2(landmarks: ReadonlyArray<PoseLandmark> | undefined, idx: number): Vec2 | null {
   const lm = landmarks?.[idx]
   if (!lm) return null
@@ -292,6 +311,8 @@ export type StrikeDetectionInput = {
   /** Previous-frame landmarks for this actor (needed for direction analysis). */
   prevLandmarks?: ReadonlyArray<PoseLandmark>
   stanceSide?: StanceSide
+  /** Optional 3D hip Z displacement (shoulder-widths). Large values suggest weight shift, not arm extension. */
+  hipZDeltaBw?: number | null
 }
 
 /**
@@ -308,40 +329,45 @@ export function detectStrikes(input: StrikeDetectionInput): FightEvent[] {
 
   // Hand strikes
   if (handBurst != null && handBurst >= thresholdBwps) {
-    const classification = classifyHandStrike({
-      actorId,
-      landmarks: input.landmarks,
-      prevLandmarks: input.prevLandmarks,
-      stanceSide: input.stanceSide ?? 'unknown',
-    })
+    const suppressHandFromHipZ =
+      typeof input.hipZDeltaBw === 'number' && input.hipZDeltaBw > 0.35
 
-    const t: TimeRangeMs = makeTimeRangeMs(tMs)
-    const evidence: EvidenceRef[] = [
-      makeEvidenceRef({
-        id: makeId(`ev_strike_${classification.label}_${actorId}`),
-        source: 'kinematics',
+    if (!suppressHandFromHipZ) {
+      const classification = classifyHandStrike({
+        actorId,
+        landmarks: input.landmarks,
+        prevLandmarks: input.prevLandmarks,
+        stanceSide: input.stanceSide ?? 'unknown',
+      })
+
+      const t: TimeRangeMs = makeTimeRangeMs(tMs)
+      const evidence: EvidenceRef[] = [
+        makeEvidenceRef({
+          id: makeId(`ev_strike_${classification.label}_${actorId}`),
+          source: 'kinematics',
+          actorId,
+          t,
+          note: `${STRIKE_LABELS[classification.label]} detected: handBurstBwps=${handBurst.toFixed(2)} >= ${thresholdBwps.toFixed(2)}, limb=${classification.limb}.`,
+        }),
+      ]
+
+      events.push({
+        id: makeId(`evt_${classification.label}`),
+        kind: (classification.label === 'strike_placeholder' ? 'strike_placeholder' : classification.label) as FightEventKind,
         actorId,
         t,
-        note: `${STRIKE_LABELS[classification.label]} detected: handBurstBwps=${handBurst.toFixed(2)} >= ${thresholdBwps.toFixed(2)}, limb=${classification.limb}.`,
-      }),
-    ]
-
-    events.push({
-      id: makeId(`evt_${classification.label}`),
-      kind: (classification.label === 'strike_placeholder' ? 'strike_placeholder' : classification.label) as FightEventKind,
-      actorId,
-      t,
-      label: classification.label,
-      confidence: { score: classification.confidence, basis: 'heuristic' },
-      evidence,
-      data: {
-        handBurstBwps: handBurst,
-        thresholdBwps,
-        strikeType: classification.label,
-        limb: classification.limb,
-        displayLabel: STRIKE_LABELS[classification.label],
-      },
-    })
+        label: classification.label,
+        confidence: { score: classification.confidence, basis: 'heuristic' },
+        evidence,
+        data: {
+          handBurstBwps: handBurst,
+          thresholdBwps,
+          strikeType: classification.label,
+          limb: classification.limb,
+          displayLabel: STRIKE_LABELS[classification.label],
+        },
+      })
+    }
   }
 
   // Leg strikes (kicks / teeps)

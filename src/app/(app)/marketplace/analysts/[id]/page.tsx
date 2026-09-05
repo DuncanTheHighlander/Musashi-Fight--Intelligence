@@ -98,7 +98,7 @@ export default function AnalystProfilePage({ params }: { params: Promise<{ id: s
 
   async function directHire() {
     if (!user) {
-      router.push('/login')
+      router.push('/welcome')
       return
     }
     if (!analyst) return

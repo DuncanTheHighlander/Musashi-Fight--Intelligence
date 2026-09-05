@@ -41,6 +41,7 @@ import { JobStatusBadge, type JobStatus } from '@/components/marketplace/JobStat
 import { BeltBadge, type BeltTier } from '@/components/marketplace/BeltBadge'
 import { UploadDropzone } from '@/components/marketplace/UploadDropzone'
 import { CoachFeedbackVideo, isLikelyVideoRef } from '@/components/marketplace/CoachFeedbackVideo'
+import { ReportContentButton } from '@/components/social/ReportContentButton'
 import { displayAssetLabel, resolveAssetHref } from '@/lib/storage/assetRef'
 import { fundMarketplaceJob } from '@/lib/marketplace/fundClient'
 
@@ -338,7 +339,10 @@ export default function JobDetailPage({ params }: { params: Promise<{ id: string
         <CardHeader>
           <div className="flex items-start justify-between gap-3">
             <CardTitle className="text-2xl leading-tight">{job.title}</CardTitle>
-            <JobStatusBadge status={job.status} />
+            <div className="flex flex-col items-end gap-2">
+              <JobStatusBadge status={job.status} />
+              <ReportContentButton targetType="job" targetId={job.id} />
+            </div>
           </div>
           <div className="flex flex-wrap items-center gap-2 pt-2">
             <Badge variant="secondary">

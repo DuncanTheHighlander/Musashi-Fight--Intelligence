@@ -1,0 +1,123 @@
+name = "app"
+main = "src/cloudflare-worker.ts"
+compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat"]
+find_additional_modules = true
+preserve_file_names = true
+minify = true
+keep_names = false
+
+[[rules]]
+type = "ESModule"
+globs = [".open-next/**/*.js", ".open-next/**/*.mjs"]
+fallthrough = true
+
+[[rules]]
+type = "Text"
+globs = [".open-next/**/*.sql", ".open-next/**/*.html"]
+fallthrough = true
+
+[alias]
+sqlite = "./src/lib/workerEmptyModule.ts"
+
+[triggers]
+crons = ["*/5 * * * *"]
+
+[assets]
+directory = ".open-next/assets"
+binding = "ASSETS"
+
+[[services]]
+binding = "WORKER_SELF_REFERENCE"
+service = "app"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "musashi-db"
+database_id = "c567e219-abc3-4ebb-868a-6c3b4cc4e5ae"
+migrations_dir = "migrations"
+
+[[r2_buckets]]
+binding = "MUSASHI_BUCKET"
+bucket_name = "musashi"
+
+[[r2_buckets]]
+binding = "MUSASHI_UPLOADS_BUCKET"
+bucket_name = "musashi-uploads"
+
+[[vectorize]]
+binding = "VECTORIZE"
+index_name = "musashi-knowledge"
+
+[ai]
+binding = "AI"
+
+[[secrets_store_secrets]]
+binding = "SECRET_AI"
+store_id = "3a6ee7307f0b482ab4b3f3dd6794168c"
+secret_name = "Ai"
+
+[[secrets_store_secrets]]
+binding = "SECRET_MODAL"
+store_id = "3a6ee7307f0b482ab4b3f3dd6794168c"
+secret_name = "Modal"
+
+[[secrets_store_secrets]]
+binding = "SECRET_REVCAT1"
+store_id = "3a6ee7307f0b482ab4b3f3dd6794168c"
+secret_name = "revcat1"
+
+[[secrets_store_secrets]]
+binding = "SECRET_REVCAT2"
+store_id = "3a6ee7307f0b482ab4b3f3dd6794168c"
+secret_name = "revcat2"
+
+[[secrets_store_secrets]]
+binding = "SECRET_STRIPE"
+store_id = "3a6ee7307f0b482ab4b3f3dd6794168c"
+secret_name = "Stripe"
+
+[[secrets_store_secrets]]
+binding = "SECRET_SUPABASE"
+store_id = "3a6ee7307f0b482ab4b3f3dd6794168c"
+secret_name = "Supabase"
+
+[[secrets_store_secrets]]
+binding = "SECRET_EMAIL"
+store_id = "3a6ee7307f0b482ab4b3f3dd6794168c"
+secret_name = "ResendEmail"
+
+[vars]
+MUSASHI_MARKETPLACE_PAYMENTS = "stripe"
+MUSASHI_STORAGE_MODE = "r2"
+GEMINI_EMBED_DIMENSION = "1536"
+MUSASHI_VIDEO_NORMALIZER_URL = "https://duncanazsmith--musashi-pose-api-normalize-video.modal.run"
+# Cloud pose backends (cloud/modal_app.py). Without these the Worker has no cloud
+# pose config and every upload silently falls back to the on-device MediaPipe pass.
+MUSASHI_POSE_CLOUD_GPU_URL = "https://duncanazsmith--musashi-pose-api-analyze-pose.modal.run"
+MUSASHI_POSE_CLOUD_CPU_URL = "https://duncanazsmith--musashi-pose-api-cpu-analyze-pose.modal.run"
+MUSASHI_POSE_CLOUD_SAM_URL = "https://duncanazsmith--musashi-pose-api-analyze-pose-sam.modal.run"
+NEXT_PUBLIC_POSE_PRIMARY_ENGINE = "rtmpose"
+# Bearer token for all three: Secrets Store binding SECRET_POSE_CLOUD (store name
+# PoseCloudToken), or legacy `wrangler secret put MUSASHI_POSE_CLOUD_TOKEN`.
+# Must equal POSE_API_TOKEN in the Modal environment.
+# ── Vision-first pipeline ────────────────────────────────────────────────────
+# Server half of the flag. The client half (NEXT_PUBLIC_MUSASHI_VISION_FIRST_ENABLED)
+# is inlined by Next at BUILD time from .env.local and CANNOT be set here — a
+# NEXT_PUBLIC_* var in [vars] reaches the Worker runtime but never the browser
+# bundle. Both halves must agree: with only the client half set, the browser ran
+# vision-first while /api/fight/analyze ran the legacy pose path.
+# Rollback: delete this line and redeploy.
+MUSASHI_VISION_FIRST_ENABLED = "1"
+# Stable GA model (2026-07-21). Matches the code default in src/lib/gemini/models.ts;
+# pinned here so a future default change cannot silently move production.
+GEMINI_MODEL = "gemini-3.6-flash"
+# Gemini video sampling for the evidence pass. API range is 0 < fps <= 24.
+MUSASHI_GEMINI_VIDEO_FPS = "24"
+NODE_ENV = "production"
+MUSASHI_DISABLE_AUTH = "0"
+# AI coaching requires verified email in production (assertEmailVerified). Override: MUSASHI_REQUIRE_EMAIL_VERIFIED=0
+# Resend: Secrets Store SECRET_EMAIL (ResendEmail), or legacy Worker secret EMAIL_API_KEY.
+EMAIL_SERVICE_URL = "https://api.resend.com"
+# musashifight.ai verified in Resend (DKIM/SPF/MX added via Manus DNS 2026-07-17).
+EMAIL_FROM_ADDRESS = "noreply@musashifight.ai"

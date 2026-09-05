@@ -20,14 +20,23 @@ import type { NormalizedLandmark } from '@mediapipe/tasks-vision'
 import {
   advanceCrossingPhase,
   assignFighterTracks,
+  boxesInProximityLock,
+  boxesOverlap,
   clampVelocity,
   crossingHoldMs,
   crossingSmoothAlpha,
   dedupePoseCandidates,
   isCrossingPhase,
+  LOCK_RELEASE_FRAMES,
+  LOCK_SEPARATION_DIST,
+  poseVisBounds,
+  predictAnchor,
+  seedPairLockByTrajectory,
   updateIdentitySlotColor,
+  updateSlotKalman,
   type CrossingPhase,
   type IdentitySlot,
+  type PairLock,
   type PoseAnchor,
 } from '@/lib/identityTracking'
 import { blendColorProfile, colorProfileDist, type ColorProfile } from '@/lib/appearance'
@@ -52,6 +61,13 @@ export type ReplayInFrame = {
       upper?: unknown
       lower?: { r: number; g: number; b: number } | null
     } | null
+    /**
+     * Stable object id from a real tracker (cloud/sam_pipeline.py, SAM 2.1).
+     * When present on every candidate, identity is a FACT carried from the
+     * tracker's object memory rather than something this module has to infer
+     * from colour, scale and pose shape — see replayTrackedCandidates below.
+     */
+    trackId?: number
   }>
 }
 
@@ -61,9 +77,9 @@ const IDENTITY_POSE_WEIGHT = 0.18
 const IDENTITY_VELOCITY_ALPHA = 0.28
 const IDENTITY_COLOR_SMOOTHING = 0.15
 const IDENTITY_OCCLUSION_HOLD_MS = 1800
-const IDENTITY_PROFILE_COLOR_WEIGHT = 0.82
+const IDENTITY_PROFILE_COLOR_WEIGHT = 0.90
 const IDENTITY_PROFILE_SCALE_WEIGHT = 0.1
-const IDENTITY_PROFILE_CLEAR_MARGIN = 0.065
+const IDENTITY_PROFILE_CLEAR_MARGIN = 0.055
 
 const TRACKING_POINTS: Array<[number, number]> = [
   [11, 1.2], [12, 1.2], [23, 1.2], [24, 1.2],
@@ -151,6 +167,9 @@ class IdentityReplayer {
   private crossingPhase: CrossingPhase = 'tracking'
   private recoveryStable = 0
   private lockKey: FighterKey | null = null
+  private pairLock: PairLock | null = null
+  private lockReleaseFrames = 0
+  private identitySeeded = false
   private occlusionUntil = 0
   private lastSeen: Record<FighterKey, number | null> = { A: null, B: null }
   private lastRaw: Record<FighterKey, NormalizedLandmark[] | null> = { A: null, B: null }
@@ -220,6 +239,8 @@ class IdentityReplayer {
         learnAppearance || phase === 'tracking'
           ? updateIdentitySlotColor(prev, candidate, phase, IDENTITY_COLOR_SMOOTHING)
           : prev?.color ?? candidate.color
+      const prevWall = prev?.wallMs
+      const dtMs = prevWall != null ? Math.max(1, wallNow - prevWall) : 33
       this.slots[key] = {
         pose: candidate.pose,
         anchor: candidate.anchor,
@@ -229,22 +250,94 @@ class IdentityReplayer {
         velocity: vel,
         wallMs: wallNow,
         confidence: Math.min(1, (prev?.confidence ?? 0.6) + 0.08),
+        kalman: prev?.kalman,
       }
+      updateSlotKalman(this.slots[key]!, candidate.anchor, vel, dtMs)
       updateProfile(key, candidate, learnAppearance && phase === 'tracking')
     }
 
-    let { A: assignA, B: assignB } = assignFighterTracks(
-      candidates,
-      this.slots.A,
-      this.slots.B,
-      wallNow,
-      phaseIn,
-      (candidate, slot) => ({
-        poseShape: poseShapeDistance(candidate.pose, slot.pose),
-        scaleWeight: IDENTITY_SCALE_WEIGHT,
-        poseWeight: IDENTITY_POSE_WEIGHT,
-      })
-    )
+    let assignA: CornerCandidate | undefined
+    let assignB: CornerCandidate | undefined
+    let pairLocked = false
+
+    const distAnchors = (a: PoseAnchor, b: PoseAnchor) => Math.hypot(a.x - b.x, a.y - b.y)
+
+    if (candidates.length >= 2 && this.slots.A && this.slots.B) {
+      const ba = poseVisBounds(candidates[0]!.pose)
+      const bb = poseVisBounds(candidates[1]!.pose)
+      const inLockZone = ba && bb && boxesInProximityLock(ba, bb)
+      const centerDist = distAnchors(
+        predictAnchor(this.slots.A, wallNow),
+        predictAnchor(this.slots.B, wallNow)
+      )
+
+      if (inLockZone || (this.pairLock && centerDist < LOCK_SEPARATION_DIST)) {
+        this.occlusionUntil = wallNow + IDENTITY_OCCLUSION_HOLD_MS
+        const useAnchor = phaseIn === 'merged' || phaseIn === 'recovering'
+        if (!this.pairLock) {
+          this.pairLock = seedPairLockByTrajectory(
+            candidates[0]!,
+            candidates[1]!,
+            this.slots.A,
+            this.slots.B,
+            wallNow,
+            useAnchor
+          )
+          this.lockReleaseFrames = 0
+        }
+        if (inLockZone || centerDist < LOCK_SEPARATION_DIST) {
+          this.lockReleaseFrames = 0
+        }
+        const lock = this.pairLock
+        assignA = candidates[lock.aCandIdx]
+        assignB = candidates[lock.bCandIdx]
+        pairLocked = true
+        this.lockKey = null
+      } else if (this.pairLock) {
+        if (ba && bb && !boxesOverlap(ba, bb) && centerDist >= LOCK_SEPARATION_DIST) {
+          this.lockReleaseFrames += 1
+        } else {
+          this.lockReleaseFrames = 0
+        }
+        if (this.lockReleaseFrames < LOCK_RELEASE_FRAMES) {
+          const lock = this.pairLock
+          assignA = candidates[lock.aCandIdx]
+          assignB = candidates[lock.bCandIdx]
+          pairLocked = true
+          this.lockKey = null
+        } else {
+          this.pairLock = null
+          this.lockReleaseFrames = 0
+        }
+      }
+    }
+
+    if (!pairLocked) {
+      if (candidates.length >= 2 && !isCrossingPhase(phaseIn) && !this.pairLock) {
+        this.pairLock = null
+        this.lockReleaseFrames = 0
+      }
+      const tracked = assignFighterTracks(
+        candidates,
+        this.slots.A,
+        this.slots.B,
+        wallNow,
+        phaseIn,
+        (candidate, slot) => ({
+          poseShape: poseShapeDistance(candidate.pose, slot.pose),
+          scaleWeight: IDENTITY_SCALE_WEIGHT,
+          poseWeight: IDENTITY_POSE_WEIGHT,
+        }),
+        {
+          allowSpatialSeed: !this.identitySeeded,
+          blockSwap: Boolean(this.pairLock) ||
+            (isCrossingPhase(phaseIn) && phaseIn !== 'recovering'),
+        }
+      )
+      assignA = tracked.A
+      assignB = tracked.B
+      if (assignA && assignB) this.identitySeeded = true
+    }
 
     if (candidates.length === 1 && this.slots.A && this.slots.B && isCrossingPhase(phaseIn)) {
       this.occlusionUntil = wallNow + IDENTITY_OCCLUSION_HOLD_MS
@@ -265,7 +358,7 @@ class IdentityReplayer {
       this.lockKey = lk
       assignA = lk === 'A' ? candidates[0] : undefined
       assignB = lk === 'B' ? candidates[0] : undefined
-    } else if (candidates.length >= 2) {
+    } else if (candidates.length >= 2 && !pairLocked) {
       this.lockKey = null
     }
 
@@ -278,7 +371,11 @@ class IdentityReplayer {
     )
     this.crossingPhase = phaseResult.phase
     this.recoveryStable = phaseResult.stableFrames
-    if (phaseResult.phase === 'tracking') this.lockKey = null
+    if (phaseResult.phase === 'tracking') {
+      this.lockKey = null
+      this.pairLock = null
+      this.lockReleaseFrames = 0
+    }
 
     return { A: assignA?.pose ?? null, B: assignB?.pose ?? null }
   }
@@ -376,6 +473,98 @@ class IdentityReplayer {
 }
 
 /**
+ * True when every candidate in every frame carries a tracker object id, i.e.
+ * the upstream actually tracked objects instead of emitting loose detections.
+ * Anything less and we must not trust partial ids, so the heuristic replayer
+ * stays in charge.
+ */
+export function hasTrackIds(frames: ReplayInFrame[]): boolean {
+  let seen = false
+  for (const frame of frames) {
+    for (const candidate of frame.candidates) {
+      if (typeof candidate.trackId !== 'number') return false
+      seen = true
+    }
+  }
+  return seen
+}
+
+/**
+ * Deterministic replay for tracker-supplied identity (SAM 2.1).
+ *
+ * The heuristic replayer exists to answer "which of these poses is the same
+ * person as last frame?" — a question a tracker with object memory has already
+ * answered. So this path does none of it: no colour profiles, no Kalman
+ * prediction, no crossing phases, no claim gates, no occlusion holds.
+ *
+ * Two deliberate choices:
+ *
+ *  - A is the LEFT track, B the RIGHT (by mean torso x over the clip). That
+ *    matches the vision-first convention documented in the pipeline audit,
+ *    where "A = LEFT of screen"; the tracker no longer invents a third naming
+ *    system alongside blue/red and left/right.
+ *  - A frame where a track has no candidate emits null, with NO hold or coast.
+ *    An empty SAM mask means that fighter genuinely is not visible, and holds
+ *    are exactly what produced the frozen ghost skeletons in the 2026-06-10
+ *    baseline. The overlay's own stale-fade handles the gap honestly.
+ */
+export function replayTrackedCandidates(
+  frames: ReplayInFrame[],
+  opts?: { round?: boolean }
+): DenseTrackSample[] {
+  const sorted = [...frames].sort((a, b) => a.f - b.f)
+
+  // Rank tracks by how much of the clip they appear in; ties break on id so the
+  // result never depends on Map iteration order.
+  const presence = new Map<number, number>()
+  const sumX = new Map<number, number>()
+  for (const frame of sorted) {
+    for (const candidate of frame.candidates) {
+      const id = candidate.trackId as number
+      presence.set(id, (presence.get(id) ?? 0) + 1)
+      const anchor = candidate.anchor ?? getPoseAnchor(candidate.pose)
+      if (anchor) sumX.set(id, (sumX.get(id) ?? 0) + anchor.x)
+    }
+  }
+  const ranked = [...presence.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0] - b[0])
+    .slice(0, 2)
+    .map(([id]) => id)
+
+  const meanX = (id: number) => (sumX.get(id) ?? 0) / Math.max(1, presence.get(id) ?? 1)
+  const ordered = ranked.length === 2 && meanX(ranked[1]) < meanX(ranked[0])
+    ? [ranked[1], ranked[0]]
+    : ranked
+  const slotOf = new Map<number, FighterKey>()
+  if (ordered[0] !== undefined) slotOf.set(ordered[0], 'A')
+  if (ordered[1] !== undefined) slotOf.set(ordered[1], 'B')
+
+  // Temporal smoothing still earns its keep — SAM fixes WHO, not RTMPose's
+  // frame-to-frame keypoint jitter. Each slot smooths against its own history.
+  const alpha = crossingSmoothAlpha('tracking')
+  const previous: Record<FighterKey, NormalizedLandmark[] | null> = { A: null, B: null }
+  const out: DenseTrackSample[] = []
+
+  for (const frame of sorted) {
+    const raw: Record<FighterKey, NormalizedLandmark[] | null> = { A: null, B: null }
+    for (const candidate of frame.candidates) {
+      const slot = slotOf.get(candidate.trackId as number)
+      if (slot) raw[slot] = candidate.pose
+    }
+    const smoothedA = raw.A ? smoothLandmarks(raw.A, previous.A, alpha) : null
+    const smoothedB = raw.B ? smoothLandmarks(raw.B, previous.B, alpha) : null
+    previous.A = raw.A ?? null
+    previous.B = raw.B ?? null
+    out.push({
+      tMs: opts?.round === false ? frame.tMs : Math.round(frame.tMs),
+      A: smoothedA,
+      B: smoothedB,
+    })
+  }
+  return out
+}
+
+/**
  * Replay an ordered list of candidate frames into a dense A/B track.
  * `round` matches the in-browser dense pass which stores Math.round(tMs).
  */
@@ -383,6 +572,7 @@ export function replayCandidatesToDenseTrack(
   frames: ReplayInFrame[],
   opts?: { round?: boolean }
 ): DenseTrackSample[] {
+  if (hasTrackIds(frames)) return replayTrackedCandidates(frames, opts)
   const sorted = [...frames].sort((a, b) => a.f - b.f)
   const replayer = new IdentityReplayer()
   const out: DenseTrackSample[] = []

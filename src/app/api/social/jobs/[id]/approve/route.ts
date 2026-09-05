@@ -32,7 +32,7 @@ export async function POST(req: Request, context: { params: Promise<Params> }) {
           analystPayoutCents: job.analyst_payout_cents,
           paymentWarning: e instanceof Error ? e.message : 'Payout provider failed',
         },
-        { status: 200 },
+        { status: 502 },
       )
     }
     return NextResponse.json({

@@ -1,8 +1,11 @@
 import { safeParseResponse } from '@/lib/safeJson'
+import { getServerSecret } from '@/lib/cloudflare/secrets'
 
 import { GEMINI_EMBED_MODEL_DEFAULT } from '@/lib/gemini/models'
 
 export type GeminiEmbedModel = 'gemini-embedding-2-preview' | (string & {})
+
+export const GEMINI_EMBED_DIMENSION_DEFAULT = 1536
 
 export type EmbedOptions = {
   apiKey?: string
@@ -28,8 +31,17 @@ type EmbedResponse = {
 const defaultModel = (): GeminiEmbedModel =>
   (process.env.GEMINI_EMBED_MODEL as GeminiEmbedModel | undefined) || GEMINI_EMBED_MODEL_DEFAULT
 
-const getKey = (explicit?: string): string => {
-  const key = explicit || process.env.GEMINI_API_KEY
+export const defaultOutputDimensionality = (): number => {
+  const raw = process.env.GEMINI_EMBED_DIMENSION
+  if (!raw) return GEMINI_EMBED_DIMENSION_DEFAULT
+
+  const parsed = Number(raw)
+  if (!Number.isInteger(parsed) || parsed <= 0) return GEMINI_EMBED_DIMENSION_DEFAULT
+  return parsed
+}
+
+const getKey = async (explicit?: string): Promise<string> => {
+  const key = explicit || await getServerSecret('GEMINI_API_KEY')
   if (!key) throw new Error('GEMINI_API_KEY not configured')
   return key
 }
@@ -60,7 +72,7 @@ export async function embedText(
   input: string | string[],
   options?: EmbedOptions
 ): Promise<number[] | number[][]> {
-  const apiKey = getKey(options?.apiKey)
+  const apiKey = await getKey(options?.apiKey)
   const model = options?.model || defaultModel()
 
   const inputs = toInputs(input)
@@ -68,7 +80,7 @@ export async function embedText(
 
   const taskType = options?.taskType || 'RETRIEVAL_QUERY'
   const outputDimensionality =
-    typeof options?.outputDimensionality === 'number' ? options.outputDimensionality : undefined
+    typeof options?.outputDimensionality === 'number' ? options.outputDimensionality : defaultOutputDimensionality()
 
   if (inputs.length === 1) {
     const singleUrl = buildUrl(model, apiKey, false)
@@ -115,13 +127,13 @@ export async function embedVideo(
   input: EmbedVideoInput,
   options?: EmbedOptions
 ): Promise<number[]> {
-  const apiKey = getKey(options?.apiKey)
+  const apiKey = await getKey(options?.apiKey)
   const model = options?.model || defaultModel()
   const url = buildUrl(model, apiKey)
 
   const taskType = options?.taskType || 'RETRIEVAL_DOCUMENT'
   const outputDimensionality =
-    typeof options?.outputDimensionality === 'number' ? options.outputDimensionality : undefined
+    typeof options?.outputDimensionality === 'number' ? options.outputDimensionality : defaultOutputDimensionality()
 
   const resp = await fetch(url, {
     method: 'POST',
@@ -143,13 +155,13 @@ export async function embedVideoWithCaption(
   video: EmbedVideoInput,
   options?: EmbedOptions
 ): Promise<number[]> {
-  const apiKey = getKey(options?.apiKey)
+  const apiKey = await getKey(options?.apiKey)
   const model = options?.model || defaultModel()
   const url = buildUrl(model, apiKey)
 
   const taskType = options?.taskType || 'RETRIEVAL_DOCUMENT'
   const outputDimensionality =
-    typeof options?.outputDimensionality === 'number' ? options.outputDimensionality : undefined
+    typeof options?.outputDimensionality === 'number' ? options.outputDimensionality : defaultOutputDimensionality()
 
   const resp = await fetch(url, {
     method: 'POST',

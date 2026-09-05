@@ -50,6 +50,10 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Title and content are required' }, { status: 400 })
     }
     
+    // Only admins can publish straight to the AI knowledge base. Everyone
+    // else's submissions wait in the moderation queue until a shogun approves.
+    const reviewState = user.role === 'shogun' ? 'approved' : 'pending'
+
     const doc = await createDocument({
       title,
       content,
@@ -57,9 +61,20 @@ export async function POST(req: Request) {
       author: author || user.email,
       tags: tags || [],
       metadata: metadata || {},
+      reviewState,
     })
-    
-    return NextResponse.json({ document: doc }, { status: 201 })
+
+    return NextResponse.json(
+      {
+        document: doc,
+        pendingReview: reviewState === 'pending',
+        message:
+          reviewState === 'pending'
+            ? 'Submitted for review. It will feed AI coaching once an admin approves it.'
+            : 'Document published to the knowledge base.',
+      },
+      { status: 201 },
+    )
     
   } catch (e) {
     const code = e instanceof Error ? e.message : 'UNKNOWN'

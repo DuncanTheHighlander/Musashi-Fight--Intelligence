@@ -59,7 +59,7 @@ describe('GET /api/uploads/[id]', () => {
       sizeBytes: 512,
       origin: 'http://localhost:3000',
     })
-    writeMockObject(ticket.asset.object_key, Buffer.from('bytes'))
+    writeMockObject(ticket.asset.object_key, Buffer.alloc(512, 1))
     await completeUpload(db, { assetId: ticket.asset.id, userId: owner.id })
 
     const res = await authedGet(ticket.asset.id, viewer.id)
@@ -84,7 +84,7 @@ describe('GET /api/uploads/[id]', () => {
       sizeBytes: 128,
       origin: 'http://localhost:3000',
     })
-    writeMockObject(ticket.asset.object_key, Buffer.from('pdf'))
+    writeMockObject(ticket.asset.object_key, Buffer.alloc(128, 1))
     await completeUpload(db, { assetId: ticket.asset.id, userId: owner.id })
 
     const res = await authedGet(ticket.asset.id, owner.id)

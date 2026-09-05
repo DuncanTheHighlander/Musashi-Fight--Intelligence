@@ -6,7 +6,7 @@ import { getCurrentUser } from '@/lib/musashiAuth'
 import { getDb } from '@/lib/db'
 
 export async function GET(req: Request) {
-  if (process.env.MUSASHI_DISABLE_AUTH === '1') {
+  if (process.env.MUSASHI_DISABLE_AUTH === '1' && process.env.NODE_ENV !== 'production') {
     return NextResponse.json({ complete: true, reason: 'dev_bypass' })
   }
 
@@ -14,6 +14,18 @@ export async function GET(req: Request) {
     const user = await getCurrentUser(req)
     if (!user) {
       return NextResponse.json({ complete: false, reason: 'unauthenticated' }, { status: 401 })
+    }
+
+    // Admins skip fighter/coach onboarding and go straight to the admin panel.
+    if (user.role === 'shogun') {
+      return NextResponse.json({
+        complete: true,
+        hasFighterProfile: true,
+        hasCoachProfile: true,
+        needsProfileNudge: false,
+        redirectTo: '/shogun',
+        reason: 'shogun',
+      })
     }
 
     const db = getDb()

@@ -385,3 +385,65 @@ export class MotionScoreCalculator {
 
 // Singleton instance for easy use
 export const motionScoreCalculator = new MotionScoreCalculator()
+
+export const PEAK_MOTION_THRESHOLDS = {
+  MIN_BURST_SCORE: 3.0,
+  MIN_BURST_SCORE_GRAPPLING: 2.0,
+  R_FAR: 4.0,
+} as const
+
+function peakMotionScore(
+  snap: import('@/lib/kinematics').KinematicsSnapshot,
+  grappling: boolean,
+): number {
+  const a = snap.fighters.A
+  const b = snap.fighters.B
+  const maxHand = Math.max(a?.handBurstBwps ?? 0, b?.handBurstBwps ?? 0)
+  const maxHip = Math.max(a?.hipSpeedBwps ?? 0, b?.hipSpeedBwps ?? 0)
+  const closing = Math.abs(snap.range?.closingBwps ?? 0)
+  if (grappling) {
+    return 0.2 * maxHand + 0.6 * maxHip + 0.2 * closing
+  }
+  return 0.5 * maxHand + 0.3 * maxHip + 0.2 * closing
+}
+
+/**
+ * Find the highest-intensity moment in a kinematics series (clip-wide peak finder).
+ */
+export function findPeakMotionMs(
+  kinematicsSeries: ReadonlyArray<import('@/lib/kinematics').KinematicsSnapshot>,
+  opts?: { focusActor?: 'A' | 'B' | 'both'; grappling?: boolean },
+): { tMs: number; score: number } | null {
+  if (kinematicsSeries.length === 0) return null
+
+  const grappling = opts?.grappling ?? false
+  let best: { tMs: number; score: number } | null = null
+
+  for (const snap of kinematicsSeries) {
+    const hasA = Boolean(snap.fighters.A)
+    const hasB = Boolean(snap.fighters.B)
+    if (!hasA && !hasB) continue
+
+    const focus = opts?.focusActor ?? 'both'
+    if (focus === 'A' && !hasA) continue
+    if (focus === 'B' && !hasB) continue
+
+    const distanceBw = snap.range?.distanceBw
+    const score = peakMotionScore(snap, grappling)
+
+    // Allow ground scrambles even when range reads FAR (hip-dominant grappling signal).
+    if (
+      distanceBw != null &&
+      distanceBw > PEAK_MOTION_THRESHOLDS.R_FAR &&
+      !(grappling && score >= PEAK_MOTION_THRESHOLDS.MIN_BURST_SCORE_GRAPPLING)
+    ) {
+      continue
+    }
+
+    if (!best || score > best.score) {
+      best = { tMs: snap.capturedAtMs, score }
+    }
+  }
+
+  return best
+}

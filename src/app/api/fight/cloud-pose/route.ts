@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { readSecretEnv } from '@/lib/env'
-import { aiGuard, aiErrorResponse } from '@/lib/ai/aiGuard'
+import { getServerSecret } from '@/lib/cloudflare/secrets'
+import { aiGuard, aiErrorResponse, isAuthDisabled } from '@/lib/ai/aiGuard'
 import { enforceCloudPoseRateLimit } from '@/lib/musashiUsage'
 
 export const maxDuration = 300
@@ -63,11 +64,13 @@ async function callUpstream(args: {
   video: File
   mode: string
   fps: FormDataEntryValue | null
+  lift3d?: FormDataEntryValue | null
 }): Promise<UpstreamAttempt> {
   const upstreamForm = new FormData()
   upstreamForm.set('mode', args.mode)
   upstreamForm.set('video', args.video, args.video.name)
   if (args.fps !== null) upstreamForm.set('fps', String(args.fps))
+  if (args.lift3d !== null && args.lift3d !== undefined) upstreamForm.set('lift3d', String(args.lift3d))
 
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS)
@@ -106,7 +109,8 @@ export async function GET(request: Request) {
     configured: {
       gpu: Boolean(readSecretEnv('MUSASHI_POSE_CLOUD_GPU_URL')),
       cpu: Boolean(readSecretEnv('MUSASHI_POSE_CLOUD_CPU_URL')),
-      token: Boolean(readSecretEnv('MUSASHI_POSE_CLOUD_TOKEN')),
+      sam: Boolean(readSecretEnv('MUSASHI_POSE_CLOUD_SAM_URL')),
+      token: Boolean(await getServerSecret('MUSASHI_POSE_CLOUD_TOKEN')),
       maxUploadBytes: MAX_UPLOAD_BYTES,
       upstreamTimeoutMs: UPSTREAM_TIMEOUT_MS,
     },
@@ -117,7 +121,7 @@ export async function POST(request: Request) {
   const guard = await aiGuard(request, 'track')
   if (!guard.ok) return guard.response
 
-  if (guard.user && process.env.MUSASHI_DISABLE_AUTH !== '1') {
+  if (guard.user && !isAuthDisabled()) {
     try {
       await enforceCloudPoseRateLimit(guard.user.id)
     } catch (err) {
@@ -135,13 +139,14 @@ export async function POST(request: Request) {
     return jsonError(413, 'Video upload is too large for cloud pose proxy.', { maxBytes: MAX_UPLOAD_BYTES })
   }
 
-  const token = readSecretEnv('MUSASHI_POSE_CLOUD_TOKEN')
+  const token = await getServerSecret('MUSASHI_POSE_CLOUD_TOKEN')
   if (!token) {
     return jsonError(500, 'MUSASHI_POSE_CLOUD_TOKEN is not configured.')
   }
 
   const cpuUrl = readSecretEnv('MUSASHI_POSE_CLOUD_CPU_URL')
   const gpuUrl = readSecretEnv('MUSASHI_POSE_CLOUD_GPU_URL')
+  const samUrl = readSecretEnv('MUSASHI_POSE_CLOUD_SAM_URL')
 
   const form = await request.formData()
   const video = form.get('video')
@@ -158,15 +163,32 @@ export async function POST(request: Request) {
   }
 
   const mode = String(form.get('mode') || 'rtmpose').toLowerCase()
-  if (mode !== 'rtmpose' && mode !== 'mediapipe') {
-    return jsonError(400, "mode must be 'rtmpose' or 'mediapipe'.")
+  if (mode !== 'rtmpose' && mode !== 'mediapipe' && mode !== 'sam2') {
+    return jsonError(400, "mode must be 'rtmpose', 'mediapipe', or 'sam2'.")
   }
 
-  const endpoints: Partial<Record<PoseTarget, string>> = { gpu: gpuUrl, cpu: cpuUrl }
+  // SAM 2.1 lives in its own Modal function (separate torch image) and is
+  // GPU-only — mask propagation on CPU is far slower than the proxy timeout.
+  // There is no CPU fallback for it, so a SAM request is a single GPU attempt.
+  if (mode === 'sam2') {
+    if (!samUrl) {
+      return jsonError(500, 'No SAM cloud pose backend URL is configured.', {
+        required: ['MUSASHI_POSE_CLOUD_SAM_URL'],
+      })
+    }
+    if (target === 'cpu') {
+      return jsonError(400, "mode 'sam2' requires target 'auto' or 'gpu'.")
+    }
+  }
+
+  const endpoints: Partial<Record<PoseTarget, string>> =
+    mode === 'sam2' ? { gpu: samUrl } : { gpu: gpuUrl, cpu: cpuUrl }
   const plan: PoseTarget[] =
-    target === 'auto'
-      ? [gpuUrl ? 'gpu' : null, cpuUrl ? 'cpu' : null].filter(Boolean) as PoseTarget[]
-      : [target]
+    mode === 'sam2'
+      ? ['gpu']
+      : target === 'auto'
+        ? [gpuUrl ? 'gpu' : null, cpuUrl ? 'cpu' : null].filter(Boolean) as PoseTarget[]
+        : [target]
   if (plan.length === 0) {
     return jsonError(500, 'No cloud pose backend URL is configured.', {
       required: ['MUSASHI_POSE_CLOUD_GPU_URL', 'MUSASHI_POSE_CLOUD_CPU_URL'],
@@ -174,6 +196,7 @@ export async function POST(request: Request) {
   }
 
   const fps = form.get('fps')
+  const lift3d = form.get('lift3d')
 
   const attempts: UpstreamAttempt[] = []
   for (const plannedTarget of plan) {
@@ -181,7 +204,7 @@ export async function POST(request: Request) {
     if (!endpoint) {
       return jsonError(500, `MUSASHI_POSE_CLOUD_${plannedTarget.toUpperCase()}_URL is not configured.`)
     }
-    const attempt = await callUpstream({ endpoint, target: plannedTarget, token, video, mode, fps })
+    const attempt = await callUpstream({ endpoint, target: plannedTarget, token, video, mode, fps, lift3d })
     attempts.push(attempt)
     if (attempt.ok) {
       return NextResponse.json({

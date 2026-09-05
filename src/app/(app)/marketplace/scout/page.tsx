@@ -82,7 +82,7 @@ export default function ScoutOpponentPage() {
         <Card>
           <CardContent className="py-10 text-center space-y-3">
             <h2 className="text-lg font-semibold">Log in to scout an opponent</h2>
-            <Button onClick={() => router.push('/login')}>Log In</Button>
+            <Button onClick={() => router.push('/welcome')}>Log In</Button>
           </CardContent>
         </Card>
       </div>
@@ -193,7 +193,7 @@ export default function ScoutOpponentPage() {
       <Card className="border-border/50 bg-card/60 backdrop-blur-sm">
         <CardContent className="pt-6">
           <form onSubmit={handleSubmit} className="space-y-5">
-            <div className="grid sm:grid-cols-2 gap-4">
+            <div className="grid gap-4">
               <div>
                 <label className="text-sm font-medium mb-1.5 block">Opponent name</label>
                 <Input
@@ -214,7 +214,7 @@ export default function ScoutOpponentPage() {
               </div>
             </div>
 
-            <div className="grid sm:grid-cols-3 gap-4">
+            <div className="grid gap-4">
               <div>
                 <label className="text-sm font-medium mb-1.5 block">Fight date</label>
                 <Input type="date" value={fightDate} onChange={(e) => setFightDate(e.target.value)} />
@@ -271,7 +271,7 @@ export default function ScoutOpponentPage() {
               />
             </div>
 
-            <div className="grid sm:grid-cols-2 gap-4">
+            <div className="grid gap-4">
               <div>
                 <label className="text-sm font-medium mb-1.5 block">Budget (USD)</label>
                 <Input type="number" min={1} step="0.01" value={budget} onChange={(e) => setBudget(e.target.value)} required />

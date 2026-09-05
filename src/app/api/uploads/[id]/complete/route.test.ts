@@ -30,7 +30,7 @@ describe('POST /api/uploads/[id]/complete', () => {
       sizeBytes: 256,
       origin: 'http://localhost:3000',
     })
-    writeMockObject(ticket.asset.object_key, Buffer.from('video-bytes'))
+    writeMockObject(ticket.asset.object_key, Buffer.alloc(256, 1))
 
     const res = await POST(
       new Request(`http://localhost/api/uploads/${ticket.asset.id}/complete`, {
@@ -44,7 +44,31 @@ describe('POST /api/uploads/[id]/complete', () => {
 
     expect(res.status).toBe(200)
     expect(body.asset.status).toBe('uploaded')
-    expect(body.asset.size_bytes).toBeGreaterThan(0)
+    expect(body.asset.size_bytes).toBe(256)
+  })
+
+  it('rejects completion when stored bytes do not match the ticket', async () => {
+    const ticket = await createUploadTicket(db, {
+      userId: 'dev',
+      purpose: 'analysis_clip',
+      originalName: 'clip.mp4',
+      contentType: 'video/mp4',
+      sizeBytes: 256,
+    })
+    writeMockObject(ticket.asset.object_key, Buffer.alloc(255))
+
+    const res = await POST(
+      new Request(`http://localhost/api/uploads/${ticket.asset.id}/complete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sizeBytes: 256 }),
+      }),
+      { params: Promise.resolve({ id: ticket.asset.id }) },
+    )
+    const body = (await res.json()) as { error?: string }
+
+    expect(res.status).toBe(400)
+    expect(body.error).toBe('UPLOAD_SIZE_MISMATCH')
   })
 
   it('returns 404 for unknown asset id', async () => {

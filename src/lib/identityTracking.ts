@@ -14,8 +14,14 @@ import {
   type ColorProfile,
   type NormalizedRgb,
 } from '@/lib/appearance'
+import {
+  createKalman2D,
+  predictKalman,
+  updateKalman,
+  type Kalman2D,
+} from '@/lib/kalman2d'
 
-export type { ColorProfile, NormalizedRgb }
+export type { ColorProfile, NormalizedRgb, Kalman2D }
 
 export type PoseAnchor = { x: number; y: number }
 
@@ -29,6 +35,8 @@ export type IdentitySlot = {
   scale: number
   velocity: { vx: number; vy: number }
   wallMs: number
+  /** Per-slot 2D Kalman for trajectory-primary identity. */
+  kalman?: Kalman2D
 }
 
 export type IdentityCandidate = {
@@ -36,6 +44,9 @@ export type IdentityCandidate = {
   anchor: PoseAnchor
   color: ColorProfile | null
   scale: number
+  /** Optional HSV Bhattacharyya distance to slot A/B (filled by FightAnalyzer). */
+  hsvDistToA?: number | null
+  hsvDistToB?: number | null
 }
 
 export const IDENTITY_STALE_MS = 2200
@@ -47,8 +58,9 @@ export const IDENTITY_STALE_MS = 2200
  * longer than ~2 s, which is exactly when that state matters most.
  */
 export const IDENTITY_STALE_CROSSING_MS = 5000
-export const COLOR_WEIGHT = 0.35
-export const COLOR_WEIGHT_OCCLUSION = 2.5
+export const COLOR_WEIGHT = 0.45
+export const COLOR_WEIGHT_OCCLUSION = 3.75
+export const COLOR_WEIGHT_RECOVERY = 4.5
 export const SLOTS_CLOSE_DIST = 0.08
 export const SLOT_FRESHNESS_GAP_MS = 250
 export const SWAP_HYSTERESIS = 0.04
@@ -77,7 +89,7 @@ export const CLAIM_JUMP_CAP = 0.22
  * duplicate blobs) would otherwise claim the empty slot unchecked and keep a
  * ghost skeleton alive indefinitely.
  */
-export const CROSSING_CLAIM_FREE_MS = 600
+export const CROSSING_CLAIM_FREE_MS = 300
 
 /**
  * Max color-profile distance for the teleport escape hatch in the claim gate:
@@ -143,16 +155,55 @@ function dist(a: PoseAnchor, b: PoseAnchor): number {
   return Math.hypot(a.x - b.x, a.y - b.y)
 }
 
+/** Ensure a slot has a Kalman filter seeded from its current anchor/velocity. */
+export function ensureSlotKalman(slot: IdentitySlot): Kalman2D {
+  if (slot.kalman) return slot.kalman
+  const k = createKalman2D(slot.anchor.x, slot.anchor.y, slot.velocity.vx, slot.velocity.vy)
+  slot.kalman = k
+  return k
+}
+
+/**
+ * Predict slot center at nowMs. Prefers Kalman when present; falls back to
+ * exponential-decay constant-velocity (legacy) for slots without a filter.
+ */
 export function predictAnchor(slot: IdentitySlot, nowMs: number): PoseAnchor {
   const dt = Math.min(Math.max(0, nowMs - slot.wallMs), PREDICTION_MAX_MS)
-  // Exponential-decay extrapolation: effective dt asymptotes to tau, so the
-  // predicted anchor keeps moving along the direction of travel during a long
-  // hide without ever drifting unboundedly far from the last observation.
+  if (slot.kalman) {
+    const predicted = predictKalman(slot.kalman, dt)
+    return { x: predicted.x, y: predicted.y }
+  }
+  // Legacy exponential-decay extrapolation (pre-Kalman slots / cold start).
   const effectiveDt = PREDICTION_TAU_MS * (1 - Math.exp(-dt / PREDICTION_TAU_MS))
   return {
     x: slot.anchor.x + slot.velocity.vx * effectiveDt,
     y: slot.anchor.y + slot.velocity.vy * effectiveDt,
   }
+}
+
+/** Trajectory-only cost: distance from candidate to Kalman-predicted center. */
+export function trajectoryCost(
+  candidate: IdentityCandidate,
+  slot: IdentitySlot,
+  nowMs: number
+): number {
+  return dist(candidate.anchor, predictAnchor(slot, nowMs))
+}
+
+/**
+ * Apply a measurement to the slot's Kalman after a successful assignment.
+ * Predicts forward by dtMs from the filter's last state, then updates with
+ * the observed anchor. Mutates slot.kalman. Pass dt = now - previous wallMs.
+ */
+export function updateSlotKalman(
+  slot: IdentitySlot,
+  anchor: PoseAnchor,
+  velocity: { vx: number; vy: number } | undefined,
+  dtMs: number
+): void {
+  const prev = ensureSlotKalman(slot)
+  const predicted = predictKalman(prev, Math.max(1, dtMs))
+  slot.kalman = updateKalman(predicted, anchor.x, anchor.y, velocity?.vx, velocity?.vy)
 }
 
 /** Mean joint-to-joint distance between two poses (normalized coords). */
@@ -189,7 +240,21 @@ function poseMeanVisibility(pose: NormalizedLandmark[]): number {
  * pose) onto the front fighter — the root of many post-cross identity swaps.
  * Of two near-identical poses we keep the one with higher mean visibility.
  */
-function poseVisBounds(pose: NormalizedLandmark[]): { l: number; t: number; r: number; b: number } | null {
+export type PoseBBox = { l: number; t: number; r: number; b: number }
+
+export const BOX_OVERLAP_MIN_CONTAINMENT = 0.15
+/** Enter proximity LOCK when either box containment exceeds this (IoU-like). */
+export const BOX_LOCK_MIN_CONTAINMENT = 0.4
+/** Release LOCK when predicted centers are at least this far apart (normalized). */
+export const LOCK_SEPARATION_DIST = 0.12
+/** Consecutive non-overlap frames required before releasing LOCK. */
+export const LOCK_RELEASE_FRAMES = 4
+/** Trajectory costs within this margin may consult appearance as a tie-break. */
+export const TRAJ_TIE_MARGIN = 0.02
+/** Appearance must beat the other pairing by this much to override a traj tie. */
+export const APPEARANCE_DECISIVE_MARGIN = 0.055
+
+export function poseVisBounds(pose: NormalizedLandmark[]): PoseBBox | null {
   let l = 1
   let t = 1
   let r = 0
@@ -207,10 +272,7 @@ function poseVisBounds(pose: NormalizedLandmark[]): { l: number; t: number; r: n
 }
 
 /** Intersection area over the SMALLER box's area (detect_v2.py's overlap()). */
-function boxContainment(
-  a: { l: number; t: number; r: number; b: number },
-  b: { l: number; t: number; r: number; b: number }
-): number {
+export function boxContainment(a: PoseBBox, b: PoseBBox): number {
   const ix = Math.max(0, Math.min(a.r, b.r) - Math.max(a.l, b.l))
   const iy = Math.max(0, Math.min(a.b, b.b) - Math.max(a.t, b.t))
   const inter = ix * iy
@@ -218,6 +280,14 @@ function boxContainment(
   const areaA = (a.r - a.l) * (a.b - a.t)
   const areaB = (b.r - b.l) * (b.b - b.t)
   return inter / Math.max(1e-6, Math.min(areaA, areaB))
+}
+
+export function boxesOverlap(
+  a: PoseBBox,
+  b: PoseBBox,
+  minContainment: number = BOX_OVERLAP_MIN_CONTAINMENT
+): boolean {
+  return boxContainment(a, b) > minContainment || boxContainment(b, a) > minContainment
 }
 
 // Containment dedupe: a DISTORTED re-detection of the same body can have a
@@ -277,6 +347,8 @@ export type MatchCostExtras = {
   poseShape?: number
   scaleWeight?: number
   poseWeight?: number
+  /** Bhattacharyya distance vs the target slot's HSV fingerprint (lower = better). */
+  hsvDist?: number | null
 }
 
 export function matchCost(
@@ -303,12 +375,99 @@ export function matchCost(
   const shapeCost = extras?.poseShape ?? 0
   const scaleW = extras?.scaleWeight ?? 0.16
   const poseW = extras?.poseWeight ?? 0.18
+  const hsvCost = typeof extras?.hsvDist === 'number' ? extras.hsvDist : colorCost
+  const blendedColor = colorCost * 0.4 + hsvCost * 0.6
   return (
     posCost +
-    colorWeight * colorCost +
+    colorWeight * blendedColor +
     Math.min(0.45, scaleCost) * scaleW +
     shapeCost * poseW
   )
+}
+
+export function appearanceOnlyCost(
+  candidate: IdentityCandidate,
+  slot: IdentitySlot,
+  useAnchor: boolean,
+  slotKey: 'A' | 'B'
+): number {
+  const ref = colorRef(slot, useAnchor)
+  let rgb = 0.35
+  if (candidate.color && ref) {
+    rgb = colorProfileDist(candidate.color, ref)
+  }
+  const hsv =
+    slotKey === 'A'
+      ? (typeof candidate.hsvDistToA === 'number' ? candidate.hsvDistToA : rgb)
+      : (typeof candidate.hsvDistToB === 'number' ? candidate.hsvDistToB : rgb)
+  return rgb * 0.4 + hsv * 0.6
+}
+
+export type PairLock = { aCandIdx: 0 | 1; bCandIdx: 0 | 1 }
+
+/** Appearance-only 2×2 pairing for overlap lock (ignores spatial position). */
+export function seedPairLockByAppearance(
+  c0: IdentityCandidate,
+  c1: IdentityCandidate,
+  slotA: IdentitySlot,
+  slotB: IdentitySlot,
+  useAnchor: boolean
+): PairLock {
+  const direct =
+    appearanceOnlyCost(c0, slotA, useAnchor, 'A') +
+    appearanceOnlyCost(c1, slotB, useAnchor, 'B')
+  const swap =
+    appearanceOnlyCost(c0, slotB, useAnchor, 'B') +
+    appearanceOnlyCost(c1, slotA, useAnchor, 'A')
+  return direct <= swap ? { aCandIdx: 0, bCandIdx: 1 } : { aCandIdx: 1, bCandIdx: 0 }
+}
+
+/**
+ * Trajectory-primary PairLock seed. Uses Kalman-predicted centers; falls back
+ * to appearance only when trajectory costs are within TRAJ_TIE_MARGIN.
+ */
+export function seedPairLockByTrajectory(
+  c0: IdentityCandidate,
+  c1: IdentityCandidate,
+  slotA: IdentitySlot,
+  slotB: IdentitySlot,
+  nowMs: number,
+  useAnchor: boolean
+): PairLock {
+  const direct =
+    trajectoryCost(c0, slotA, nowMs) + trajectoryCost(c1, slotB, nowMs)
+  const swap =
+    trajectoryCost(c0, slotB, nowMs) + trajectoryCost(c1, slotA, nowMs)
+  if (Math.abs(direct - swap) >= TRAJ_TIE_MARGIN) {
+    return direct <= swap ? { aCandIdx: 0, bCandIdx: 1 } : { aCandIdx: 1, bCandIdx: 0 }
+  }
+  // Trajectory tied — appearance tie-break (must be decisive).
+  const aDirect =
+    appearanceOnlyCost(c0, slotA, useAnchor, 'A') +
+    appearanceOnlyCost(c1, slotB, useAnchor, 'B')
+  const aSwap =
+    appearanceOnlyCost(c0, slotB, useAnchor, 'B') +
+    appearanceOnlyCost(c1, slotA, useAnchor, 'A')
+  if (Math.abs(aDirect - aSwap) > APPEARANCE_DECISIVE_MARGIN) {
+    return aDirect <= aSwap ? { aCandIdx: 0, bCandIdx: 1 } : { aCandIdx: 1, bCandIdx: 0 }
+  }
+  // Still tied — stick with trajectory preference (or identity order).
+  return direct <= swap ? { aCandIdx: 0, bCandIdx: 1 } : { aCandIdx: 1, bCandIdx: 0 }
+}
+
+/** True when either box containment exceeds the LOCK threshold. */
+export function boxesInProximityLock(a: PoseBBox, b: PoseBBox): boolean {
+  return (
+    boxContainment(a, b) > BOX_LOCK_MIN_CONTAINMENT ||
+    boxContainment(b, a) > BOX_LOCK_MIN_CONTAINMENT
+  )
+}
+
+export type AssignTrackOptions = {
+  /** When true, never swap A/B pairing in the 2-candidate bipartite step. */
+  blockSwap?: boolean
+  /** When false, cold-start left/right sort is disabled after first seed. */
+  allowSpatialSeed?: boolean
 }
 
 /**
@@ -335,7 +494,8 @@ export function assignFighterTracks(
   slotB: IdentitySlot | null,
   nowMs: number,
   phase: CrossingPhase,
-  costExtras?: (candidate: IdentityCandidate, slot: IdentitySlot) => MatchCostExtras
+  costExtras?: (candidate: IdentityCandidate, slot: IdentitySlot) => MatchCostExtras,
+  opts?: AssignTrackOptions
 ): { A?: IdentityCandidate; B?: IdentityCandidate } {
   if (candidates.length === 0) return {}
 
@@ -368,8 +528,11 @@ export function assignFighterTracks(
       const cB = deadSlotRebindCost(candidates[0], slotB, nowMs, useAnchor)
       return cA <= cB ? { A: candidates[0] } : { B: candidates[0] }
     }
-    const sorted = [...candidates].sort((p, q) => p.anchor.x - q.anchor.x)
-    return { A: sorted[0], B: sorted[1] }
+    if (opts?.allowSpatialSeed !== false) {
+      const sorted = [...candidates].sort((p, q) => p.anchor.x - q.anchor.x)
+      return { A: sorted[0], B: sorted[1] }
+    }
+    return { A: candidates[0], B: candidates[1] }
   }
 
   const slotsClose =
@@ -377,7 +540,12 @@ export function assignFighterTracks(
   const freshnessGap = slotA && slotB ? Math.abs(slotA.wallMs - slotB.wallMs) : 0
   const useOcclusionWeight =
     phase !== 'tracking' || slotsClose || freshnessGap > SLOT_FRESHNESS_GAP_MS
-  const w = useOcclusionWeight ? COLOR_WEIGHT_OCCLUSION : COLOR_WEIGHT
+  const w =
+    phase === 'recovering'
+      ? COLOR_WEIGHT_RECOVERY
+      : useOcclusionWeight
+        ? COLOR_WEIGHT_OCCLUSION
+        : COLOR_WEIGHT
 
   const extras = costExtras ?? (() => ({}))
 
@@ -469,30 +637,60 @@ export function assignFighterTracks(
 
   const c0 = candidates[0]
   const c1 = candidates[1]
+
+  // Trajectory-primary costs (Kalman-predicted centers).
+  const tStraight =
+    trajectoryCost(c0, slotA!, nowMs) + trajectoryCost(c1, slotB!, nowMs)
+  const tSwap =
+    trajectoryCost(c0, slotB!, nowMs) + trajectoryCost(c1, slotA!, nowMs)
+
+  // Full matchCost still used for teleport validation / non-crossing path.
   const cStraight =
     matchCost(c0, slotA!, nowMs, w, useAnchor, extras(c0, slotA!)) +
     matchCost(c1, slotB!, nowMs, w, useAnchor, extras(c1, slotB!))
   const cSwap =
     matchCost(c0, slotB!, nowMs, w, useAnchor, extras(c0, slotB!)) +
     matchCost(c1, slotA!, nowMs, w, useAnchor, extras(c1, slotA!))
-  // Separation-scaled hysteresis: swapping two tracks that are far apart in a
-  // single frame is physically implausible — both fighters would have had to
-  // teleport past each other. The further apart the tracks, the more evidence
-  // a swap needs. During crossings the anchors are close, so this reduces to
-  // the original SWAP_HYSTERESIS exactly when swaps are actually plausible.
+
   const separation = predictedSlotDistance(slotA!, slotB!, nowMs)
   const swapResistance =
     phase === 'tracking' ? Math.max(SWAP_HYSTERESIS, separation * 0.5) : SWAP_HYSTERESIS
+
   let pairing: { A: IdentityCandidate; B: IdentityCandidate }
-  if (cSwap + swapResistance < cStraight) {
-    pairing = { A: c1, B: c0 }
+
+  if (opts?.blockSwap) {
+    // LOCK / blockSwap: freeze pairing by trajectory (appearance only on tie).
+    const lock = seedPairLockByTrajectory(c0, c1, slotA!, slotB!, nowMs, useAnchor)
+    pairing = { A: candidates[lock.aCandIdx], B: candidates[lock.bCandIdx] }
+  } else if (isCrossingPhase(phase) && phase !== 'recovering') {
+    // Crossing (not recovering): trajectory primary; appearance only on tie.
+    if (Math.abs(tStraight - tSwap) >= TRAJ_TIE_MARGIN) {
+      pairing = tStraight <= tSwap ? { A: c0, B: c1 } : { A: c1, B: c0 }
+    } else {
+      const aDirect =
+        appearanceOnlyCost(c0, slotA!, useAnchor, 'A') +
+        appearanceOnlyCost(c1, slotB!, useAnchor, 'B')
+      const aSwap =
+        appearanceOnlyCost(c0, slotB!, useAnchor, 'B') +
+        appearanceOnlyCost(c1, slotA!, useAnchor, 'A')
+      if (Math.abs(aDirect - aSwap) > APPEARANCE_DECISIVE_MARGIN) {
+        pairing = aDirect <= aSwap ? { A: c0, B: c1 } : { A: c1, B: c0 }
+      } else {
+        pairing = tStraight <= tSwap ? { A: c0, B: c1 } : { A: c1, B: c0 }
+      }
+    }
+  } else if (cSwap + swapResistance < cStraight) {
+    // Normal tracking: full matchCost with separation-scaled hysteresis.
+    // If trajectory strongly disagrees with a marginal appearance swap, prefer traj.
+    if (Math.abs(tStraight - tSwap) >= TRAJ_TIE_MARGIN && tStraight < tSwap) {
+      pairing = { A: c0, B: c1 }
+    } else {
+      pairing = { A: c1, B: c0 }
+    }
   } else {
     pairing = { A: c0, B: c1 }
   }
-  // Per-pair teleport validation: keep the assignment for the side that is
-  // reachable, drop the side that isn't (phantom forced into the leftover
-  // slot by the 2×2). The dropped slot holds its prediction instead of being
-  // corrupted, so it can re-acquire its real fighter on a later frame.
+
   return {
     A: claimOk(pairing.A, slotA!) ? pairing.A : undefined,
     B: claimOk(pairing.B, slotB!) ? pairing.B : undefined,

@@ -1,0 +1,92 @@
+# Direct deploy config for the generated OpenNext Worker.
+# This bypasses the OpenNext deploy wrapper while preserving Cloudflare bindings.
+name = "app"
+main = "worker.js"
+compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat"]
+no_bundle = true
+find_additional_modules = true
+preserve_file_names = true
+
+[[rules]]
+type = "ESModule"
+globs = ["**/*.js", "**/*.mjs"]
+fallthrough = true
+
+[[rules]]
+type = "Text"
+globs = ["**/*.sql", "**/*.html"]
+fallthrough = true
+
+[triggers]
+crons = ["*/5 * * * *"]
+
+[assets]
+directory = "assets"
+binding = "ASSETS"
+
+[[services]]
+binding = "WORKER_SELF_REFERENCE"
+service = "app"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "musashi-db"
+database_id = "c567e219-abc3-4ebb-868a-6c3b4cc4e5ae"
+migrations_dir = "../migrations"
+
+[[r2_buckets]]
+binding = "MUSASHI_BUCKET"
+bucket_name = "musashi"
+
+[[r2_buckets]]
+binding = "MUSASHI_UPLOADS_BUCKET"
+bucket_name = "musashi-uploads"
+
+[[vectorize]]
+binding = "VECTORIZE"
+index_name = "musashi-knowledge"
+
+[ai]
+binding = "AI"
+
+[[secrets_store_secrets]]
+binding = "SECRET_AI"
+store_id = "3a6ee7307f0b482ab4b3f3dd6794168c"
+secret_name = "Ai"
+
+[[secrets_store_secrets]]
+binding = "SECRET_MODAL"
+store_id = "3a6ee7307f0b482ab4b3f3dd6794168c"
+secret_name = "Modal"
+
+[[secrets_store_secrets]]
+binding = "SECRET_REVCAT1"
+store_id = "3a6ee7307f0b482ab4b3f3dd6794168c"
+secret_name = "revcat1"
+
+[[secrets_store_secrets]]
+binding = "SECRET_REVCAT2"
+store_id = "3a6ee7307f0b482ab4b3f3dd6794168c"
+secret_name = "revcat2"
+
+[[secrets_store_secrets]]
+binding = "SECRET_STRIPE"
+store_id = "3a6ee7307f0b482ab4b3f3dd6794168c"
+secret_name = "Stripe"
+
+[[secrets_store_secrets]]
+binding = "SECRET_SUPABASE"
+store_id = "3a6ee7307f0b482ab4b3f3dd6794168c"
+secret_name = "Supabase"
+
+[vars]
+MUSASHI_MARKETPLACE_PAYMENTS = "stripe"
+MUSASHI_STORAGE_MODE = "r2"
+GEMINI_EMBED_DIMENSION = "1536"
+MUSASHI_VIDEO_NORMALIZER_URL = "https://duncanazsmith--musashi-pose-api-normalize-video.modal.run"
+NODE_ENV = "production"
+# AI coaching requires verified email in production (assertEmailVerified). Override: MUSASHI_REQUIRE_EMAIL_VERIFIED=0
+# Email provider (Resend). EMAIL_API_KEY is a Worker secret — `wrangler secret put EMAIL_API_KEY`.
+EMAIL_SERVICE_URL = "https://api.resend.com"
+EMAIL_FROM_ADDRESS = "noreply@musashi.ai"

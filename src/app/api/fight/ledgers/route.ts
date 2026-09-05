@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 import { getDbOrNull } from '@/lib/db'
 import { requireUser } from '@/lib/musashiAuth'
 import { getAnalysisLedger, listAnalysisLedgers } from '@/lib/ledgerStore'
+import { listCoachingFeedback } from '@/lib/coachingFeedbackStore'
 
 /**
  * GET /api/fight/ledgers          → list recent saved ledgers (summaries)
@@ -28,7 +29,10 @@ export async function GET(request: Request) {
       if (!result) {
         return NextResponse.json({ success: false, error: 'Ledger not found' }, { status: 404 })
       }
-      return NextResponse.json({ success: true, ...result })
+      // User thumbs up/down ratings for this analysis. Non-fatal: the table
+      // may be absent on older local DBs that haven't run migration 0014.
+      const userFeedback = await listCoachingFeedback(db, { ledgerId: id }).catch(() => [])
+      return NextResponse.json({ success: true, ...result, userFeedback })
     }
     const limit = Math.min(100, Math.max(1, Number(url.searchParams.get('limit') ?? 25) || 25))
     const ledgers = await listAnalysisLedgers(db, limit)

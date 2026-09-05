@@ -1,5 +1,6 @@
 import { safeParseResponse } from '@/lib/safeJson'
 import { resolvedModels } from '@/lib/gemini/models'
+import { getServerSecret } from '@/lib/cloudflare/secrets'
 import type { TechniqueEntry } from '@/lib/taxonomyService'
 
 export type ClipVideoSource =
@@ -66,7 +67,7 @@ export async function tagClipsForVideo(args: {
   source: ClipVideoSource
   vocabulary: TechniqueEntry[]
 }): Promise<TaggedSegment[]> {
-  const apiKey = process.env.GEMINI_API_KEY
+  const apiKey = await getServerSecret('GEMINI_API_KEY')
   if (!apiKey) throw new Error('GEMINI_API_KEY not configured')
   if (args.vocabulary.length === 0) return []
 

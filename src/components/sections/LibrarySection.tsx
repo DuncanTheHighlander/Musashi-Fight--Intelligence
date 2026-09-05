@@ -29,6 +29,7 @@ import { Badge } from '@/components/ui/badge'
 import { parseApiResponse } from '@/lib/safeJson'
 import { SectionHeader, SectionShell, EmptySectionState } from '@/components/ui/section-header'
 import { useAuth } from '@/hooks/useAuth'
+import { useToast } from '@/hooks/use-toast'
 
 type LibraryDocument = {
   id: string
@@ -52,6 +53,7 @@ type SearchResult = {
 
 export default function LibrarySection() {
   const { user } = useAuth()
+  const { toast } = useToast()
   const canDelete = user?.role === 'shogun'
   const [documents, setDocuments] = useState<LibraryDocument[]>([])
   const [loading, setLoading] = useState(true)
@@ -80,7 +82,7 @@ export default function LibrarySection() {
     try {
       const res = await fetch('/api/library')
       if (res.status === 401) {
-        window.location.href = '/login'
+        window.location.href = '/welcome'
         return
       }
       const data = await parseApiResponse(res) as Record<string, any>
@@ -152,11 +154,20 @@ export default function LibrarySection() {
       })
       
       if (res.ok) {
+        const data = await parseApiResponse<{ pendingReview?: boolean; message?: string }>(res)
         setNewDocTitle('')
         setNewDocContent('')
         setNewDocTags('')
         setShowAddDialog(false)
         loadDocuments()
+        toast({
+          title: data.pendingReview ? 'Submitted for review' : 'Document published',
+          description:
+            data.message ||
+            (data.pendingReview
+              ? 'It will feed AI coaching once an admin approves it.'
+              : 'Added to the knowledge base.'),
+        })
       }
     } catch (e) {
       console.error('Failed to add document:', e)

@@ -77,39 +77,55 @@ export async function appendTransaction(
   const status = input.status ?? 'pending_stripe'
   const metadata = JSON.stringify(input.metadata ?? {})
 
-  await db
-    .prepare(
-      `INSERT INTO marketplace_transactions (
+  try {
+    await db
+      .prepare(
+        `INSERT INTO marketplace_transactions (
         id, job_id, type, amount_cents, currency,
         stripe_payment_intent_id, stripe_charge_id, stripe_transfer_id, stripe_refund_id,
         status, idempotency_key, actor_user_id, metadata,
         created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .bind(
-      id,
-      input.jobId,
-      input.type,
-      Math.trunc(input.amountCents),
-      input.currency ?? 'USD',
-      input.stripePaymentIntentId ?? null,
-      input.stripeChargeId ?? null,
-      input.stripeTransferId ?? null,
-      input.stripeRefundId ?? null,
-      status,
-      input.idempotencyKey,
-      input.actorUserId ?? null,
-      metadata,
-      now,
-      now,
-    )
-    .run()
+      )
+      .bind(
+        id,
+        input.jobId,
+        input.type,
+        Math.trunc(input.amountCents),
+        input.currency ?? 'USD',
+        input.stripePaymentIntentId ?? null,
+        input.stripeChargeId ?? null,
+        input.stripeTransferId ?? null,
+        input.stripeRefundId ?? null,
+        status,
+        input.idempotencyKey,
+        input.actorUserId ?? null,
+        metadata,
+        now,
+        now,
+      )
+      .run()
+  } catch {
+    const raced = await db
+      .prepare('SELECT * FROM marketplace_transactions WHERE idempotency_key = ?')
+      .bind(input.idempotencyKey)
+      .first<MarketplaceTransactionRow>()
+    if (raced) return raced
+    throw new Error('Transaction insert failed on idempotency race')
+  }
 
   const row = await db
     .prepare('SELECT * FROM marketplace_transactions WHERE id = ?')
     .bind(id)
     .first<MarketplaceTransactionRow>()
-  if (!row) throw new Error('Transaction insert succeeded but row not found')
+  if (!row) {
+    const raced = await db
+      .prepare('SELECT * FROM marketplace_transactions WHERE idempotency_key = ?')
+      .bind(input.idempotencyKey)
+      .first<MarketplaceTransactionRow>()
+    if (raced) return raced
+    throw new Error('Transaction insert succeeded but row not found')
+  }
   return row
 }
 

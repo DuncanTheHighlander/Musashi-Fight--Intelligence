@@ -35,6 +35,10 @@ export const CLIP_TYPE_OPTIONS: FightClipOption[] = [
   { value: 'pad_work', label: 'Pad work', hint: 'Coach-held mitts or pads' },
   { value: 'drilling', label: 'Drilling', hint: 'Reps, flow, positional work' },
   { value: 'rolling_grappling', label: 'Rolling / grappling', hint: 'Ground or clinch rounds' },
+  { value: 'striking_exchange', label: 'Striking exchange', hint: 'Entry, counters, exit' },
+  { value: 'takedown', label: 'Takedown', hint: 'Setup, shot, finish, defense' },
+  { value: 'guard_passing', label: 'Guard passing', hint: 'Frames, knee line, control' },
+  { value: 'submission', label: 'Submission', hint: 'Control, attack, defense' },
 ]
 
 export function sportLabelFor(value: string): string {

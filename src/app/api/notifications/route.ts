@@ -1,10 +1,10 @@
 import { NextResponse } from 'next/server'
-import { enforceUsage } from '@/lib/musashiUsage'
+import { requireUser } from '@/lib/musashiAuth'
 import { getDb } from '@/lib/db'
 
 export async function GET(req: Request) {
   try {
-    const user = await enforceUsage(req, 'chat')
+    const user = await requireUser(req)
     const { searchParams } = new URL(req.url)
     const unreadOnly = searchParams.get('unread') === 'true'
     const limit = Math.min(Number(searchParams.get('limit') || 20), 100)
@@ -55,7 +55,7 @@ export async function GET(req: Request) {
 
 export async function PATCH(req: Request) {
   try {
-    const user = await enforceUsage(req, 'chat')
+    const user = await requireUser(req)
     const body = await req.json() as Record<string, any>
     const { searchParams } = new URL(req.url)
     const notificationId = searchParams.get('id')

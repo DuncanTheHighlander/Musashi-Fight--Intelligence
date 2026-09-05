@@ -2,17 +2,19 @@
  * POST /api/social/jobs/[id]/fund — fighter funds the escrow.
  *
  * mock mode: records escrow immediately (no card charge).
- * stripe mode: returns a Checkout URL; job stays CREATED until webhook completes funding.
+ * stripe mode: try saved card first; else Checkout URL (job stays CREATED until webhook).
  */
 import { NextResponse } from 'next/server'
 import { requireUser } from '@/lib/musashiAuth'
 import { getDb } from '@/lib/marketplace/types'
-import { fundJob, preflightFundJob } from '@/lib/marketplace/jobs'
+import { completeJobFunding, fundJob, preflightFundJob } from '@/lib/marketplace/jobs'
 import {
   createMarketplaceCheckoutSession,
   mockMarketplaceFundingSession,
   resolveMarketplacePaymentMode,
+  tryChargeMarketplaceWithSavedCard,
 } from '@/lib/marketplace/payments'
+import { ensureStripeCustomer } from '@/lib/stripe/customer'
 
 type Params = { id: string }
 
@@ -32,12 +34,43 @@ export async function POST(req: Request, context: { params: Promise<Params> }) {
 
     if ((await resolveMarketplacePaymentMode()) === 'stripe') {
       const job = await preflightFundJob(db, { jobId: id, actorUserId: user.id })
+
+      const preferCheckout = body.preferCheckout === true
+      if (!preferCheckout) {
+        const saved = await tryChargeMarketplaceWithSavedCard({
+          job,
+          actor: { id: user.id, email: user.email },
+        })
+        if (saved?.fundedInline) {
+          const funded = await completeJobFunding(db, {
+            jobId: job.id,
+            actorUserId: user.id,
+            stripePaymentIntentId: saved.paymentIntentId,
+          })
+          return NextResponse.json({
+            jobId: funded.id,
+            status: funded.status,
+            amountCents: funded.amount_cents,
+            payment: saved,
+            stripe: { pending: false, fundedInline: true },
+          })
+        }
+      }
+
+      let customerId: string | null = null
+      try {
+        customerId = await ensureStripeCustomer({ id: user.id, email: user.email })
+      } catch {
+        customerId = null
+      }
+
       const payment = await createMarketplaceCheckoutSession({
         req,
         job,
         actor: user,
         successUrl: body.successUrl ? String(body.successUrl) : null,
         cancelUrl: body.cancelUrl ? String(body.cancelUrl) : null,
+        customerId,
       })
       return NextResponse.json({
         jobId: job.id,

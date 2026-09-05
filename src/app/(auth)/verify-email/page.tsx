@@ -101,12 +101,12 @@ function VerifyEmailContent() {
           <CardFooter className="flex flex-col gap-3">
             {status === 'success' && (
               <Button asChild className="h-11 w-full">
-                <Link href="/login">Sign in</Link>
+                <Link href="/welcome">Sign in</Link>
               </Button>
             )}
             {status === 'error' && (
               <Button asChild variant="outline" className="h-11 w-full">
-                <Link href="/login">Back to sign in</Link>
+                <Link href="/welcome">Back to sign in</Link>
               </Button>
             )}
           </CardFooter>

@@ -7,7 +7,7 @@ This project reads account-level secrets from **Cloudflare Secrets Store** via W
 | Store field | Value |
 |-------------|-------|
 | Store ID | `3a6ee7307f0b482ab4b3f3dd6794168c` |
-| Secret names | `Ai`, `Modal`, `revcat1`, `revcat2`, `Stripe`, `Supabase` |
+| Secret names | `Ai`, `Modal`, `revcat1`, `revcat2`, `Stripe`, `Supabase`, `ResendEmail` |
 | Scopes | Workers, AI Gateway (set in dashboard) |
 
 ## Wrangler bindings (`wrangler.toml`)
@@ -89,6 +89,8 @@ Set remaining per-Worker secrets (session, webhooks, storage) if not in Secrets 
 
 ```bash
 wrangler secret put MUSASHI_SESSION_SECRET
+# Prefer Secrets Store secret "ResendEmail" (binding SECRET_EMAIL). Legacy alternative:
+wrangler secret put EMAIL_API_KEY
 wrangler secret put STRIPE_WEBHOOK_SECRET
 ```
 

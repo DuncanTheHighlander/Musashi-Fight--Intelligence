@@ -1,5 +1,12 @@
 import { NextResponse } from 'next/server'
-import { buildSessionCookieHeader, createSession, ensureShogunUserExists, verifyLogin } from '@/lib/musashiAuth'
+import {
+  buildSessionCookieHeader,
+  createSession,
+  ensureShogunUserExists,
+  getConfiguredShogunEmail,
+  isEmailVerificationRequired,
+  verifyLogin,
+} from '@/lib/musashiAuth'
 
 export async function POST(req: Request) {
   try {
@@ -9,14 +16,17 @@ export async function POST(req: Request) {
     const password = String(body?.password || '')
     const normalized = rawEmail.toLowerCase()
 
-    const shogunIdentifier = normalized === 'shogun'
-    if (shogunIdentifier) {
+    // Admin bootstrap: email "shogun" (legacy shortcut) OR the configured shogun email.
+    // Syncs D1 password/role from Cloudflare secrets before verifying.
+    const shogunEmail = getConfiguredShogunEmail()
+    const isAdminLogin = normalized === 'shogun' || normalized === shogunEmail
+    if (isAdminLogin) {
       const shogun = await ensureShogunUserExists()
       const user = await verifyLogin({ email: shogun.email, password })
       const { cookieValue } = await createSession(req, user.id)
 
       return NextResponse.json(
-        { user },
+        { user: { ...user, emailVerificationRequired: isEmailVerificationRequired() } },
         {
           status: 200,
           headers: {
@@ -31,7 +41,7 @@ export async function POST(req: Request) {
     const { cookieValue } = await createSession(req, user.id)
 
     return NextResponse.json(
-      { user },
+      { user: { ...user, emailVerificationRequired: isEmailVerificationRequired() } },
       {
         status: 200,
         headers: {

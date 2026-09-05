@@ -1,5 +1,5 @@
 export const PUBLIC_PATHS = [
-  '/',
+  '/welcome',
   '/login',
   '/signup',
   '/forgot-password',

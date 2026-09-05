@@ -25,7 +25,7 @@ export default function PrivacyPage() {
               <ShieldCheck className="h-6 w-6" aria-hidden="true" />
             </div>
             <CardTitle className="text-2xl tracking-tight">Privacy Policy</CardTitle>
-            <CardDescription>Last updated: June 2026</CardDescription>
+            <CardDescription>Last updated: July 2026</CardDescription>
           </CardHeader>
           <CardContent className="space-y-6">
             <Section title="1. Information We Collect">
@@ -46,26 +46,44 @@ export default function PrivacyPage() {
                 account, and communicate with you about the Service. We do not use your private
                 videos to advertise to third parties.
               </p>
+              <p>
+                To use Musashi AI coaching, you must agree during onboarding that we may use your
+                uploaded footage and the pose, technique, and analysis data derived from it to
+                develop, evaluate, and improve Musashi&apos;s AI coaching models. Without that
+                agreement, AI coaching features are unavailable. You may delete your account and
+                associated data at any time from your Profile page.
+              </p>
             </Section>
 
-            <Section title="3. Storage and Infrastructure">
+            <Section title="3. Third-Party AI Processing and Sub-Processors">
+              <p>
+                To analyze your footage, we send it to Google&apos;s Gemini API. On our paid API
+                tier, Google processes this content to return analysis to us and does not use it to
+                train Google&apos;s own models. We also use Modal for cloud pose-tracking
+                processing, Cloudflare for hosting and storage, and Stripe for payment processing. A
+                current list of sub-processors is available on request.
+              </p>
+            </Section>
+
+            <Section title="4. Storage and Infrastructure">
               <p>
                 Your data, including uploaded videos and analysis results, is stored on Cloudflare
                 infrastructure (including Cloudflare R2 object storage and D1 databases). Data is
-                encrypted in transit. Access to your private content is restricted to your account
-                and the systems required to process it.
+                encrypted in transit and at rest. Access to your private content is restricted to
+                your account and the systems required to process it.
               </p>
             </Section>
 
-            <Section title="4. No Sale of Personal Data">
+            <Section title="5. No Sale of Personal Data">
               <p>
                 We do not sell your personal data. We share data only with service providers that
-                help us operate the platform (such as hosting and payment processing), and only to
-                the extent necessary, or where required by law.
+                help us operate the platform (such as hosting, AI processing, and payment
+                processing — see Section 3), and only to the extent necessary, or where required by
+                law.
               </p>
             </Section>
 
-            <Section title="5. Cookies and Sessions">
+            <Section title="6. Cookies and Sessions">
               <p>
                 Musashi uses a session cookie to keep you signed in and to protect your account.
                 We may use additional cookies or local storage for preferences and basic analytics.
@@ -73,24 +91,26 @@ export default function PrivacyPage() {
               </p>
             </Section>
 
-            <Section title="6. Data Retention and Deletion">
+            <Section title="7. Data Retention and Deletion">
               <p>
                 We retain your data while your account is active. You can delete individual videos
-                and documents from within the app, or request deletion of your entire account and
-                associated data by contacting support. Deletion requests are honored within a
-                reasonable period, subject to legal retention requirements.
+                and documents from within the app, and you can permanently delete your entire
+                account and associated data at any time from your Profile page (Danger Zone →
+                Delete account). Records of completed marketplace transactions may be retained in
+                anonymized form where required for legal or financial compliance.
               </p>
             </Section>
 
-            <Section title="7. Your Rights">
+            <Section title="8. Your Rights">
               <p>
                 Depending on your jurisdiction, you may have rights to access, correct, export, or
-                delete your personal data. Contact us to exercise these rights and we will respond
+                delete your personal data. You can delete your account and associated content from
+                Profile → Danger Zone. Contact us to exercise additional rights and we will respond
                 in accordance with applicable law.
               </p>
             </Section>
 
-            <Section title="8. Contact">
+            <Section title="9. Contact">
               <p>
                 Privacy questions or deletion requests can be sent to{' '}
                 <a href="mailto:support@musashi.ai" className="text-foreground underline">

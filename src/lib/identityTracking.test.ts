@@ -14,19 +14,36 @@
 import { describe, it, expect } from 'vitest'
 import type { NormalizedLandmark } from '@mediapipe/tasks-vision'
 import {
+  createKalman2D,
+  predictKalman,
+  updateKalman,
+} from './kalman2d'
+import {
   advanceCrossingPhase,
   assignFighterTracks,
+  BOX_LOCK_MIN_CONTAINMENT,
+  boxContainment,
+  boxesInProximityLock,
+  boxesOverlap,
   deadSlotRebindCost,
   dedupePoseCandidates,
   DUPLICATE_POSE_MEAN_DIST,
+  ensureSlotKalman,
   IDENTITY_STALE_MS,
   IDENTITY_STALE_CROSSING_MS,
+  LOCK_RELEASE_FRAMES,
+  LOCK_SEPARATION_DIST,
   poseMeanJointDistance,
+  poseVisBounds,
   predictAnchor,
+  seedPairLockByAppearance,
+  seedPairLockByTrajectory,
   STABLE_FRAMES_TO_RESUME,
+  updateSlotKalman,
   type ColorProfile,
   type IdentityCandidate,
   type IdentitySlot,
+  type PairLock,
 } from './identityTracking'
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -76,6 +93,68 @@ function makePose(cx: number, cy: number, visibility = 0.9): NormalizedLandmark[
     visibility,
   })) as NormalizedLandmark[]
 }
+
+// ─── boxesOverlap / pair lock ────────────────────────────────────────────────
+
+describe('boxesOverlap / seedPairLockByAppearance', () => {
+  it('detects substantial box containment as overlap', () => {
+    const a = { l: 0.4, t: 0.3, r: 0.6, b: 0.8 }
+    const b = { l: 0.45, t: 0.35, r: 0.55, b: 0.75 }
+    expect(boxContainment(a, b)).toBeGreaterThan(0.55)
+    expect(boxesOverlap(a, b)).toBe(true)
+  })
+
+  it('does not flag well-separated fighters as overlapping', () => {
+    const a = { l: 0.2, t: 0.3, r: 0.35, b: 0.8 }
+    const b = { l: 0.65, t: 0.3, r: 0.8, b: 0.8 }
+    expect(boxesOverlap(a, b)).toBe(false)
+  })
+
+  it('poseVisBounds returns a box for a full pose', () => {
+    const pose = makePose(0.5, 0.5)
+    const bb = poseVisBounds(pose)
+    expect(bb).not.toBeNull()
+    expect(bb!.r - bb!.l).toBeGreaterThan(0)
+    expect(bb!.b - bb!.t).toBeGreaterThan(0)
+  })
+
+  it('seeds pair lock by appearance, ignoring crossed positions', () => {
+    const slotA = makeSlot({ x: 0.3, wallMs: 1000, color: BLUE, anchorColor: BLUE })
+    const slotB = makeSlot({ x: 0.7, wallMs: 1000, color: RED, anchorColor: RED })
+    const c0 = makeCandidate({ x: 0.72, color: RED })
+    const c1 = makeCandidate({ x: 0.28, color: BLUE })
+    const lock = seedPairLockByAppearance(c0, c1, slotA, slotB, true)
+    expect(lock.aCandIdx).toBe(1)
+    expect(lock.bCandIdx).toBe(0)
+  })
+
+  it('blockSwap during approaching pairs by trajectory (not L/R), matching colors when traj agrees', () => {
+    const NOW = 15_000
+    const slotA = makeSlot({ x: 0.3, wallMs: NOW - 30, color: BLUE })
+    const slotB = makeSlot({ x: 0.7, wallMs: NOW - 30, color: RED })
+    ensureSlotKalman(slotA)
+    ensureSlotKalman(slotB)
+    const c0 = makeCandidate({ x: 0.72, color: RED })
+    const c1 = makeCandidate({ x: 0.28, color: BLUE })
+    const out = assignFighterTracks([c0, c1], slotA, slotB, NOW, 'approaching', undefined, {
+      blockSwap: true,
+    })
+    expect(out.A).toBe(c1)
+    expect(out.B).toBe(c0)
+  })
+
+  it('disables left/right cold start when allowSpatialSeed is false', () => {
+    const NOW = 40_000
+    const c0 = makeCandidate({ x: 0.8 })
+    const c1 = makeCandidate({ x: 0.2 })
+    const spatial = assignFighterTracks([c0, c1], null, null, NOW, 'tracking')
+    const noSpatial = assignFighterTracks([c0, c1], null, null, NOW, 'tracking', undefined, {
+      allowSpatialSeed: false,
+    })
+    expect(spatial.A).toBe(c1)
+    expect(noSpatial.A).toBe(c0)
+  })
+})
 
 // ─── predictAnchor — decayed constant-velocity prediction ────────────────────
 
@@ -368,5 +447,154 @@ describe('advanceCrossingPhase', () => {
     expect(r.phase).toBe('tracking')
     expect(slotA.anchorColor).toBeNull()
     expect(slotB.anchorColor).toBeNull()
+  })
+})
+
+// ─── Kalman 2D + trajectory-primary identity ─────────────────────────────────
+
+describe('kalman2d', () => {
+  it('predict moves in the velocity direction', () => {
+    const k = createKalman2D(0.4, 0.5, 0.001, 0)
+    const p = predictKalman(k, 100)
+    expect(p.x).toBeCloseTo(0.5, 5)
+    expect(p.y).toBeCloseTo(0.5, 5)
+  })
+
+  it('update pulls state toward the measurement', () => {
+    const k = createKalman2D(0.4, 0.5, 0, 0)
+    const u = updateKalman(k, 0.6, 0.5)
+    expect(u.x).toBeGreaterThan(0.4)
+    expect(u.x).toBeLessThan(0.6)
+    expect(u.x).toBeCloseTo(0.6, 1)
+  })
+})
+
+describe('trajectory-primary assignFighterTracks', () => {
+  const NOW = 60_000
+
+  it('crossing assignment follows trajectories, not swapped colors', () => {
+    // A coasting right, B coasting left. Candidates sit on those coasts but
+    // wear the OTHER fighter's colors — appearance would swap; traj must not.
+    const slotA = makeSlot({
+      x: 0.42,
+      vx: 0.0008,
+      wallMs: NOW - 40,
+      color: BLUE,
+      anchorColor: BLUE,
+    })
+    const slotB = makeSlot({
+      x: 0.58,
+      vx: -0.0008,
+      wallMs: NOW - 40,
+      color: RED,
+      anchorColor: RED,
+    })
+    slotA.kalman = createKalman2D(0.42, 0.5, 0.0008, 0)
+    slotB.kalman = createKalman2D(0.58, 0.5, -0.0008, 0)
+
+    const predA = predictAnchor(slotA, NOW)
+    const predB = predictAnchor(slotB, NOW)
+    // Colors deliberately swapped vs slot identity.
+    const nearA = makeCandidate({ x: predA.x, color: RED })
+    const nearB = makeCandidate({ x: predB.x, color: BLUE })
+
+    const out = assignFighterTracks([nearA, nearB], slotA, slotB, NOW, 'approaching')
+    expect(out.A).toBe(nearA)
+    expect(out.B).toBe(nearB)
+  })
+
+  it('LOCK seed freezes pairing across frames even when appearance prefers a swap', () => {
+    const slotA = makeSlot({
+      x: 0.48,
+      vx: 0.0005,
+      wallMs: NOW - 30,
+      color: BLUE,
+      anchorColor: BLUE,
+    })
+    const slotB = makeSlot({
+      x: 0.52,
+      vx: -0.0005,
+      wallMs: NOW - 30,
+      color: RED,
+      anchorColor: RED,
+    })
+    slotA.kalman = createKalman2D(0.48, 0.5, 0.0005, 0)
+    slotB.kalman = createKalman2D(0.52, 0.5, -0.0005, 0)
+
+    const predA = predictAnchor(slotA, NOW)
+    const predB = predictAnchor(slotB, NOW)
+    const c0 = makeCandidate({ x: predA.x, color: RED }) // appearance says B
+    const c1 = makeCandidate({ x: predB.x, color: BLUE }) // appearance says A
+
+    const lock: PairLock = seedPairLockByTrajectory(c0, c1, slotA, slotB, NOW, true)
+    // Trajectory: c0→A, c1→B
+    expect(lock.aCandIdx).toBe(0)
+    expect(lock.bCandIdx).toBe(1)
+
+    // Appearance-only would flip.
+    const byApp = seedPairLockByAppearance(c0, c1, slotA, slotB, true)
+    expect(byApp.aCandIdx).toBe(1)
+    expect(byApp.bCandIdx).toBe(0)
+
+    // Simulate LOCK hold: frozen indices still map correctly on a later frame
+    // where appearance still disagrees (same candidate order).
+    const later = NOW + 100
+    const c0b = makeCandidate({ x: predA.x + 0.01, color: RED })
+    const c1b = makeCandidate({ x: predB.x - 0.01, color: BLUE })
+    expect(c0b).toBeDefined()
+    expect([c0b, c1b][lock.aCandIdx]!.color).toEqual(RED)
+    expect([c0b, c1b][lock.bCandIdx]!.color).toEqual(BLUE)
+    // Frozen lock still assigns traj pairing, not appearance.
+    expect(lock.aCandIdx).toBe(0)
+    expect(lock.bCandIdx).toBe(1)
+    void later
+  })
+
+  it('after separation, re-match follows Kalman prediction', () => {
+    const slotA = makeSlot({
+      x: 0.35,
+      vx: 0.001,
+      wallMs: NOW - 30,
+      color: BLUE,
+    })
+    const slotB = makeSlot({
+      x: 0.65,
+      vx: -0.001,
+      wallMs: NOW - 30,
+      color: RED,
+    })
+    slotA.kalman = createKalman2D(0.35, 0.5, 0.001, 0)
+    slotB.kalman = createKalman2D(0.65, 0.5, -0.001, 0)
+
+    const predA = predictAnchor(slotA, NOW)
+    const predB = predictAnchor(slotB, NOW)
+    expect(Math.hypot(predA.x - predB.x, predA.y - predB.y)).toBeGreaterThan(
+      LOCK_SEPARATION_DIST
+    )
+
+    // Candidates continue on coasts; colors still swapped (stress appearance).
+    const nearA = makeCandidate({ x: predA.x, color: RED })
+    const nearB = makeCandidate({ x: predB.x, color: BLUE })
+    const out = assignFighterTracks([nearA, nearB], slotA, slotB, NOW, 'tracking')
+    expect(out.A).toBe(nearA)
+    expect(out.B).toBe(nearB)
+  })
+
+  it('boxesInProximityLock uses BOX_LOCK_MIN_CONTAINMENT (0.40)', () => {
+    expect(BOX_LOCK_MIN_CONTAINMENT).toBe(0.4)
+    expect(LOCK_RELEASE_FRAMES).toBe(4)
+    const tight = { l: 0.4, t: 0.3, r: 0.6, b: 0.8 }
+    const inside = { l: 0.42, t: 0.32, r: 0.58, b: 0.78 }
+    expect(boxesInProximityLock(tight, inside)).toBe(true)
+    const far = { l: 0.7, t: 0.3, r: 0.85, b: 0.8 }
+    expect(boxesInProximityLock(tight, far)).toBe(false)
+  })
+
+  it('updateSlotKalman advances filter toward new anchor', () => {
+    const slot = makeSlot({ x: 0.4, vx: 0.001, wallMs: 1000 })
+    ensureSlotKalman(slot)
+    updateSlotKalman(slot, { x: 0.55, y: 0.5 }, { vx: 0.001, vy: 0 }, 50)
+    expect(slot.kalman!.x).toBeGreaterThan(0.4)
+    expect(slot.kalman!.x).toBeLessThan(0.56)
   })
 })

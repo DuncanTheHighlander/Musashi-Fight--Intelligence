@@ -140,6 +140,10 @@ curl -H "X-Cron-Secret: $MUSASHI_CRON_SECRET" https://YOUR_DOMAIN/api/cron/marke
 
 Musashi is a **Next.js web app**. Store path: existing **Capacitor WebView shell** in `mobile/` loading your production URL (no native rewrite).
 
+**Everything still missing (P0–P3 inventory):** [`docs/superpowers/specs/2026-07-09-mobile-store-gaps.md`](docs/superpowers/specs/2026-07-09-mobile-store-gaps.md)  
+**Data safety / App Privacy:** [`docs/STORE_DATA_SAFETY.md`](docs/STORE_DATA_SAFETY.md) · **QA:** [`docs/MOBILE_STORE_QA.md`](docs/MOBILE_STORE_QA.md)  
+**Gate:** `pnpm check:mobile-release` before every store sync.
+
 **Google Play:** full step-by-step → [`docs/ANDROID.md`](docs/ANDROID.md) and [`mobile/README.md`](mobile/README.md).
 
 Quick path after web deploy:

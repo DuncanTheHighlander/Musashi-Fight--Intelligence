@@ -25,6 +25,7 @@ export async function GET(request: Request) {
       revcat2: availability.SECRET_REVCAT2,
       stripe: availability.SECRET_STRIPE,
       supabase: availability.SECRET_SUPABASE,
+      email: availability.SECRET_EMAIL,
     },
     supabaseUrlPublic: Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL?.trim()),
   })

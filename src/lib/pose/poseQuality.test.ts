@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { assessDenseTrackQuality, cloudTrackUsable } from './poseQuality'
+import { assessDenseTrackQuality, cloudTrackUsable, filterFramesByVisibility } from './poseQuality'
 
 type Lm = { x: number; y: number; visibility?: number }
 
@@ -59,5 +59,115 @@ describe('assessDenseTrackQuality', () => {
     expect(q.overall).toBe('low')
     expect(q.coverage).toBe(0)
     expect(q.footConfidence).toBe(0)
+    expect(q.identityStability).toBe(1)
+  })
+})
+
+/** 33-landmark pose whose torso anchor sits at (x, y). */
+function poseAt(x: number, y: number, visibility = 0.9): Lm[] {
+  const lm: Lm[] = Array.from({ length: 33 }, () => ({ x, y, visibility }))
+  for (const i of [11, 12, 23, 24]) lm[i] = { x, y, visibility }
+  return lm
+}
+
+describe('assessDenseTrackQuality identity stability', () => {
+  it('reports full stability for a track that never jumps bodies', () => {
+    const track = Array.from({ length: 50 }, (_, i) => ({
+      tMs: i * 33,
+      A: poseAt(0.3 + i * 0.002, 0.5),
+      B: poseAt(0.7 - i * 0.002, 0.5),
+    }))
+    const q = assessDenseTrackQuality(track, 50)
+    expect(q.identityStability).toBe(1)
+    expect(q.overall).toBe('high')
+  })
+
+  it('rejects a track whose slot keeps swapping between bodies', () => {
+    // Every transition teleports the torso across the frame — the signature of
+    // a slot flipping between two people, which coverage alone grades "high".
+    const track = Array.from({ length: 50 }, (_, i) => ({
+      tMs: i * 33,
+      A: poseAt(i % 2 === 0 ? 0.2 : 0.8, 0.5),
+      B: poseAt(0.5, 0.5),
+    }))
+    const q = assessDenseTrackQuality(track, 50)
+
+    expect(q.coverage).toBe(1)
+    expect(q.bothFighters).toBe(1)
+    expect(q.identityStability).toBe(0)
+    expect(q.overall).toBe('low')
+    expect(cloudTrackUsable(q)).toBe(false)
+  })
+
+  it('does not charge an occlusion gap as a teleport', () => {
+    // A disappears, then returns somewhere else. That is a gap plus honest
+    // re-acquisition, not a swap, so it must not poison the score.
+    const track = [
+      { tMs: 0, A: poseAt(0.2, 0.5), B: poseAt(0.8, 0.5) },
+      { tMs: 33, A: null, B: poseAt(0.8, 0.5) },
+      { tMs: 66, A: poseAt(0.75, 0.5), B: poseAt(0.8, 0.5) },
+    ]
+    const q = assessDenseTrackQuality(track, 3)
+    expect(q.identityStability).toBe(1)
+  })
+})
+
+describe('filterFramesByVisibility', () => {
+  it('keeps striking frames with visible wrists and drops low-visibility frames', () => {
+    const good = {
+      tMs: 0,
+      actors: {
+        A: Array.from({ length: 33 }, (_, i) => ({
+          x: 0.5,
+          y: 0.5,
+          visibility: [15, 16].includes(i) ? 0.9 : 0.5,
+        })),
+      },
+    }
+    const bad = {
+      tMs: 100,
+      actors: {
+        A: Array.from({ length: 33 }, (_, i) => ({
+          x: 0.5,
+          y: 0.5,
+          visibility: [15, 16].includes(i) ? 0.1 : 0.5,
+        })),
+      },
+    }
+    const out = filterFramesByVisibility([good, bad], {
+      discipline: 'boxing',
+      focusTarget: 'A',
+    })
+    expect(out).toHaveLength(1)
+    expect(out[0]?.tMs).toBe(0)
+  })
+
+  it('uses trunk joints for grappling clips', () => {
+    const good = {
+      tMs: 0,
+      actors: {
+        A: Array.from({ length: 33 }, (_, i) => ({
+          x: 0.5,
+          y: 0.5,
+          visibility: [11, 12, 23, 24].includes(i) ? 0.8 : 0.1,
+        })),
+      },
+    }
+    const bad = {
+      tMs: 100,
+      actors: {
+        A: Array.from({ length: 33 }, (_, i) => ({
+          x: 0.5,
+          y: 0.5,
+          visibility: [11, 12, 23, 24].includes(i) ? 0.1 : 0.9,
+        })),
+      },
+    }
+    const out = filterFramesByVisibility([good, bad], {
+      discipline: 'bjj',
+      focusTarget: 'both',
+    })
+    expect(out).toHaveLength(1)
+    expect(out[0]?.tMs).toBe(0)
   })
 })

@@ -5,6 +5,7 @@ import {
   resolveMarketplacePaymentMode,
   type MarketplaceFundingSession,
 } from '@/lib/marketplace/payments'
+import { resolveSameOriginCheckoutUrl } from '@/lib/marketplace/checkoutUrls'
 import { getStripeSecretKey } from '@/lib/stripe/getStripeSecretKey'
 
 export type ContentProductRow = {
@@ -108,7 +109,12 @@ export async function purchaseContentProduct(args: {
     )
     .run()
 
-  if (amountCents === 0 || (await resolveMarketplacePaymentMode()) === 'mock') {
+  const paymentMode = await resolveMarketplacePaymentMode()
+  if (paymentMode === 'stripe' && amountCents < 1) {
+    throw new Error('Paid content must have a price of at least $0.01 in Stripe mode')
+  }
+
+  if (amountCents === 0 || paymentMode === 'mock') {
     await completeContentPurchase(args.db, {
       purchaseId,
       productId: args.productId,
@@ -122,11 +128,16 @@ export async function purchaseContentProduct(args: {
     }
   }
 
-  const origin = new URL(args.req.url).origin
-  const successUrl =
-    args.successUrl || `${origin}/?section=marketplace&purchase=success&productId=${args.productId}`
-  const cancelUrl =
-    args.cancelUrl || `${origin}/?section=marketplace&purchase=cancelled&productId=${args.productId}`
+  const successUrl = resolveSameOriginCheckoutUrl(
+    args.req,
+    args.successUrl,
+    `/?section=marketplace&purchase=success&productId=${args.productId}`,
+  )
+  const cancelUrl = resolveSameOriginCheckoutUrl(
+    args.req,
+    args.cancelUrl,
+    `/?section=marketplace&purchase=cancelled&productId=${args.productId}`,
+  )
 
   const payment = await createContentCheckoutSession({
     req: args.req,

@@ -6,6 +6,13 @@ export const FREE_LIFETIME_VIDEOS = 3
 /** Pro weekly cap — see musashiUsage.ts for COGS rationale. */
 export const PRO_WEEKLY_VIDEOS = 10
 export const SHOGUN_MAX_VIDEO_SEC = 600
+/**
+ * Encoder slack: a clip trimmed to exactly the cap measures a frame or two
+ * over (MediaRecorder overshoot), e.g. 10.0014s on a 10s trim. Without this
+ * tolerance the just-trimmed clip 402s (VIDEO_DURATION_EXCEEDED) and the AI
+ * never sees it.
+ */
+export const VIDEO_DURATION_TOLERANCE_SEC = 0.75
 
 export type VideoDurationCheck = {
   ok: true
@@ -25,14 +32,14 @@ export const checkClipDurationForTier = (
   if (!Number.isFinite(durationSec) || durationSec <= 0) {
     return { ok: true }
   }
-  if (durationSec > maxSec) {
+  if (durationSec > maxSec + VIDEO_DURATION_TOLERANCE_SEC) {
     return {
       ok: false,
       code: 'VIDEO_DURATION_EXCEEDED',
       maxSec,
       message: isPro
-        ? `Clip is ${durationSec.toFixed(1)}s — Pro allows up to ${maxSec}s. Trim your clip.`
-        : `Clip is ${durationSec.toFixed(1)}s — Free allows up to ${maxSec}s. Trim or upgrade to Pro (30s).`,
+        ? `Analysis window is ${durationSec.toFixed(1)}s — Pro allows up to ${maxSec}s. Pick a shorter window.`
+        : `Analysis window is ${durationSec.toFixed(1)}s — Free allows up to ${maxSec}s. Pick a shorter window or upgrade to Pro (30s).`,
     }
   }
   return { ok: true }

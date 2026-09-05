@@ -10,3 +10,13 @@ android/.idea/
 android/*.iml
 android/captures/
 android/.cxx/
+
+# iOS build artifacts (commit ios/ source, ignore generated output)
+ios/App/build/
+ios/App/Pods/
+ios/App/output/
+ios/App/App/public/
+ios/DerivedData/
+ios/capacitor-cordova-ios-plugins/
+ios/App/App.xcodeproj/xcuserdata/
+ios/App/App.xcworkspace/xcuserdata/

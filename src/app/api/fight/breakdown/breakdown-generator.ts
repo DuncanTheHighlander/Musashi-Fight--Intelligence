@@ -8,6 +8,7 @@
 import { safeParseResponse } from '@/lib/safeJson'
 import type { FightEvidenceLedger, OverlayAnnotation } from '@/lib/fightlang/fightlang.types'
 import { resolvedModels } from '@/lib/gemini/models'
+import { getServerSecret } from '@/lib/cloudflare/secrets'
 
 export type BreakdownStyle = 'commentary' | 'coaching' | 'scouting'
 
@@ -55,8 +56,9 @@ function buildBreakdownPrompt(args: {
   styleAssessments: Array<{ actorId: string; [k: string]: any }>
   style: BreakdownStyle
   focusActor: string
+  coachBrainBlock?: string
 }): string {
-  const { ledger, retrievedSnippets, styleAssessments, style, focusActor } = args
+  const { ledger, retrievedSnippets, styleAssessments, style, focusActor, coachBrainBlock } = args
 
   const ledgerJson = JSON.stringify(
     {
@@ -102,7 +104,7 @@ Tone: clinical analyst building a game plan to beat this fighter.`,
 
   return `${styleInstructions[style]}
 
-You are creating a YouTube-style timestamped fight breakdown. The clip is ${durSec} seconds long.
+${coachBrainBlock ? `${coachBrainBlock}\n` : ''}You are creating a YouTube-style timestamped fight breakdown. The clip is ${durSec} seconds long.
 Focus: ${focusActor === 'both' ? 'Both fighters' : `Fighter ${focusActor}`}
 
 RULES:
@@ -166,8 +168,9 @@ export async function generateGroundedBreakdown(args: {
   styleAssessments: Array<{ actorId: string; [k: string]: any }>
   style: BreakdownStyle
   focusActor: string
+  coachBrainBlock?: string
 }): Promise<{ model: string; payload: BreakdownPayload; rawText: string }> {
-  const apiKey = process.env.GEMINI_API_KEY
+  const apiKey = await getServerSecret('GEMINI_API_KEY')
   if (!apiKey) throw new Error('GEMINI_API_KEY not configured')
 
   const model = resolvedModels.pro()

@@ -93,6 +93,17 @@ const TABS: Tab[] = [
   },
 ]
 
+/** Shogun-only sixth tab — the admin console. Appended when isAdmin. */
+const ADMIN_TAB: Tab = {
+  label: 'Admin',
+  href: '/shogun',
+  icon: () => (
+    <svg width="22" height="22" viewBox="0 0 24 24" {...stroke}>
+      <path d="M2 8l4 4 6-8 6 8 4-4v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2z" />
+    </svg>
+  ),
+}
+
 function SunIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 24 24" {...stroke} strokeWidth={2}>
@@ -122,10 +133,13 @@ function VoiceWaveIcon() {
 export function MobileShell({
   children,
   userInitials = 'M',
+  isAdmin = false,
 }: {
   children: React.ReactNode
   userInitials?: string
+  isAdmin?: boolean
 }) {
+  const tabs = isAdmin ? [...TABS, ADMIN_TAB] : TABS
   const pathname = usePathname() || ''
   const { resolvedTheme, setTheme } = useTheme()
   const [mounted, setMounted] = useState(false)
@@ -214,7 +228,7 @@ export function MobileShell({
             className="flex flex-shrink-0 border-t px-1.5 pb-6 pt-2.5 backdrop-blur-xl"
             style={{ background: 'var(--ms-bg88)', borderColor: 'var(--ms-line08)' }}
           >
-            {TABS.map((tab) => {
+            {tabs.map((tab) => {
               const active = pathname === tab.href || pathname.startsWith(`${tab.href}/`)
               return (
                 <Link

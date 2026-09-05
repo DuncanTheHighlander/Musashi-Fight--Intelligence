@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { enforceUsage } from '@/lib/musashiUsage'
+import { requireUser } from '@/lib/musashiAuth'
 import { getDb } from '@/lib/db'
 
 const parseJson = <T>(value: any, fallback: T): T => {
@@ -49,7 +49,7 @@ const getRankingTier = (score: number): string => {
 
 export async function GET(req: Request) {
   try {
-    await enforceUsage(req, 'chat')
+    await requireUser(req)
 
     const { searchParams } = new URL(req.url)
     const discipline = searchParams.get('discipline')?.trim() || 'all'
@@ -233,7 +233,7 @@ export async function GET(req: Request) {
 
 export async function POST(req: Request) {
   try {
-    const user = await enforceUsage(req, 'chat')
+    const user = await requireUser(req)
     const body = await req.json() as Record<string, any>
     
     // Update user's ranking after new performance data

@@ -1,4 +1,5 @@
-import { getDb } from '@/lib/db'
+import { getDbAsync } from '@/lib/db'
+import { readSecretEnv } from '@/lib/env'
 
 export type MusashiRole = 'user' | 'shogun'
 
@@ -64,8 +65,15 @@ const pbkdf2Hash = async (password: string, salt: Uint8Array, iterations: number
   return new Uint8Array(bits)
 }
 
+/**
+ * Cloudflare Workers Web Crypto rejects PBKDF2 iteration counts above 100_000.
+ * Keep new hashes at the Workers ceiling; verifyPassword still honors the
+ * iteration count stored in the hash string for any older local hashes.
+ */
+export const PBKDF2_ITERATIONS = 100_000
+
 export const hashPassword = async (password: string): Promise<string> => {
-  const iterations = 120_000
+  const iterations = PBKDF2_ITERATIONS
   const salt = crypto.getRandomValues(new Uint8Array(16))
   const hash = await pbkdf2Hash(password, salt, iterations)
   return `pbkdf2$${iterations}$${base64FromBytes(salt)}$${base64FromBytes(hash)}`
@@ -80,11 +88,16 @@ export const verifyPassword = async (password: string, stored: string): Promise<
   if (!Number.isFinite(iterations) || iterations < 50_000) return false
   const salt = bytesFromBase64(saltB64)
   const expected = bytesFromBase64(hashB64)
-  const actual = await pbkdf2Hash(password, salt, iterations)
-  if (actual.length !== expected.length) return false
-  let diff = 0
-  for (let i = 0; i < actual.length; i++) diff |= actual[i] ^ expected[i]
-  return diff === 0
+  try {
+    const actual = await pbkdf2Hash(password, salt, iterations)
+    if (actual.length !== expected.length) return false
+    let diff = 0
+    for (let i = 0; i < actual.length; i++) diff |= actual[i] ^ expected[i]
+    return diff === 0
+  } catch {
+    // e.g. Workers reject iteration counts above 100_000
+    return false
+  }
 }
 
 const SESSION_COOKIE = 'musashi_session'
@@ -131,7 +144,7 @@ export const createSession = async (req: Request, userId: string): Promise<{ ses
   const ua = req.headers.get('user-agent') || null
   const ip = req.headers.get('x-forwarded-for') || req.headers.get('x-real-ip') || null
 
-  const db = getDb()
+  const db = await getDbAsync()
   await db
     .prepare(
       'INSERT INTO musashi_sessions (id, user_id, expires_at, user_agent, ip) VALUES (?, ?, ?, ?, ?)'
@@ -154,7 +167,7 @@ export const verifySessionCookie = async (cookieValue: string): Promise<string |
   const expected = await hmacSign(secret, sessionId)
   if (!timingSafeEqual(expected, sig)) return null
 
-  const db = getDb()
+  const db = await getDbAsync()
   const row = await db
     .prepare(
       `SELECT s.id, s.user_id, s.expires_at, s.revoked_at, s.created_at, u.password_updated_at
@@ -201,8 +214,9 @@ const DEV_BYPASS_USER: MusashiUser = {
 
 export const getCurrentUser = async (req: Request): Promise<MusashiUser | null> => {
   // Dev/demo bypass — every auth-gated route inherits this without a per-route
-  // change. Production deploys must NOT set this flag.
-  if (process.env.MUSASHI_DISABLE_AUTH === '1') return DEV_BYPASS_USER
+  // change. The NODE_ENV guard is a safety net; production deploys must NOT set
+  // this flag, and it is explicitly rejected at the API level if they do.
+  if (process.env.MUSASHI_DISABLE_AUTH === '1' && process.env.NODE_ENV !== 'production') return DEV_BYPASS_USER
 
   const cookieValue = getSessionCookieFromRequest(req)
   if (!cookieValue) return null
@@ -210,7 +224,7 @@ export const getCurrentUser = async (req: Request): Promise<MusashiUser | null> 
   const userId = await verifySessionCookie(cookieValue)
   if (!userId) return null
 
-  const db = getDb()
+  const db = await getDbAsync()
   const row = await db
     .prepare(
       'SELECT id, email, display_name, role, email_verified_at, password_updated_at, created_at, updated_at FROM musashi_users WHERE id = ?',
@@ -239,8 +253,36 @@ export const requireUser = async (req: Request, opts?: { role?: MusashiRole }) =
   return user
 }
 
+/**
+ * Whether AI / paid features should require a verified email.
+ * - Off when auth bypass is on (local demos)
+ * - Off when MUSASHI_REQUIRE_EMAIL_VERIFIED=0
+ * - On in production when the email provider is configured
+ * - On in any env when MUSASHI_REQUIRE_EMAIL_VERIFIED=1
+ * Shogun accounts are never blocked.
+ */
+export const isEmailVerificationRequired = (): boolean => {
+  if (process.env.MUSASHI_DISABLE_AUTH === '1' && process.env.NODE_ENV !== 'production') return false
+  if (process.env.MUSASHI_REQUIRE_EMAIL_VERIFIED === '0') return false
+  if (process.env.MUSASHI_REQUIRE_EMAIL_VERIFIED === '1') return true
+  // Production: email is configured via Secrets Store SECRET_EMAIL and/or Worker EMAIL_API_KEY.
+  // EMAIL_FROM_ADDRESS + EMAIL_SERVICE_URL are plain vars; treat them as "provider wired"
+  // so verification stays on even when the key lives only in Secrets Store (async).
+  if (process.env.NODE_ENV !== 'production') return Boolean(readSecretEnv('EMAIL_API_KEY'))
+  const hasFrom = Boolean(String(process.env.EMAIL_FROM_ADDRESS || '').trim())
+  const hasService = Boolean(String(process.env.EMAIL_SERVICE_URL || '').trim())
+  return Boolean(readSecretEnv('EMAIL_API_KEY')) || (hasFrom && hasService)
+}
+
+export const assertEmailVerified = (user: MusashiUser): void => {
+  if (!isEmailVerificationRequired()) return
+  if (user.role === 'shogun') return
+  if (user.emailVerifiedAt) return
+  throw new Error('EMAIL_NOT_VERIFIED')
+}
+
 export const revokeAllUserSessions = async (userId: string): Promise<void> => {
-  const db = getDb()
+  const db = await getDbAsync()
   await db
     .prepare('UPDATE musashi_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL')
     .bind(new Date().toISOString(), userId)
@@ -254,7 +296,7 @@ export const revokeCurrentSession = async (req: Request): Promise<void> => {
   const [sessionId] = String(cookieValue || '').split('.')
   if (!sessionId) return
 
-  const db = getDb()
+  const db = await getDbAsync()
   await db
     .prepare('UPDATE musashi_sessions SET revoked_at = ? WHERE id = ?')
     .bind(new Date().toISOString(), sessionId)
@@ -272,7 +314,7 @@ export const revokeCurrentSession = async (req: Request): Promise<void> => {
  */
 const syncLegacyUserRow = async (user: { id: string; email: string; display_name?: string | null }): Promise<void> => {
   try {
-    const db = getDb()
+    const db = await getDbAsync()
     try {
       // Legacy 0001 schema: role CHECK ('admin','manager','cleaner','client'),
       // NOT NULL password_hash/first_name/last_name.
@@ -308,7 +350,7 @@ export const createUser = async (params: { email: string; password: string; role
 
   const displayName = params.display_name ? String(params.display_name).trim().slice(0, 100) : null
 
-  const db = getDb()
+  const db = await getDbAsync()
   const existing = await db.prepare('SELECT id FROM musashi_users WHERE email = ?').bind(email).first()
   if (existing?.id) throw new Error('Email already in use')
 
@@ -316,11 +358,18 @@ export const createUser = async (params: { email: string; password: string; role
   const now = new Date().toISOString()
   const passwordHash = await hashPassword(params.password)
 
+  // Local/dev without an email provider: auto-verify so AI flows still work.
+  // Production always leaves email_verified_at null until the user confirms.
+  const emailKey = String(process.env.EMAIL_API_KEY || '').trim()
+  const emailConfigured = Boolean(emailKey) && !/your-|placeholder|re_your/i.test(emailKey)
+  const autoVerify = !emailConfigured && process.env.NODE_ENV !== 'production'
+  const verifiedAt = autoVerify ? now : null
+
   await db
     .prepare(
-      'INSERT INTO musashi_users (id, email, password_hash, role, display_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
+      'INSERT INTO musashi_users (id, email, password_hash, role, display_name, email_verified_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
     )
-    .bind(id, email, passwordHash, params.role, displayName, now, now)
+    .bind(id, email, passwordHash, params.role, displayName, verifiedAt, now, now)
     .run()
 
   const user: MusashiUser = {
@@ -328,7 +377,7 @@ export const createUser = async (params: { email: string; password: string; role
     email,
     display_name: displayName,
     role: params.role,
-    emailVerifiedAt: null,
+    emailVerifiedAt: verifiedAt,
     passwordUpdatedAt: null,
     createdAt: now,
     updatedAt: now,
@@ -337,9 +386,19 @@ export const createUser = async (params: { email: string; password: string; role
   return user
 }
 
-export const ensureShogunUserExists = async (): Promise<MusashiUser> => {
+/** Configured admin login email from Cloudflare secret MUSASHI_SHOGUN_EMAIL. */
+export const getConfiguredShogunEmail = (): string => {
   const configuredEmail = String(process.env.MUSASHI_SHOGUN_EMAIL || '').trim().toLowerCase()
-  const email = configuredEmail.includes('@') ? configuredEmail : 'shogun@musashi.local'
+  return configuredEmail.includes('@') ? configuredEmail : 'shogun@musashi.local'
+}
+
+/**
+ * Ensure the admin (shogun) account exists and stays in sync with Cloudflare secrets.
+ * Always refreshes password_hash + role from MUSASHI_SHOGUN_PASSWORD(_HASH) so rotating
+ * the Worker secret actually unlocks login (previously only applied on first create).
+ */
+export const ensureShogunUserExists = async (): Promise<MusashiUser> => {
+  const email = getConfiguredShogunEmail()
   const passwordHashEnv = String(process.env.MUSASHI_SHOGUN_PASSWORD_HASH || '').trim()
   const passwordEnv = String(process.env.MUSASHI_SHOGUN_PASSWORD || '')
 
@@ -347,7 +406,10 @@ export const ensureShogunUserExists = async (): Promise<MusashiUser> => {
     throw new Error('Shogun password not configured')
   }
 
-  const db = getDb()
+  const db = await getDbAsync()
+  const passwordHash = passwordHashEnv ? passwordHashEnv : await hashPassword(passwordEnv)
+  const now = new Date().toISOString()
+
   const existing = await db
     .prepare(
       'SELECT id, email, display_name, role, email_verified_at, password_updated_at, created_at, updated_at FROM musashi_users WHERE email = ?',
@@ -356,21 +418,28 @@ export const ensureShogunUserExists = async (): Promise<MusashiUser> => {
     .first()
 
   if (existing?.id) {
-    return {
+    await db
+      .prepare(
+        'UPDATE musashi_users SET password_hash = ?, role = ?, updated_at = ? WHERE id = ?',
+      )
+      .bind(passwordHash, 'shogun', now, String(existing.id))
+      .run()
+
+    const user: MusashiUser = {
       id: String(existing.id),
       email: String(existing.email),
       display_name: existing.display_name ? String(existing.display_name) : null,
-      role: String(existing.role) as MusashiRole,
+      role: 'shogun',
       emailVerifiedAt: existing.email_verified_at ? String(existing.email_verified_at) : null,
       passwordUpdatedAt: existing.password_updated_at ? String(existing.password_updated_at) : null,
       createdAt: String(existing.created_at),
-      updatedAt: String(existing.updated_at),
+      updatedAt: now,
     }
+    await syncLegacyUserRow(user)
+    return user
   }
 
   const id = crypto.randomUUID()
-  const now = new Date().toISOString()
-  const passwordHash = passwordHashEnv ? passwordHashEnv : await hashPassword(passwordEnv)
 
   await db
     .prepare(
@@ -394,7 +463,7 @@ export const ensureShogunUserExists = async (): Promise<MusashiUser> => {
 
 export const verifyLogin = async (params: { email: string; password: string }): Promise<MusashiUser> => {
   const email = String(params.email || '').trim().toLowerCase()
-  const db = getDb()
+  const db = await getDbAsync()
   const row = await db
     .prepare(
       'SELECT id, email, display_name, role, password_hash, email_verified_at, password_updated_at, created_at, updated_at FROM musashi_users WHERE email = ?',
@@ -433,7 +502,7 @@ export const updateUserPassword = async (userId: string, password: string): Prom
   assertPasswordPolicy(password)
   const passwordHash = await hashPassword(password)
   const now = new Date().toISOString()
-  const db = getDb()
+  const db = await getDbAsync()
   await db
     .prepare('UPDATE musashi_users SET password_hash = ?, password_updated_at = ?, updated_at = ? WHERE id = ?')
     .bind(passwordHash, now, now, userId)

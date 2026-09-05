@@ -7,6 +7,7 @@ import {
   getCoachBrainFile,
   getGlobalCoachRules,
   getSportBrain,
+  isVisionFirstSport,
   resolveSportKey,
 } from './coachBrain'
 import { COACH_BRAIN_FILES } from './brains.generated'
@@ -38,6 +39,28 @@ describe('resolveSportKey (sport router aliases)', () => {
     expect(resolveSportKey('sumo')).toBeNull()
     expect(resolveSportKey('')).toBeNull()
     expect(resolveSportKey(undefined)).toBeNull()
+  })
+})
+
+describe('isVisionFirstSport', () => {
+  it('is true for BJJ, wrestling, and judo (and aliases)', () => {
+    expect(isVisionFirstSport('bjj')).toBe(true)
+    expect(isVisionFirstSport('bjj_grappling')).toBe(true)
+    expect(isVisionFirstSport('grappling')).toBe(true)
+    expect(isVisionFirstSport('wrestling')).toBe(true)
+    expect(isVisionFirstSport('judo')).toBe(true)
+    expect(isVisionFirstSport('Jiu-Jitsu')).toBe(true)
+  })
+
+  it('is false for striking, MMA, and unknown', () => {
+    expect(isVisionFirstSport('boxing')).toBe(false)
+    expect(isVisionFirstSport('kickboxing')).toBe(false)
+    expect(isVisionFirstSport('muay_thai')).toBe(false)
+    expect(isVisionFirstSport('mma')).toBe(false)
+    expect(isVisionFirstSport('karate')).toBe(false)
+    expect(isVisionFirstSport('sumo')).toBe(false)
+    expect(isVisionFirstSport('')).toBe(false)
+    expect(isVisionFirstSport(null)).toBe(false)
   })
 })
 
@@ -145,10 +168,58 @@ describe('buildCoachBrainBlock', () => {
     expect(block).toContain('User question: Why do my shots keep failing?')
   })
 
+  it('shapes the analysis per clip type (guidance lines)', () => {
+    const sparring = buildCoachBrainBlock({ selectedSport: 'boxing', clipType: 'sparring' })
+    expect(sparring).toContain('CLIP TYPE GUIDANCE:')
+    expect(sparring).toContain('entries, exits, habits under resistance')
+
+    const drilling = buildCoachBrainBlock({ selectedSport: 'bjj', clipType: 'drilling' })
+    expect(drilling).toContain('repetition quality')
+    expect(drilling).toContain('Do not judge it as live decision-making')
+
+    const takedown = buildCoachBrainBlock({ selectedSport: 'wrestling', clipType: 'takedown' })
+    expect(takedown).toContain('setup, level change, penetration, finish')
+
+    const guardPassing = buildCoachBrainBlock({ selectedSport: 'bjj', clipType: 'guard_passing' })
+    expect(guardPassing).toContain('frames, the knee line, hip control')
+
+    const submission = buildCoachBrainBlock({ selectedSport: 'bjj', clipType: 'submission' })
+    expect(submission).toContain('control before the submission')
+
+    const striking = buildCoachBrainBlock({ selectedSport: 'mma', clipType: 'striking_exchange' })
+    expect(striking).toContain('entry, guard responsibility')
+
+    // Alias normalization: spaces/hyphens/slashes → underscores, 'match' → competition guidance.
+    const rolling = buildCoachBrainBlock({ selectedSport: 'bjj', clipType: 'rolling / grappling' })
+    expect(rolling).toContain('top/bottom context, frames, hip movement')
+    const match = buildCoachBrainBlock({ selectedSport: 'judo', clipType: 'match' })
+    expect(match).toContain('scoring and tactical consequences')
+
+    // Unknown clip types add no guidance line but keep the label.
+    const unknown = buildCoachBrainBlock({ selectedSport: 'boxing', clipType: 'mystery_footage' })
+    expect(unknown).toContain('Clip type: mystery_footage')
+    expect(unknown).not.toContain('CLIP TYPE GUIDANCE:')
+  })
+
   it('discourages generic feedback via the global style rules', () => {
     const block = buildCoachBrainBlock({ selectedSport: 'boxing' })
     expect(block).toContain('Do not give generic advice unless it is tied to evidence')
     expect(block).toContain('Event → Consequence → Correction → Drill')
+  })
+
+  it('includes HISTORICAL ATHLETE DATA when recurring faults are provided', () => {
+    const block = buildCoachBrainBlock({
+      selectedSport: 'bjj',
+      recurringFaults: ['hips flattened on bottom', 'guard dropping before entries'],
+    })
+    expect(block).toContain('HISTORICAL ATHLETE DATA')
+    expect(block).toContain('hips flattened on bottom')
+    expect(block).toContain('Do NOT claim a fault happened unless supported by current evidence')
+  })
+
+  it('omits HISTORICAL section when recurring faults are empty', () => {
+    const block = buildCoachBrainBlock({ selectedSport: 'boxing', recurringFaults: [] })
+    expect(block).not.toContain('HISTORICAL ATHLETE DATA')
   })
 
   it('blocks fake numeric precision via the evidence rules', () => {

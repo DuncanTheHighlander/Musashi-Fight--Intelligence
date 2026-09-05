@@ -22,6 +22,15 @@ function handleError(e: unknown) {
   if (code === 'STORAGE_NOT_CONFIGURED') {
     return NextResponse.json({ error: 'Storage not configured' }, { status: 501 })
   }
+  if (code === 'DIRECT_R2_REQUIRED') {
+    return NextResponse.json(
+      {
+        error: 'This original is too large for the app upload route. Trim it locally or enable direct R2 uploads.',
+        code,
+      },
+      { status: 413 },
+    )
+  }
   return NextResponse.json({ error: code || 'Upload failed' }, { status: 400 })
 }
 

@@ -55,6 +55,19 @@ export function resolveSportKey(input?: string | null): SportKey | null {
   return SPORT_ALIASES[norm] ?? null
 }
 
+/** Sports that coach from VIDEO first (skeleton off; pose is assist-only). */
+const VISION_FIRST_SPORTS = new Set<SportKey>(['bjj_grappling', 'wrestling', 'judo'])
+
+/**
+ * True when the selected sport should use the vision-first pipeline:
+ * attach tape → Gemini watches → Coach Cards fill. Pose/skeleton is optional.
+ * MMA stays hybrid (false). Striking sports stay pose-first (false).
+ */
+export function isVisionFirstSport(discipline?: string | null): boolean {
+  const key = resolveSportKey(discipline)
+  return key != null && VISION_FIRST_SPORTS.has(key)
+}
+
 export function getCoachBrainFile(path: string): string | null {
   return COACH_BRAIN_FILES[path] ?? null
 }
@@ -85,7 +98,48 @@ export type CoachBrainContext = Readonly<{
   poseEngine?: string | null
   /** 0..1 score or 'low' | 'medium' | 'high'. */
   poseQuality?: number | string | null
+  /** Cross-session recurring faults (Phase 3). Labels only — current evidence must still support claims. */
+  recurringFaults?: ReadonlyArray<string>
 }>
+
+/**
+ * How each clip type shapes the analysis. Keys are normalized (lowercase,
+ * underscores). Unknown clip types fall through with no extra guidance.
+ */
+const CLIP_TYPE_GUIDANCE: Record<string, string> = {
+  sparring:
+    'Sparring clip: evaluate live decisions — entries, exits, habits under resistance, and what the opponent was able to exploit. Judge choices, not just mechanics.',
+  competition:
+    'Competition/match clip: evaluate scoring and tactical consequences — what won or lost the exchange under the ruleset, and what a prepared opponent will do with the patterns shown.',
+  match:
+    'Competition/match clip: evaluate scoring and tactical consequences — what won or lost the exchange under the ruleset, and what a prepared opponent will do with the patterns shown.',
+  bag_work:
+    'Bag work clip: there is no live opponent — evaluate mechanics, structure, balance, and hand/foot return only. Do not invent opponent reactions or exchange dynamics.',
+  pad_work:
+    'Pad work clip: evaluate mechanics and combination quality on fed targets. The pad holder is not an opponent — do not coach it as a live exchange.',
+  drilling:
+    'Drilling clip: evaluate mechanics and repetition quality — consistency across reps, where form degrades, and whether the rep builds the right habit. Do not judge it as live decision-making.',
+  drill:
+    'Drilling clip: evaluate mechanics and repetition quality — consistency across reps, where form degrades, and whether the rep builds the right habit. Do not judge it as live decision-making.',
+  rolling_grappling:
+    'Rolling/grappling clip: evaluate position before all else — top/bottom context, frames, hip movement, posture, inside control, and control before submission.',
+  rolling:
+    'Rolling/grappling clip: evaluate position before all else — top/bottom context, frames, hip movement, posture, inside control, and control before submission.',
+  takedown:
+    'Takedown clip: evaluate the full chain — setup, level change, penetration, finish, and the defensive response. A failed shot is traced backward to the phase that actually broke.',
+  guard_passing:
+    'Guard passing clip: evaluate frames, the knee line, hip control, and stabilization after the pass. Passing without settling is a fault, not a success.',
+  striking_exchange:
+    'Striking exchange clip: evaluate the entry, guard responsibility during the exchange, counter windows, and the exit. Who was safe after landing matters as much as who landed.',
+  submission:
+    'Submission clip: evaluate control before the submission and the defender\'s priority order (protect the limb/neck, restore position, then escape). Do not narrate hidden grips.',
+}
+
+function clipTypeGuidance(clipType?: string | null): string | null {
+  if (!clipType) return null
+  const norm = String(clipType).trim().toLowerCase().replace(/[\s/-]+/g, '_')
+  return CLIP_TYPE_GUIDANCE[norm] ?? null
+}
 
 function normalizePoseQuality(q?: number | string | null): 'low' | 'medium' | 'high' | null {
   if (q == null) return null
@@ -146,9 +200,27 @@ export function buildCoachBrainBlock(ctx: CoachBrainContext = {}): string {
   } else {
     contextLines.push('Selected sport: not specified — using global coach rules only.')
   }
-  if (ctx.clipType) contextLines.push(`Clip type: ${ctx.clipType}`)
+  if (ctx.clipType) {
+    contextLines.push(`Clip type: ${ctx.clipType}`)
+    const guidance = clipTypeGuidance(ctx.clipType)
+    if (guidance) contextLines.push(`CLIP TYPE GUIDANCE: ${guidance}`)
+  }
   if (ctx.fighterFocus) contextLines.push(`Fighter focus: ${ctx.fighterFocus}`)
   if (ctx.userQuestion) contextLines.push(`User question: ${ctx.userQuestion}`)
+
+  const historicalBlock =
+    ctx.recurringFaults && ctx.recurringFaults.length > 0
+      ? [
+          'HISTORICAL ATHLETE DATA:',
+          'This athlete has a known history of these recurring errors:',
+          ...ctx.recurringFaults.map((f) => `- ${f}`),
+          '',
+          'Instructions:',
+          '- Prioritize checking whether these faults appear in the CURRENT evidence (ledger + vision).',
+          '- If the same fault appears again, escalate coaching tone (direct, urgent) and name the repetition explicitly.',
+          '- Do NOT claim a fault happened unless supported by current evidence — history only raises scrutiny.',
+        ].join('\n')
+      : null
 
   const sections: string[] = [
     'MUSASHI COACH BRAIN (sport-specific coaching knowledge — apply it on top of the evidence contract, never against it):',
@@ -156,6 +228,8 @@ export function buildCoachBrainBlock(ctx: CoachBrainContext = {}): string {
     buildPoseEvidenceLines(ctx).join('\n'),
     `GLOBAL COACH RULES:\n${getGlobalCoachRules()}`,
   ]
+
+  if (historicalBlock) sections.push(historicalBlock)
 
   if (brain) {
     sections.push(`SPORT BRAIN (${brain.key}):\n${brain.markdown}`)

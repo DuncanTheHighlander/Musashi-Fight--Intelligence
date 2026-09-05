@@ -89,6 +89,10 @@ pnpm exec wrangler secret put MUSASHI_SHOGUN_PASSWORD
 pnpm exec wrangler secret put MUSASHI_CRON_SECRET
 pnpm exec wrangler secret put MUSASHI_APP_URL
 
+# Email (Resend key for password reset / email verification;
+# EMAIL_SERVICE_URL + EMAIL_FROM_ADDRESS are wrangler.toml [vars])
+pnpm exec wrangler secret put EMAIL_API_KEY
+
 # Stripe webhook (Stripe secret key comes from Secrets Store, NOT here)
 pnpm exec wrangler secret put STRIPE_WEBHOOK_SECRET
 
@@ -148,7 +152,7 @@ Set the four `STORAGE_*` worker secrets (step 3) with:
 pnpm db:migrate:remote
 ```
 
-Database: `musashi-db` (`eda3460e-70ab-4eef-b273-0efc52007c82`)
+Database: `musashi-db` (`c567e219-abc3-4ebb-868a-6c3b4cc4e5ae` — matches wrangler.toml)
 
 Required launch migrations currently include `migrations/0025_gyms_and_credits.sql`,
 `migrations/0026_clip_question_limits.sql`, and
@@ -228,7 +232,8 @@ SECRET_STRIPE / Stripe           MUSASHI_SHOGUN_EMAIL
 SECRET_MODAL / Modal             MUSASHI_SHOGUN_PASSWORD
 SECRET_REVCAT1 / revcat1         MUSASHI_CRON_SECRET
 SECRET_REVCAT2 / revcat2         MUSASHI_APP_URL
-SECRET_SUPABASE / Supabase       STRIPE_WEBHOOK_SECRET
+SECRET_SUPABASE / Supabase       EMAIL_API_KEY
+                                 STRIPE_WEBHOOK_SECRET
                                  STORAGE_SERVICE_URL
                                  STORAGE_ACCESS_KEY
                                  STORAGE_SECRET_KEY
@@ -241,6 +246,8 @@ wrangler.toml [vars] (plain text, already set):
   MUSASHI_MARKETPLACE_PAYMENTS=stripe
   MUSASHI_STORAGE_MODE=r2
   NODE_ENV=production
+  EMAIL_SERVICE_URL=https://api.resend.com
+  EMAIL_FROM_ADDRESS=noreply@musashi.ai
 ```
 
 ---

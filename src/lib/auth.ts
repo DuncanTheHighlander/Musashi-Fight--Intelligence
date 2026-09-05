@@ -5,6 +5,8 @@ export interface User {
   email: string
   display_name: string
   role?: string
+  emailVerifiedAt?: string | null
+  emailVerificationRequired?: boolean
 }
 
 interface AuthResponse {
@@ -13,8 +15,11 @@ interface AuthResponse {
     email: string
     display_name?: string
     role?: string
+    emailVerifiedAt?: string | null
+    emailVerificationRequired?: boolean
   }
   error?: string
+  code?: string
 }
 
 export async function checkSession(): Promise<User | null> {
@@ -34,6 +39,8 @@ export async function checkSession(): Promise<User | null> {
       email: data.user.email,
       display_name: data.user.display_name || data.user.email.split('@')[0],
       role: data.user.role,
+      emailVerifiedAt: data.user.emailVerifiedAt ?? null,
+      emailVerificationRequired: data.user.emailVerificationRequired ?? false,
     }
   } catch (err) {
     console.error('Session check failed:', err)
@@ -64,6 +71,8 @@ export async function login(email: string, password: string): Promise<User> {
     email: data.user.email,
     display_name: data.user.display_name || data.user.email.split('@')[0],
     role: data.user.role,
+    emailVerifiedAt: data.user.emailVerifiedAt ?? null,
+    emailVerificationRequired: data.user.emailVerificationRequired ?? false,
   }
 }
 
@@ -105,5 +114,27 @@ export async function register(params: {
     email: data.user.email,
     display_name: data.user.display_name || data.user.email.split('@')[0],
     role: data.user.role,
+    emailVerifiedAt: data.user.emailVerifiedAt ?? null,
+    emailVerificationRequired: data.user.emailVerificationRequired ?? false,
+  }
+}
+
+/** Resend verification email for the current session. */
+export async function sendVerificationEmail(): Promise<{ ok: boolean; alreadyVerified?: boolean; dryRun?: boolean }> {
+  const res = await fetch('/api/auth/email/verify/send', {
+    method: 'POST',
+    credentials: 'include',
+  })
+  const data = (await parseApiResponse(res)) as {
+    ok?: boolean
+    alreadyVerified?: boolean
+    dryRun?: boolean
+    error?: string
+  }
+  if (!res.ok) throw new Error(data?.error || 'Could not send verification email')
+  return {
+    ok: Boolean(data?.ok),
+    alreadyVerified: data?.alreadyVerified,
+    dryRun: data?.dryRun,
   }
 }

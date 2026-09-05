@@ -17,7 +17,7 @@ import { useAuth } from '@/hooks/useAuth'
 import { useToast } from '@/hooks/use-toast'
 import { parseApiResponse } from '@/lib/safeJson'
 import { formatCents, centsFromDollars, dollarsFromCents } from '@/lib/currency'
-import { ArrowLeft, Save, ExternalLink, RefreshCw } from 'lucide-react'
+import { ArrowLeft, Save, ExternalLink, RefreshCw, CreditCard, Trash2 } from 'lucide-react'
 import { BeltBadge, type BeltTier } from '@/components/marketplace/BeltBadge'
 
 type Profile = {
@@ -43,6 +43,15 @@ type Profile = {
   stripeConnectId: string | null
 }
 
+type SavedCard = {
+  id: string
+  brand: string
+  last4: string
+  expMonth: number
+  expYear: number
+  isDefault: boolean
+}
+
 export default function AnalystSettingsPage() {
   const searchParams = useSearchParams()
   const { user, loading: authLoading } = useAuth()
@@ -51,6 +60,9 @@ export default function AnalystSettingsPage() {
   const [saving, setSaving] = useState(false)
   const [connectLoading, setConnectLoading] = useState(false)
   const [profile, setProfile] = useState<Profile | null>(null)
+  const [cards, setCards] = useState<SavedCard[]>([])
+  const [cardsLoading, setCardsLoading] = useState(true)
+  const [cardBusy, setCardBusy] = useState(false)
 
   // Form state (initialized from profile once loaded)
   const [enabled, setEnabled] = useState(false)
@@ -61,6 +73,19 @@ export default function AnalystSettingsPage() {
   const [directHireEnabled, setDirectHireEnabled] = useState(false)
   const [directHireRate, setDirectHireRate] = useState('0')
   const [maxCapacity, setMaxCapacity] = useState('3')
+
+  const loadCards = useCallback(async () => {
+    setCardsLoading(true)
+    try {
+      const res = await fetch('/api/billing/payment-methods', { credentials: 'include' })
+      const data = await parseApiResponse<{ cards?: SavedCard[] }>(res)
+      setCards(Array.isArray(data.cards) ? data.cards : [])
+    } catch {
+      setCards([])
+    } finally {
+      setCardsLoading(false)
+    }
+  }, [])
 
   const load = useCallback(async () => {
     try {
@@ -86,16 +111,72 @@ export default function AnalystSettingsPage() {
     }
   }, [toast])
 
-  useEffect(() => { if (!authLoading && user) load() }, [authLoading, user, load])
+  useEffect(() => {
+    if (!authLoading && user) {
+      void load()
+      void loadCards()
+    }
+  }, [authLoading, user, load, loadCards])
 
   useEffect(() => {
     const connect = searchParams.get('connect')
     if (connect === 'return' || connect === 'refresh') {
       void refreshConnect()
     }
+    const card = searchParams.get('card')
+    if (card === 'success') {
+      toast({ title: 'Card saved', description: 'You can pay marketplace jobs with this card.' })
+      void loadCards()
+    } else if (card === 'cancelled') {
+      toast({ title: 'Card setup cancelled' })
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams])
 
+  async function startAddCard() {
+    setCardBusy(true)
+    try {
+      const res = await fetch('/api/billing/setup-payment-method', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      })
+      const data = await parseApiResponse<{ url?: string }>(res)
+      if (!data.url) throw new Error('No setup URL')
+      window.location.assign(data.url)
+    } catch (err) {
+      toast({
+        title: 'Could not start card setup',
+        description: err instanceof Error ? err.message : 'Unknown',
+        variant: 'destructive',
+      })
+      setCardBusy(false)
+    }
+  }
+
+  async function removeCard(paymentMethodId: string) {
+    setCardBusy(true)
+    try {
+      const res = await fetch('/api/billing/payment-methods', {
+        method: 'DELETE',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paymentMethodId }),
+      })
+      await parseApiResponse(res)
+      toast({ title: 'Card removed' })
+      await loadCards()
+    } catch (err) {
+      toast({
+        title: 'Could not remove card',
+        description: err instanceof Error ? err.message : 'Unknown',
+        variant: 'destructive',
+      })
+    } finally {
+      setCardBusy(false)
+    }
+  }
   async function refreshConnect() {
     setConnectLoading(true)
     try {
@@ -194,6 +275,59 @@ export default function AnalystSettingsPage() {
 
       <Card>
         <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <CreditCard className="h-5 w-5" />
+            Payment methods
+          </CardTitle>
+          <p className="text-sm text-muted-foreground">
+            Add a card to pay for coaching jobs without entering it every time. Pro subscription is
+            separate — you do not need Pro to save a card.
+          </p>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {cardsLoading ? (
+            <Skeleton className="h-16 w-full" />
+          ) : cards.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              No cards saved yet. Add one to fund marketplace jobs in one tap.
+            </p>
+          ) : (
+            <ul className="space-y-2">
+              {cards.map((c) => (
+                <li
+                  key={c.id}
+                  className="flex items-center justify-between gap-3 rounded-md border border-border/60 px-3 py-2"
+                >
+                  <div className="text-sm">
+                    <span className="font-medium capitalize">{c.brand}</span>
+                    {' '}···· {c.last4}
+                    <span className="text-muted-foreground">
+                      {' '}· {c.expMonth}/{c.expYear}
+                      {c.isDefault ? ' · Default' : ''}
+                    </span>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    disabled={cardBusy}
+                    onClick={() => void removeCard(c.id)}
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          )}
+          <Button type="button" onClick={() => void startAddCard()} disabled={cardBusy}>
+            <CreditCard className="h-4 w-4 mr-1" />
+            {cardBusy ? 'Opening Stripe…' : 'Add card'}
+          </Button>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
           <CardTitle>Analyst Settings</CardTitle>
           <p className="text-sm text-muted-foreground">
             Opt in to claim bounties and accept direct hires. Your belt tier updates automatically
@@ -206,7 +340,7 @@ export default function AnalystSettingsPage() {
           ) : (
             <>
               {/* Stats panel */}
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div className="grid grid-cols-2 gap-3">
                 <Stat label="Belt" value={<BeltBadge tier={profile.beltTier} showLabel={false} />} />
                 <Stat label="Jobs" value={String(profile.jobsCompleted)} />
                 <Stat label="Rating" value={profile.avgOverall.toFixed(1)} />
@@ -233,7 +367,7 @@ export default function AnalystSettingsPage() {
                 />
               </div>
 
-              <div className="grid sm:grid-cols-2 gap-4">
+              <div className="grid gap-4">
                 <div>
                   <label className="text-sm font-medium mb-1.5 block">Specialties</label>
                   <Input
@@ -253,7 +387,7 @@ export default function AnalystSettingsPage() {
                 </div>
               </div>
 
-              <div className="grid sm:grid-cols-2 gap-4">
+              <div className="grid gap-4">
                 <div>
                   <label className="text-sm font-medium mb-1.5 block">Turnaround (hours)</label>
                   <Input

@@ -1,17 +1,54 @@
 import { NextResponse } from 'next/server'
 import { aiGuard, aiErrorResponse } from '@/lib/ai/aiGuard'
+import { isNoClipChatRequest } from '@/lib/noClipChatUsage'
 import {
   enforceVideoAnalysis,
   extractFightVideoQuotaContext,
   fightActionConsumesVideoQuota,
   fightActionToQuotaBucket,
   extractChatClipKey,
-  enforceClipQuestionLimit,
+  assertClipQuestionAvailable,
+  incrementClipQuestion,
+  getClipQuestionUsage,
+  QUESTIONS_PER_CLIP,
+  resolveVideoTierLimits,
 } from '@/lib/musashiUsage'
+import {
+  commitVideoAnalysisCredit,
+  releaseVideoAnalysisCredit,
+  reserveVideoAnalysisCredit,
+  setReservedVideoAnalysisDuration,
+} from '@/lib/videoAnalysisSessions'
 import { requireUser, type MusashiUser } from '@/lib/musashiAuth'
 import { composeSystemPrompt, DEFAULT_PROMPTS } from '@/lib/aiClient'
 import { getDisciplinePrompt } from '@/lib/disciplinePrompts'
-import { buildCoachBrainBlock } from '@/lib/coachBrain/coachBrain'
+import { buildCoachBrainBlock, resolveSportKey } from '@/lib/coachBrain/coachBrain'
+import {
+  formatVisionEvidenceBlock,
+  sanitizeVisionEvidence,
+  type VisionEvidence,
+} from '@/lib/evidence/visionEvidence'
+import { formatFighterNamingBlock, resolveFighterNaming } from '@/lib/fight/fighterNaming'
+import { fetchApprovedCorrectionsForClip, type AiCorrectionRow } from '@/lib/aiCorrections/store'
+import { formatApprovedCorrectionsBlock } from '@/lib/aiCorrections/formatBlock'
+import { computeVideoFingerprint } from '@/lib/aiCorrections/fingerprint'
+import {
+  applyTextOverride,
+  buildRetryEmphasisBlock,
+  findTextConflicts,
+} from '@/lib/aiCorrections/compliance'
+import { sanitizeCoachText } from '@/lib/feedback/coachFeedback'
+import {
+  isGrapplingClip,
+  buildGrapplingEvidenceLedgerPrompt,
+  buildGrapplingVerificationPrompt,
+  buildGrapplingDeepAnalysisPrompt,
+  buildGrapplingCoachingPrompt,
+  buildGrapplingTacticalAndBans,
+  buildGrapplingLedgerFallbackReport,
+  GRAPPLING_LEDGER_RESPONSE_SCHEMA,
+  MUSASHI_BJJ_DEEP_ANALYSIS_SYSTEM,
+} from '@/lib/grapplingAnalysisPrompt'
 import {
   MUSASHI_DEEP_ANALYSIS_SYSTEM,
   COMET_STYLE_ANALYSIS_SYSTEM,
@@ -29,6 +66,7 @@ import {
 } from '@/lib/fightAnalysisPrompt'
 import { logger } from '@/lib/logger'
 import { readSecretEnv } from '@/lib/env'
+import { getServerSecret } from '@/lib/cloudflare/secrets'
 import { getKnowledgeContext, logActivity } from '@/lib/musashiLibrary'
 
 const debugLog = (msg: string, ctx?: Record<string, unknown>) => {
@@ -44,14 +82,41 @@ import { upsertRetrievalDoc } from '@/lib/retrieval/d1Store'
 import { embedText } from '@/lib/ai/gemini-embed'
 import { resolvedModels } from '@/lib/gemini/models'
 import { getDbOrNull } from '@/lib/db'
+import { getDb } from '@/lib/marketplace/types'
+import {
+  readUploadedAssetBytes,
+  readUploadedAssetStream,
+  storeNormalizedAnalysisAsset,
+} from '@/lib/storage/assets'
+import {
+  asVideoIngestionError,
+  normalizeVideoOnServer,
+  resolveRequestedVideoDurationSec,
+  VideoIngestionError,
+} from '@/lib/videoIngestion'
 import {
   buildGeminiReflexFrameRequest,
+  buildReflexFramePrompt,
   extractGeminiText,
   parseReflexFrameJson,
   type ReflexFrameContext,
 } from '@/lib/gemini/reflex-frame'
+import {
+  buildGeminiVideoFilePart,
+  buildGeminiVideoInlinePart,
+  geminiVideoFpsForSport,
+  isInlineVideoEligible,
+  normalizeClipWindow,
+  GEMINI_MEDIA_RESOLUTION_LOW,
+} from '@/lib/gemini/videoFilePart'
 
-export const maxDuration = 60
+export const maxDuration = 300
+
+const geminiVideoFpsHint = (context: { requestedFPS?: number; discipline?: string; sport?: string } | null | undefined) => {
+  const requested = Number(context?.requestedFPS)
+  if (Number.isFinite(requested) && requested > 0) return requested
+  return geminiVideoFpsForSport(context?.discipline || context?.sport)
+}
 
 const summarizePatternEvidence = (patterns: unknown): string => {
   if (!patterns) return ''
@@ -223,6 +288,7 @@ const hasMeaningfulLedgerData = (ledger: FactualLedger | null): boolean => {
   ]
 
   if (listFields.some((list) => list.length > 0)) return true
+  if (Array.isArray(ledger.video_analysis_ledger) && ledger.video_analysis_ledger.length > 0) return true
   if (Array.isArray(ledger.fighters) && ledger.fighters.length > 0) return true
   if (Array.isArray(ledger.movement_map) && ledger.movement_map.length > 0) return true
   if (typeof ledger.shot_count_total === 'number' && ledger.shot_count_total > 0) return true
@@ -986,7 +1052,7 @@ const handleAnalyzeFrame = async (formData: FormData, user: any) => {
   }
 
   const openaiKey = readSecretEnv('OPENAI_API_KEY')
-  const geminiKey = readSecretEnv('GEMINI_API_KEY')
+  const geminiKey = await getServerSecret('GEMINI_API_KEY')
   const provider = (process.env.FIGHT_LLM_PROVIDER || '').toLowerCase()
 
   if (!openaiKey && !geminiKey) {
@@ -1136,13 +1202,102 @@ const handleChat = async (body: any, user: any) => {
     throw new Error('Missing messages')
   }
 
+  // Inline-bytes fast path for chat / initial analysis: when the client has a
+  // normalized R2 asset under 20MB (and no Files URI yet), load bytes once and
+  // attach as videoData so the first Coach Cards pass skips ACTIVE polling.
+  if (
+    context?.nativeVideo &&
+    !context.videoFileUri &&
+    !context.videoData &&
+    typeof context.normalizedAssetId === 'string' &&
+    context.normalizedAssetId.trim()
+  ) {
+    try {
+      const db = getDbOrNull()
+      if (db && user?.id) {
+        const asset = await readUploadedAssetBytes(db, {
+          assetId: String(context.normalizedAssetId).trim(),
+          userId: user.id,
+          isAdmin: user.role === 'shogun',
+        })
+        if (isInlineVideoEligible(asset.sizeBytes)) {
+          context.videoData = asset.bytes.toString('base64')
+          context.videoMimeType = asset.contentType || context.videoMimeType || 'video/mp4'
+          logger.info('Chat inline-bytes fast path', {
+            assetId: context.normalizedAssetId,
+            sizeBytes: asset.sizeBytes,
+          })
+        }
+      }
+    } catch (inlineErr) {
+      logger.warn('Chat inline asset load failed', {
+        detail: inlineErr instanceof Error ? inlineErr.message : String(inlineErr),
+      })
+    }
+  }
+
   const userMessages = messages.map((m: any) => ({ role: m.role, content: m.content }))
   const isInitialVideoAnalysisRequest = Boolean(body?.context?.nativeVideo) &&
     userMessages.length === 1 &&
     userMessages[0]?.role === 'user'
 
+  // Vision-first grounded chat: the client sends the Pass-1 evidence ledger
+  // instead of the tape. Chat answers ground on it with ZERO video re-sends.
+  let chatVisionEvidence: VisionEvidence | null = null
+  if (context?.visionEvidence && typeof context.visionEvidence === 'object') {
+    try {
+      chatVisionEvidence = sanitizeVisionEvidence(context.visionEvidence as VisionEvidence)
+    } catch {
+      chatVisionEvidence = null
+    }
+  }
+
+  // Teach Musashi in chat: approved exact-clip corrections (same owner) are
+  // loaded before answering and enforced on the final reply (scan → retry →
+  // targeted override), exactly like Coach Cards.
+  let chatCorrections: AiCorrectionRow[] = []
+  try {
+    const dbCorr = getDbOrNull()
+    const sportKey =
+      resolveSportKey(context?.discipline || context?.sport) ||
+      String(context?.discipline || context?.sport || '').trim()
+    const clipId = String(context?.normalizedAssetId || context?.clipAssetRef || '').trim() || null
+    if (dbCorr && user?.id && sportKey && clipId) {
+      let fingerprint: string | null = null
+      try {
+        fingerprint = await computeVideoFingerprint({
+          db: dbCorr,
+          assetId: clipId,
+          userId: user.id,
+          isAdmin: user.role === 'shogun',
+          durationMs:
+            typeof context?.clipDuration === 'number' && context.clipDuration > 0
+              ? Math.round(context.clipDuration * 1000)
+              : null,
+        })
+      } catch {
+        fingerprint = null
+      }
+      chatCorrections = await fetchApprovedCorrectionsForClip({
+        db: dbCorr,
+        ownerUserId: user.id,
+        clipId,
+        videoFingerprint: fingerprint,
+        sport: sportKey,
+        rangeStartMs: 0,
+        rangeEndMs: null,
+      })
+    }
+  } catch (corrErr) {
+    logger.warn('Chat corrections fetch failed (non-fatal)', {
+      detail: corrErr instanceof Error ? corrErr.message : String(corrErr),
+    })
+  }
+  const chatCorrectionsBlock =
+    chatCorrections.length > 0 ? '\n' + formatApprovedCorrectionsBlock(chatCorrections) + '\n' : ''
+
   const openaiKey = readSecretEnv('OPENAI_API_KEY')
-  const geminiKey = readSecretEnv('GEMINI_API_KEY')
+  const geminiKey = await getServerSecret('GEMINI_API_KEY')
   const provider = (process.env.FIGHT_LLM_PROVIDER || '').toLowerCase()
 
   logger.debug('API configuration', { hasOpenAI: !!openaiKey, hasGemini: !!geminiKey, provider })
@@ -1184,6 +1339,12 @@ const handleChat = async (body: any, user: any) => {
   } else if (context?.focusTarget === 'both') {
     coachingMode = 'strategist'
     focusDescription = 'both fighters - focus on interplay, range management, and strategic positioning'
+  } else if (context?.focusTarget === 'unsure') {
+    coachingMode = 'strategist'
+    focusDescription =
+      'fighter identity UNCERTAIN - the user could not identify which fighter is theirs. ' +
+      'Cautiously coach the most visible/coachable athlete (name them by visible traits, e.g. "the fighter in dark shorts"), ' +
+      'or coach the exchange as a whole if identity stays unclear. Avoid strong identity-based claims'
   }
 
   // Extract fighter information for consistent referencing
@@ -1274,7 +1435,10 @@ const handleChat = async (body: any, user: any) => {
     '- Use second person ("you") when coaching the focused fighter, third person for the opponent.\n' +
     '- Use commands: "do X", "stop Y", "when Z happens, hit W" — not "consider", "perhaps", "you might want to".\n' +
     '- No motivational filler: no "great work", "keep it up" — only corrections and tactics.\n' +
-    '- Reference what you SEE, not abstractions.\n'
+    '- Reference what you SEE, not abstractions.\n' +
+    '- LENGTH (HARD): Default replies ≤120 words — a reporter\'s lead line, then max 4 short lines (cues/answers). Go longer ONLY if the user explicitly asks for depth ("explain in detail", "break down everything", "in full detail").\n' +
+    '- Presets (Gameplan / Counters / Corner advice): keep their structure, but each section max 2 lines.\n' +
+    '- TIME FORMAT (HARD): Write times as seconds into the clip — "at 0:04" or "4.2s in". NEVER raw milliseconds (no "2135ms").\n'
 
   const focusAwareSystem = focusAwareSystemBase + disciplineSection + coachBrainSection + CONDENSED_FRAMEWORKS
 
@@ -1353,7 +1517,42 @@ const handleChat = async (body: any, user: any) => {
     }
   }
 
-  const focusSystem = focusAwareSystem + '\n' + kinematicsBlock + factualLedgerBlock + analysisBlock + strategyBlock + knowledgeBlock + taxonomyBlock + patternBlock + personalizedBlock
+  // Empty-evidence honesty gate: when a clip is loaded in the app but was
+  // never attached as native video, the model cannot see the footage. With no
+  // pose frames and an empty ledger either, anything it says about the clip
+  // is invented — force it to say it can't see the clip instead.
+  let evidenceStatusBlock = ''
+  const clientEvidence = context?.evidence
+  const hasVideoAttachment = Boolean(context?.nativeVideo && (context?.videoFileUri || context?.videoData))
+  // A Pass-1 evidence ledger IS clip evidence — the honesty gate must not fire.
+  if (clientEvidence?.clipLoaded && !hasVideoAttachment && !chatVisionEvidence) {
+    const evidencePoseFrames = Number(clientEvidence.poseFrames) || 0
+    const evidenceLedgerEvents = Number(clientEvidence.ledgerEvents) || 0
+    if (evidencePoseFrames < 4 && evidenceLedgerEvents === 0) {
+      evidenceStatusBlock =
+        '\n\nEVIDENCE STATUS: NO CLIP EVIDENCE AVAILABLE (CRITICAL — OVERRIDES ALL COACHING INSTRUCTIONS ABOVE):\n' +
+        '- The user has a clip loaded in the app, but you have NO access to it: the video is not attached to this request, pose tracking produced no usable frames, and the evidence ledger is empty.\n' +
+        '- You MUST NOT describe, summarize, or coach the content of this clip. Do not name positions, submissions, strikes, exchanges, techniques, or timestamps from it — anything you say about the clip would be invented.\n' +
+        '- If asked what is happening in the clip (or for coaching on it), say plainly that you cannot see the clip yet, then tell them how to fix it: press Play so tracking can run, wait for Ready with real frames, or run "Full Clip Analysis" to attach the video. If the player shows a black screen, the trim/upload likely failed — re-upload the clip.\n' +
+        '- You MAY still answer general fight questions that do not depend on this clip.\n'
+    } else {
+      evidenceStatusBlock =
+        '\n\nEVIDENCE STATUS: POSE/LEDGER DATA ONLY (no video attached to this request):\n' +
+        '- You cannot see the actual footage. Your ONLY clip evidence is the pose/kinematics/ledger data in this prompt.\n' +
+        '- Never invent visual details (colors, gear, environment, expressions). Coach strictly from the provided data, and state uncertainty when it is thin or occluded (common in grappling).\n'
+    }
+  }
+
+  // Vision evidence block: the primary clip grounding for vision-first chat.
+  const visionEvidenceChatBlock = chatVisionEvidence
+    ? '\n\n' +
+      formatVisionEvidenceBlock(chatVisionEvidence) +
+      '\n\n' +
+      formatFighterNamingBlock(resolveFighterNaming(chatVisionEvidence)) +
+      '\n- You are answering from this evidence ledger (the tape was already watched). Cite timestamps from it. Say plainly when something is outside the evidence.\n'
+    : ''
+
+  const focusSystem = focusAwareSystem + evidenceStatusBlock + visionEvidenceChatBlock + chatCorrectionsBlock + '\n' + kinematicsBlock + factualLedgerBlock + analysisBlock + strategyBlock + knowledgeBlock + taxonomyBlock + patternBlock + personalizedBlock
   const system = focusSystem
 
   try {
@@ -1381,7 +1580,16 @@ const handleChat = async (body: any, user: any) => {
       // ==========================================
       if (isNativeVideo && isFirstMessage) {
         logger.info('Triggering two-pass deep video analysis pipeline')
-        
+
+        // Grappling clips route through the sport-aware grappling pipeline:
+        // grappling flash scan (strict position enums) + BJJ deep-pass system
+        // prompt that treats pose-derived striking events as compiler artifacts.
+        const useGrappling = isGrapplingClip({
+          discipline: context?.discipline,
+          clipType: context?.clipType,
+        })
+        if (useGrappling) logger.info('Grappling clip detected — using grappling analysis prompts')
+
         // PASS 1: Flash Scan
         const flashModel = useCometStyle
           ? (process.env.GEMINI_COMET_FLASH_MODEL || 'gemini-2.5-flash')
@@ -1389,21 +1597,40 @@ const handleChat = async (body: any, user: any) => {
         const flashUrl = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(flashModel)}:generateContent?key=${encodeURIComponent(geminiKey)}`
         
         const flashParts: any[] = []
+        const chatVideoOpts = {
+          window: { startSec: context.startSec, endSec: context.endSec },
+          sport: context.discipline || context.sport || null,
+          mediaResolution: 'low' as const,
+        }
         if (context.videoFileUri && isValidFileUri(context.videoFileUri)) {
-          flashParts.push({ fileData: { fileUri: context.videoFileUri, mimeType: context.videoMimeType || 'video/mp4' } })
+          flashParts.push(buildGeminiVideoFilePart(
+            context.videoFileUri,
+            context.videoMimeType || 'video/mp4',
+            chatVideoOpts,
+          ))
         } else if (context.videoData) {
-          flashParts.push({ inlineData: { mimeType: context.videoMimeType || 'video/mp4', data: context.videoData } })
+          flashParts.push(buildGeminiVideoInlinePart(
+            context.videoData,
+            context.videoMimeType || 'video/mp4',
+            chatVideoOpts,
+          ))
         }
         flashParts.push({ text: useCometStyle ? COMET_FLASH_SCAN_PROMPT : FLASH_SCAN_PROMPT })
 
         let scanData: ScanData | null = null
-        try {
+        // The striking-oriented flash scan (stances, shot counts) is skipped for
+        // grappling clips — the grappling evidence ledger below replaces it.
+        if (!useGrappling) try {
           const flashResp = await fetch(flashUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               contents: [{ role: 'user', parts: flashParts }],
-              generationConfig: { temperature: 0.3, responseMimeType: 'application/json' }
+              generationConfig: {
+                temperature: 0.3,
+                responseMimeType: 'application/json',
+                mediaResolution: GEMINI_MEDIA_RESOLUTION_LOW,
+              },
             })
           })
           const flashData = await safeParseResponse(flashResp) as any
@@ -1428,9 +1655,17 @@ const handleChat = async (body: any, user: any) => {
         let factualLedgerChat: FactualLedger | null = null
         const ledgerVideoParts: any[] = []
         if (context.videoFileUri && isValidFileUri(context.videoFileUri)) {
-          ledgerVideoParts.push({ fileData: { fileUri: context.videoFileUri, mimeType: context.videoMimeType || 'video/mp4' } })
+          ledgerVideoParts.push(buildGeminiVideoFilePart(
+            context.videoFileUri,
+            context.videoMimeType || 'video/mp4',
+            chatVideoOpts,
+          ))
         } else if (context.videoData) {
-          ledgerVideoParts.push({ inlineData: { mimeType: context.videoMimeType || 'video/mp4', data: context.videoData } })
+          ledgerVideoParts.push(buildGeminiVideoInlinePart(
+            context.videoData,
+            context.videoMimeType || 'video/mp4',
+            chatVideoOpts,
+          ))
         }
         if (ledgerVideoParts.length > 0) {
           const poseEvidenceText = summarizePoseEvidenceForPrompt(context?.poseEvidence)
@@ -1441,11 +1676,16 @@ const handleChat = async (body: any, user: any) => {
             const lp = [
               ...ledgerVideoParts,
               {
-                text: buildEvidenceLedgerPrompt({
-                  clipDuration: context?.clipDuration,
-                  focusTarget: ledgerFocus,
-                  poseEvidenceText,
-                }),
+                text: useGrappling
+                  ? buildGrapplingEvidenceLedgerPrompt({
+                      clipDuration: context?.clipDuration,
+                      focusTarget: ledgerFocus,
+                    })
+                  : buildEvidenceLedgerPrompt({
+                      clipDuration: context?.clipDuration,
+                      focusTarget: ledgerFocus,
+                      poseEvidenceText,
+                    }),
               },
             ]
             const ledgerResp = await fetchWithTimeout(ledgerFlashUrl, {
@@ -1453,7 +1693,13 @@ const handleChat = async (body: any, user: any) => {
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
                 contents: [{ role: 'user', parts: lp }],
-                generationConfig: { temperature: 0.15, responseMimeType: 'application/json' },
+                generationConfig: {
+                  temperature: 0.15,
+                  responseMimeType: 'application/json',
+                  mediaResolution: GEMINI_MEDIA_RESOLUTION_LOW,
+                  // Strict enums stop hallucinated positions on grappling clips.
+                  ...(useGrappling ? { responseSchema: GRAPPLING_LEDGER_RESPONSE_SCHEMA } : {}),
+                },
               }),
             }, 30000)
             if (ledgerResp.ok) {
@@ -1464,17 +1710,26 @@ const handleChat = async (body: any, user: any) => {
           } catch {
             /* non-fatal */
           }
-          factualLedgerChat = mergePoseEvidenceIntoLedger(factualLedgerChat, context?.poseEvidence)
+          // Pose data is unreliable on grappling footage (occlusion) — never merge it there.
+          if (!useGrappling) {
+            factualLedgerChat = mergePoseEvidenceIntoLedger(factualLedgerChat, context?.poseEvidence)
+          }
           if (!hasMeaningfulLedgerData(factualLedgerChat)) {
             try {
               const ep = [
                 ...ledgerVideoParts,
                 {
-                  text: buildEmergencyLedgerPrompt({
-                    clipDuration: context?.clipDuration,
-                    focusTarget: ledgerFocus,
-                    poseEvidenceText,
-                  }),
+                  text: useGrappling
+                    ? buildGrapplingEvidenceLedgerPrompt({
+                        clipDuration: context?.clipDuration,
+                        focusTarget: ledgerFocus,
+                        attempt: 'emergency',
+                      })
+                    : buildEmergencyLedgerPrompt({
+                        clipDuration: context?.clipDuration,
+                        focusTarget: ledgerFocus,
+                        poseEvidenceText,
+                      }),
                 },
               ]
               const recoveryResp = await fetchWithTimeout(ledgerFlashUrl, {
@@ -1497,29 +1752,46 @@ const handleChat = async (body: any, user: any) => {
               /* non-fatal */
             }
           }
-          factualLedgerChat = mergePoseEvidenceIntoLedger(factualLedgerChat, context?.poseEvidence)
-          if (!hasMeaningfulLedgerData(factualLedgerChat)) {
-            factualLedgerChat = buildMinimalLedgerFromPoseEvidence(context?.poseEvidence)
+          if (!useGrappling) {
+            factualLedgerChat = mergePoseEvidenceIntoLedger(factualLedgerChat, context?.poseEvidence)
+            if (!hasMeaningfulLedgerData(factualLedgerChat)) {
+              factualLedgerChat = buildMinimalLedgerFromPoseEvidence(context?.poseEvidence)
+            }
           }
         }
 
         // PASS 2: Deep Analysis
         const poseData = safePatternEvidence || undefined
-        const deepPromptText = useCometStyle
+        const deepPromptText = useGrappling
+          ? buildGrapplingDeepAnalysisPrompt(factualLedgerChat)
+          : useCometStyle
           ? buildCometDeepAnalysisPrompt(scanData, kinematicsDetails)
           : buildDeepAnalysisPrompt(scanData, kinematicsDetails, poseData)
 
         const deepParts: any[] = []
         if (context.videoFileUri && isValidFileUri(context.videoFileUri)) {
-          deepParts.push({ fileData: { fileUri: context.videoFileUri, mimeType: context.videoMimeType || 'video/mp4' } })
+          deepParts.push(buildGeminiVideoFilePart(
+            context.videoFileUri,
+            context.videoMimeType || 'video/mp4',
+            chatVideoOpts,
+          ))
         } else if (context.videoData) {
-          deepParts.push({ inlineData: { mimeType: context.videoMimeType || 'video/mp4', data: context.videoData } })
+          deepParts.push(buildGeminiVideoInlinePart(
+            context.videoData,
+            context.videoMimeType || 'video/mp4',
+            chatVideoOpts,
+          ))
         }
         deepParts.push({ text: deepPromptText })
 
         const reqContents = [{ role: 'user', parts: deepParts }]
 
-        const fullSystemPromptBase = useCometStyle
+        const fullSystemPromptBase = useGrappling
+          ? [
+              MUSASHI_BJJ_DEEP_ANALYSIS_SYSTEM.trim(),
+              coachBrainSection.trim(),
+            ].filter(Boolean).join('\n\n')
+          : useCometStyle
           ? [
               COMET_STYLE_ANALYSIS_SYSTEM.trim(),
               `GROUNDING RULES:
@@ -1540,18 +1812,25 @@ const handleChat = async (body: any, user: any) => {
               buildFirstPassPriorityBlock(coachingMode, focusDescription, fighterContext),
             ].filter(Boolean).join('\n\n')
 
-        const { tacticalAnchors, hardBans } = buildLedgerTacticalAndBans(factualLedgerChat)
+        const { tacticalAnchors, hardBans } = useGrappling
+          ? buildGrapplingTacticalAndBans(factualLedgerChat)
+          : buildLedgerTacticalAndBans(factualLedgerChat)
         const ledgerSystemAddon = factualLedgerChat
-          ? `\n\nFACTUAL LEDGER (source of truth — align Quick Scan and technique claims with this JSON):\n${JSON.stringify(factualLedgerChat, null, 2)}\n\nTACTICAL ANCHORS:\n${tacticalAnchors.join('\n')}\n\nHARD BANS:\n${hardBans.join('\n')}`
+          ? `\n\n${useGrappling ? 'VIDEOANALYSISLEDGER (ABSOLUTE SOURCE OF TRUTH for positions, transitions, and events)' : 'FACTUAL LEDGER (source of truth — align Quick Scan and technique claims with this JSON)'}:\n${JSON.stringify(factualLedgerChat, null, 2)}\n\nTACTICAL ANCHORS:\n${tacticalAnchors.join('\n')}\n\nHARD BANS:\n${hardBans.join('\n')}`
           : ''
         const fullSystemPrompt = fullSystemPromptBase + ledgerSystemAddon
 
         const doDeepChat = async (modelId: string, useSystemInstruction: boolean) => {
            const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelId)}:generateContent?key=${encodeURIComponent(geminiKey)}`
            logger.aiRequest(modelId, 'deep-video-analysis')
+           const deepGenConfig = {
+             temperature: 0.55,
+             maxOutputTokens: 4096,
+             mediaResolution: GEMINI_MEDIA_RESOLUTION_LOW,
+           }
            const body: Record<string, unknown> = useSystemInstruction 
-             ? { systemInstruction: { parts: [{ text: fullSystemPrompt }] }, contents: reqContents, generationConfig: { temperature: 0.55, maxOutputTokens: 4096 } }
-             : { contents: [{ role: 'user', parts: [{ text: fullSystemPrompt }, ...deepParts] }], generationConfig: { temperature: 0.55, maxOutputTokens: 4096 } }
+             ? { systemInstruction: { parts: [{ text: fullSystemPrompt }] }, contents: reqContents, generationConfig: deepGenConfig }
+             : { contents: [{ role: 'user', parts: [{ text: fullSystemPrompt }, ...deepParts] }], generationConfig: deepGenConfig }
              
            const resp = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
            let data: any
@@ -1563,8 +1842,10 @@ const handleChat = async (body: any, user: any) => {
            return { resp, data }
         }
 
+        // gemini-2.5-pro is retired ("no longer available to new users") —
+        // default to the same pro model the rest of the codebase uses.
         const initialModel = useCometStyle
-          ? (process.env.GEMINI_COMET_MODEL || 'gemini-2.5-pro')
+          ? (process.env.GEMINI_COMET_MODEL || resolvedModels.pro())
           : model
 
         let { resp, data } = await doDeepChat(initialModel, true)
@@ -1576,7 +1857,9 @@ const handleChat = async (body: any, user: any) => {
           data = fallback.data
         }
         
-        if (!resp.ok && (resp.status === 404 || resp.status === 500)) {
+        // 429/503 included: free-tier keys have ZERO pro-model quota — without
+        // falling back to Flash here, every deep chat dies at Google's door.
+        if (!resp.ok && (resp.status === 404 || resp.status === 429 || resp.status === 500 || resp.status === 503)) {
           for (const fallbackModel of fallbackModels) {
             const fallback = await doDeepChat(fallbackModel, true)
             resp = fallback.resp
@@ -1591,7 +1874,14 @@ const handleChat = async (body: any, user: any) => {
 
         let finalMessage =
           data?.candidates?.[0]?.content?.parts?.map((p: any) => p.text).filter(Boolean).join('\n') || 'No response.'
-        finalMessage = await rewriteCoachingToMatchLedger(finalMessage, factualLedgerChat, geminiKey, initialModel)
+        // The contradiction detector checks striking geometry (stances, movement
+        // direction) — not applicable to grappling timelines, so skip it there.
+        if (!useGrappling) {
+          finalMessage = await rewriteCoachingToMatchLedger(finalMessage, factualLedgerChat, geminiKey, initialModel)
+        }
+        // Chat replies are user-facing prose. If the model leaked the internal
+        // coaching-JSON contract, convert it to clean coaching text server-side.
+        finalMessage = sanitizeCoachText(finalMessage)
         return { message: finalMessage }
       }
 
@@ -1641,16 +1931,25 @@ const handleChat = async (body: any, user: any) => {
       const firstUserParts: any[] = []
 
       if (context?.nativeVideo && context?.videoFileUri && isValidFileUri(context.videoFileUri)) {
-        const fps = context.requestedFPS || 5
-        firstUserParts.push({
-          fileData: {
-            fileUri: context.videoFileUri,
-            mimeType: context.videoMimeType || 'video/mp4',
+        const fps = context.requestedFPS || geminiVideoFpsHint(context)
+        const window = normalizeClipWindow(context.startSec, context.endSec)
+        firstUserParts.push(buildGeminiVideoFilePart(
+          context.videoFileUri,
+          context.videoMimeType || 'video/mp4',
+          {
+            window: { startSec: context.startSec, endSec: context.endSec },
+            sport: context.discipline || context.sport || null,
+            fps,
+            mediaResolution: 'low',
           },
-        })
+        ))
+        const windowHint = window
+          ? `- Analyzing the selected window ${window.startSec.toFixed(1)}s–${window.endSec.toFixed(1)}s (${(window.endSec - window.startSec).toFixed(1)}s)\n`
+          : ''
         firstUserParts.push({
           text: `\n🎬 NATIVE VIDEO ANALYSIS MODE:\n` +
             `- Processing ${context.clipDuration?.toFixed(1)}s video clip with Gemini's native multimodal understanding\n` +
+            windowHint +
             `- Sample the video at approximately ${fps} frames per second for detailed motion capture\n` +
             `- You are analyzing the COMPLETE video with full temporal understanding\n` +
             `- Analyze: Every frame, complete motion sequences, technique execution, footwork, hand positioning, body mechanics, tactical flow, timing, rhythm, and fighting patterns\n` +
@@ -1659,15 +1958,19 @@ const handleChat = async (body: any, user: any) => {
             `- Use timestamps (MM:SS format) when referencing specific moments`
         })
       } else if (context?.nativeVideo && context?.videoData) {
-        const fps = context.requestedFPS || 5
+        const fps = context.requestedFPS || geminiVideoFpsHint(context)
         const videoB64 = toInlineBase64(context.videoData)
         if (videoB64) {
-          firstUserParts.push({
-            inlineData: {
-              mimeType: context.videoMimeType || 'video/mp4',
-              data: videoB64,
+          firstUserParts.push(buildGeminiVideoInlinePart(
+            videoB64,
+            context.videoMimeType || 'video/mp4',
+            {
+              window: { startSec: context.startSec, endSec: context.endSec },
+              sport: context.discipline || context.sport || null,
+              fps,
+              mediaResolution: 'low',
             },
-          })
+          ))
         }
         firstUserParts.push({
           text: `\n🎬 NATIVE VIDEO (INLINE) MODE:\n` +
@@ -1729,9 +2032,16 @@ const handleChat = async (body: any, user: any) => {
         const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelId)}:generateContent?key=${encodeURIComponent(geminiKey)}`
         logger.aiRequest(modelId, 'chat', { hasVideo: !!context?.nativeVideo })
         const reqContents = useSystemInstruction ? contents : contentsWithSystemInFirst
+        const generationConfig: Record<string, unknown> = {
+          temperature: generationTemperature,
+          // v1beta-safe global setting. Never attach mediaResolution on Parts.
+          ...((context?.nativeVideo && (context?.videoFileUri || context?.videoData))
+            ? { mediaResolution: GEMINI_MEDIA_RESOLUTION_LOW }
+            : {}),
+        }
         const body: Record<string, unknown> = useSystemInstruction
-          ? { systemInstruction: { parts: [{ text: systemInstructionText }] }, contents: reqContents, generationConfig: { temperature: generationTemperature } }
-          : { contents: reqContents, generationConfig: { temperature: generationTemperature } }
+          ? { systemInstruction: { parts: [{ text: systemInstructionText }] }, contents: reqContents, generationConfig }
+          : { contents: reqContents, generationConfig }
         const resp = await fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1759,7 +2069,9 @@ const handleChat = async (body: any, user: any) => {
           data = fallback.data
         }
       }
-      if (!resp.ok && (resp.status === 404 || resp.status === 500)) {
+      // 429/503 included: free-tier keys have ZERO pro-model quota — fall back
+      // to Flash instead of failing the whole chat.
+      if (!resp.ok && (resp.status === 404 || resp.status === 429 || resp.status === 500 || resp.status === 503)) {
         for (const fallbackModel of fallbackModels) {
           if (model === fallbackModel) continue
           logger.warn('Gemini model failed, retrying with fallback', { model, status: resp.status, fallback: fallbackModel })
@@ -1777,7 +2089,54 @@ const handleChat = async (body: any, user: any) => {
       }
 
       const text = data?.candidates?.[0]?.content?.parts?.map((p: any) => p.text).filter(Boolean).join('\n') || 'No response.'
-      return { message: text }
+      // Never return the internal coaching-JSON contract as a chat message.
+      let finalText = sanitizeCoachText(text)
+
+      // Teach compliance for chat: scan → retry once with the violations named
+      // → targeted text override. "Applied" is only reported when the final
+      // reply is actually free of the rejected labels.
+      let chatCompliance: 'no_corrections' | 'clean' | 'retried_clean' | 'overridden' | 'conflict' =
+        chatCorrections.length > 0 ? 'clean' : 'no_corrections'
+      if (chatCorrections.length > 0) {
+        let conflicts = findTextConflicts(finalText, chatCorrections)
+        if (conflicts.length > 0) {
+          logger.warn('Chat reply conflicts with approved corrections — retrying once', {
+            conflicts: conflicts.map((c) => c.incorrectLabel),
+          })
+          systemInstructionText += `\n${buildRetryEmphasisBlock(conflicts)}`
+          try {
+            const retry = await doGeminiChat(model, true)
+            if (retry.resp.ok) {
+              const retryText =
+                retry.data?.candidates?.[0]?.content?.parts?.map((p: any) => p.text).filter(Boolean).join('\n') || ''
+              if (retryText.trim()) {
+                finalText = sanitizeCoachText(retryText)
+                chatCompliance = 'retried_clean'
+              }
+            }
+          } catch {
+            /* retry is best-effort; the override below still enforces */
+          }
+          conflicts = findTextConflicts(finalText, chatCorrections)
+          if (conflicts.length > 0) {
+            const overridden = applyTextOverride(finalText, conflicts)
+            finalText = overridden.text
+            chatCompliance =
+              findTextConflicts(finalText, chatCorrections).length === 0 ? 'overridden' : 'conflict'
+          }
+        }
+      }
+
+      return {
+        message: finalText,
+        ...(chatCompliance !== 'no_corrections'
+          ? {
+              correctionCompliance: chatCompliance,
+              appliedCorrectionIds:
+                chatCompliance === 'conflict' ? [] : chatCorrections.map((c) => c.id),
+            }
+          : {}),
+      }
     }
 
     if (!openaiKey) {
@@ -1835,7 +2194,7 @@ const handleReflex = async (formData: FormData, user: any) => {
   }
 
   const openaiKey = readSecretEnv('OPENAI_API_KEY')
-  const geminiKey = readSecretEnv('GEMINI_API_KEY')
+  const geminiKey = await getServerSecret('GEMINI_API_KEY')
   const provider = (process.env.FIGHT_LLM_PROVIDER || '').toLowerCase()
 
   if (!openaiKey && !geminiKey) {
@@ -1868,39 +2227,19 @@ const handleReflex = async (formData: FormData, user: any) => {
   const b64 = arrayBufferToBase64(await file.arrayBuffer())
   const mime = file.type || 'image/jpeg'
 
-  let focusTarget: 'blue' | 'red' | 'both' = 'both'
+  let frameContext: ReflexFrameContext = {}
   if (context) {
     try {
       const ctx = JSON.parse(context)
-      const ft = ctx.focusTarget
-      if (ft === 'blue' || ft === 'A') focusTarget = 'blue'
-      else if (ft === 'red' || ft === 'B') focusTarget = 'red'
-      else if (ft === 'both') focusTarget = 'both'
+      frameContext = { ...ctx }
     } catch { /* ignore */ }
   }
 
-  const focusInstruction =
-    focusTarget === 'blue'
-      ? 'Focus your cues ONLY on the fighter in the BLUE corner (Fighter A). Ignore the red corner.\n'
-      : focusTarget === 'red'
-        ? 'Focus your cues ONLY on the fighter in the RED corner (Fighter B). Ignore the blue corner.\n'
-        : 'Focus on BOTH fighters. Give cues for whoever needs correction most.\n'
-
-  const system =
-    'You are Musashi Reflex Coach: stoic, brief, intense.\n' +
-    'Your job is micro-corrections only. No essays. No disclaimers.\n' +
-    'Output STRICT JSON only.\n' +
-    focusInstruction
-
-  const prompt =
-    system +
-    'Return STRICT JSON only with schema:\n' +
-    '{"cue": string, "focus": string}\n' +
-    'Rules:\n' +
+  const reflexPrompt =
+    buildReflexFramePrompt(frameContext) +
+    '\nReturn STRICT JSON only: {"cue": string, "focus": string}\n' +
     '- cue must be <= 8 words.\n' +
-    '- focus is one of: "guard", "feet", "timing", "range", "defense", "offense", "clinching", "unknown".\n' +
-    '- If uncertain, still give a best-effort cue and set focus="unknown".\n' +
-    (context ? `Context JSON:\n${context}\n` : '')
+    '- focus is one of: "guard", "feet", "timing", "range", "defense", "offense", "clinching", "unknown".\n'
 
   try {
     if (provider === 'gemini' || (!provider && geminiKey)) {
@@ -1908,27 +2247,18 @@ const handleReflex = async (formData: FormData, user: any) => {
         throw new Error('GEMINI_API_KEY not set')
       }
 
-      const model = process.env.GEMINI_REFLEX_MODEL || process.env.GEMINI_MODEL || 'gemini-3.1-pro-preview'
+      const model = resolvedModels.reflex()
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(geminiKey)}`
+      const requestBody = buildGeminiReflexFrameRequest({
+        imageBase64: b64,
+        mimeType: mime,
+        context: frameContext,
+      })
 
       const resp = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [
-            {
-              role: 'user',
-              parts: [
-                { text: prompt },
-                { inlineData: { mimeType: mime, data: b64 } }
-              ]
-            }
-          ],
-          generationConfig: {
-            temperature: 0.2,
-            responseMimeType: 'application/json'
-          }
-        })
+        body: JSON.stringify(requestBody),
       })
 
       const data: any = await safeParseResponse(resp)
@@ -1936,16 +2266,12 @@ const handleReflex = async (formData: FormData, user: any) => {
         throw new Error(data?.error?.message || 'Gemini request failed')
       }
 
-      const text = data?.candidates?.[0]?.content?.parts?.map((p: any) => p.text).filter(Boolean).join('\n') || ''
-      const parsed = jsonFromText(text)
-      
-      if (!parsed || typeof parsed.cue !== 'string') {
-        throw new Error('Failed to parse model response')
-      }
+      const text = extractGeminiText(data)
+      const parsed = parseReflexFrameJson(text)
 
       return {
-        cue: String(parsed.cue || '').trim() || 'Hands up.',
-        focus: typeof parsed.focus === 'string' ? parsed.focus : undefined
+        cue: parsed.cue.trim() || 'Hands up.',
+        focus: parsed.focus,
       }
     }
 
@@ -1968,7 +2294,7 @@ const handleReflex = async (formData: FormData, user: any) => {
           {
             role: 'user',
             content: [
-              { type: 'text', text: prompt },
+              { type: 'text', text: reflexPrompt },
               { type: 'image_url', image_url: { url: `data:${mime};base64,${b64}` } }
             ]
           }
@@ -2023,7 +2349,7 @@ const handleTrack = async (formData: FormData, user: any) => {
   }
 
   const openaiKey = readSecretEnv('OPENAI_API_KEY')
-  const geminiKey = readSecretEnv('GEMINI_API_KEY')
+  const geminiKey = await getServerSecret('GEMINI_API_KEY')
   const provider = (process.env.FIGHT_LLM_PROVIDER || '').toLowerCase()
 
   if (!openaiKey && !geminiKey) {
@@ -2190,7 +2516,7 @@ const handleStrategy = async (body: any, user: any) => {
     throw new Error('Missing messages')
   }
 
-  const geminiKey = readSecretEnv('GEMINI_API_KEY')
+  const geminiKey = await getServerSecret('GEMINI_API_KEY')
   if (!geminiKey) {
     throw new Error('GEMINI_API_KEY not set')
   }
@@ -2246,6 +2572,9 @@ const handleStrategy = async (body: any, user: any) => {
     let focusDescription = 'both fighters'
     if (context?.focusTarget === 'A') focusDescription = 'Fighter A (your corner)'
     else if (context?.focusTarget === 'B') focusDescription = 'Fighter B (opponent)'
+    else if (context?.focusTarget === 'unsure')
+      focusDescription =
+        'fighter identity uncertain — cautiously pick the most visible athlete or strategize for the exchange as a whole; avoid strong identity-based claims'
 
     // Build strategy system prompt with grounding
     const strategySystem =
@@ -2399,7 +2728,7 @@ const handleAnalyzeFrames = async (formData: FormData, user: any) => {
   }
 
   const openaiKey = readSecretEnv('OPENAI_API_KEY')
-  const geminiKey = readSecretEnv('GEMINI_API_KEY')
+  const geminiKey = await getServerSecret('GEMINI_API_KEY')
   const provider = (process.env.FIGHT_LLM_PROVIDER || '').toLowerCase()
 
   if (!openaiKey && !geminiKey) {
@@ -2578,28 +2907,68 @@ const handlePresets = async (user: any) => {
 }
 
 // Option B: Handle video file upload to Gemini Files API
-const handleVideoUpload = async (formData: FormData, user: any) => {
-  const videoFile = formData.get('video') as File
-  const geminiKey = readSecretEnv('GEMINI_API_KEY')
-  
-  logger.info('Video upload request', { fileName: videoFile?.name, fileSize: videoFile?.size, hasGeminiKey: !!geminiKey })
-  
-  if (!videoFile) {
-    throw new Error('No video file provided')
+function inferGeminiVideoMime(fileName: string, declared?: string | null): string {
+  const raw = String(declared || '')
+    .toLowerCase()
+    .split(';')[0]
+    .trim()
+  if (raw === 'video/mp4' || raw === 'video/quicktime' || raw === 'video/webm') return raw
+  const lower = String(fileName || '').toLowerCase()
+  if (lower.endsWith('.mov') || lower.endsWith('.qt')) return 'video/quicktime'
+  if (lower.endsWith('.webm')) return 'video/webm'
+  return 'video/mp4'
+}
+
+const asUploadIngestionFailure = (error: unknown): VideoIngestionError => {
+  const known = asVideoIngestionError(error)
+  if (known) return known
+  const code = error instanceof Error ? error.message : String(error || '')
+  if (/^(NOT_FOUND|ASSET_NOT_READY|OBJECT_NOT_FOUND|UPLOAD_INCOMPLETE|ORIGINAL_ASSET_NOT_READY)/.test(code)) {
+    return new VideoIngestionError('ORIGINAL_ASSET_NOT_READY', code)
   }
-  
+  if (/^NORMALIZED_STORAGE_UNAVAILABLE/.test(code)) {
+    return new VideoIngestionError('NORMALIZED_STORAGE_UNAVAILABLE', code)
+  }
+  if (/^NORMALIZED_STORAGE_INCOMPLETE/.test(code)) {
+    return new VideoIngestionError('NORMALIZED_STORAGE_INCOMPLETE', code)
+  }
+  if (/^NORMALIZED_STORAGE_SIZE_MISMATCH/.test(code)) {
+    return new VideoIngestionError('NORMALIZED_STORAGE_SIZE_MISMATCH', code)
+  }
+  return new VideoIngestionError('VIDEO_ANALYSIS_REJECTED', code.slice(0, 180))
+}
+
+const handleVideoUpload = async (video: {
+  body: ReadableStream<Uint8Array>
+  sizeBytes: number
+  mimeType: string
+  fileName: string
+}) => {
+  const geminiKey = await getServerSecret('GEMINI_API_KEY')
+  const mimeType = inferGeminiVideoMime(video.fileName, video.mimeType)
+  const fileSize = video.sizeBytes
+
+  logger.info('Video upload request', {
+    fileName: video.fileName,
+    fileSize,
+    mimeType,
+    hasGeminiKey: !!geminiKey,
+  })
+
+  if (!fileSize) {
+    throw new VideoIngestionError('GEMINI_UPLOAD_FAILED', 'normalized video is empty')
+  }
+
   if (!geminiKey || geminiKey === 'your-gemini-api-key-here') {
-    throw new Error('GEMINI_API_KEY is not configured. Set a valid key in .env.local (get one at https://aistudio.google.com/app/apikey)')
+    throw new VideoIngestionError('GEMINI_UPLOAD_FAILED', 'Gemini is not configured')
   }
-  
+
   try {
     // Step 1: Initiate file upload
-    const fileSize = videoFile.size
-    const mimeType = videoFile.type
     const displayName = `fight-video-${Date.now()}`
-    
+
     console.log('[Upload] File size:', fileSize, 'mimeType:', mimeType)
-    
+
     const initResponse = await fetch(`https://generativelanguage.googleapis.com/upload/v1beta/files?key=${geminiKey}`, {
       method: 'POST',
       headers: {
@@ -2615,7 +2984,7 @@ const handleVideoUpload = async (formData: FormData, user: any) => {
         }
       })
     })
-    
+
 
     if (!initResponse.ok) {
       const errorText = await initResponse.text()
@@ -2625,72 +2994,78 @@ const handleVideoUpload = async (formData: FormData, user: any) => {
       }
       throw new Error(`Failed to initiate file upload: ${initResponse.status} ${errorText}`)
     }
-    
+
     const uploadUrl = initResponse.headers.get('X-Goog-Upload-URL')
     if (!uploadUrl) {
       throw new Error('No upload URL received')
     }
-    
+
     // Step 2: Upload the video file
-    const uploadBody = videoFile.stream()
-    const uploadResponse = await fetch(uploadUrl, {
+      const uploadResponse = await fetch(uploadUrl, {
       method: 'POST',
       headers: {
         'Content-Length': fileSize.toString(),
         'X-Goog-Upload-Offset': '0',
         'X-Goog-Upload-Command': 'upload, finalize'
       },
-      // Stream the file instead of buffering it (prevents ArrayBuffer allocation failures)
-      body: uploadBody as any,
+        // Keep the normalized R2 object streamed all the way to Gemini; phone
+        // uploads must never be copied into Worker memory.
+        body: video.body as any,
       // Node/undici requires duplex for streamed request bodies
       duplex: 'half' as any,
     } as any)
-    
+
     if (!uploadResponse.ok) {
       const errorBody = await uploadResponse.text().catch(() => '')
       console.error('[Upload] Upload failed:', uploadResponse.status, errorBody)
-      throw new Error(`Failed to upload video file: ${uploadResponse.status} ${errorBody.slice(0, 200)}`)
+      throw new VideoIngestionError('GEMINI_UPLOAD_FAILED', `status ${uploadResponse.status}: ${errorBody.slice(0, 160)}`)
     }
-    
+
     const uploadData = (await safeParseResponse(uploadResponse)) as { file?: { uri?: string; name?: string; state?: string } }
     console.log('[Upload] Upload response:', JSON.stringify(uploadData, null, 2))
     const fileUri = uploadData.file?.uri
     const fileName = uploadData.file?.name
-    
+
     if (!fileUri) {
-      throw new Error('No file URI received')
+      throw new VideoIngestionError('GEMINI_UPLOAD_FAILED', 'no file URI returned')
     }
-    
+    if (!fileName) {
+      throw new VideoIngestionError('GEMINI_UPLOAD_FAILED', 'no Gemini file id returned')
+    }
+
     console.log('[Upload] Success! fileUri:', fileUri)
-    
+
     // Poll for file processing completion (Gemini needs time to process videos)
     if (fileName) {
       let fileState = uploadData.file?.state || 'PROCESSING'
       let attempts = 0
-      const maxAttempts = 30 // Max 30 seconds wait
-      
+      const maxAttempts = 90 // Gemini video processing may take a few minutes.
+
       while (fileState === 'PROCESSING' && attempts < maxAttempts) {
-        await new Promise(resolve => setTimeout(resolve, 1000))
+        await new Promise(resolve => setTimeout(resolve, 2000))
         attempts++
-        
+
         try {
           const statusResponse = await fetch(
             `https://generativelanguage.googleapis.com/v1beta/${fileName}?key=${geminiKey}`
           )
           if (statusResponse.ok) {
             const statusData = (await safeParseResponse(statusResponse)) as { state?: string }
-            fileState = statusData.state || 'ACTIVE'
+            fileState = statusData.state || 'PROCESSING'
           }
-        } catch {
-          // Continue polling on error
+        } catch (error) {
+          console.warn('[Upload] Gemini processing poll failed:', error)
         }
       }
-      
+
       if (fileState === 'FAILED') {
-        throw new Error('Video processing failed on Gemini servers')
+        throw new VideoIngestionError('GEMINI_PROCESSING_FAILED')
+      }
+      if (fileState !== 'ACTIVE') {
+        throw new VideoIngestionError('GEMINI_PROCESSING_TIMEOUT')
       }
     }
-    
+
     return {
       fileUri,
       displayName,
@@ -2698,10 +3073,11 @@ const handleVideoUpload = async (formData: FormData, user: any) => {
       fileSize,
       ready: true
     }
-    
+
   } catch (error) {
+    if (error instanceof VideoIngestionError) throw error
     const msg = error instanceof Error ? error.message : 'Unknown error'
-    throw new Error(`Video upload failed: ${msg}`)
+    throw new VideoIngestionError('GEMINI_UPLOAD_FAILED', msg.slice(0, 180))
   }
 }
 
@@ -2710,9 +3086,21 @@ const handleVideoUpload = async (formData: FormData, user: any) => {
  * Runs Flash scan → deep analysis, emitting SSE events throughout.
  * Returns a streaming Response (bypasses NextResponse.json wrapper).
  */
-const handleAnalyzeVideoStream = (body: any): Response => {
-  const { videoFileUri, videoMimeType, clipDuration, focusTarget, poseEvidence, discipline, clipType, poseEngine } = body
-  const geminiKey = readSecretEnv('GEMINI_API_KEY')
+const handleAnalyzeVideoStream = async (body: any): Promise<Response> => {
+  const {
+    videoFileUri,
+    videoMimeType,
+    clipDuration,
+    focusTarget,
+    poseEvidence,
+    discipline,
+    clipType,
+    poseEngine,
+    startSec,
+    endSec,
+  } = body
+  const streamWindow = { startSec, endSec }
+  const geminiKey = await getServerSecret('GEMINI_API_KEY')
 
   const encoder = new TextEncoder()
   const sse = (event: string, data: object) =>
@@ -2741,6 +3129,11 @@ const handleAnalyzeVideoStream = (body: any): Response => {
         if (focusTarget === 'blue' || focusTarget === 'A') coachingMode = 'corner_coach'
         else if (focusTarget === 'red' || focusTarget === 'B') coachingMode = 'scout'
 
+        // Grappling clips use the sport-aware pipeline: grappling flash scan
+        // with strict position enums, BJJ deep-pass system prompt, and no
+        // pose-evidence merging (pose tracking is unreliable under occlusion).
+        const useGrappling = isGrapplingClip({ discipline, clipType })
+
         const poseEvidenceText = summarizePoseEvidenceForPrompt(poseEvidence)
 
         // ── SINGLE PASS: Evidence Ledger (fast, ~10s) ───────────────────────
@@ -2758,11 +3151,20 @@ const handleAnalyzeVideoStream = (body: any): Response => {
               contents: [{
                 role: 'user',
                 parts: [
-                  { fileData: { fileUri: videoFileUri, mimeType: videoMimeType || 'video/mp4' } },
-                  { text: buildEvidenceLedgerPrompt({ clipDuration, focusTarget, poseEvidenceText }) }
+                  buildGeminiVideoFilePart(videoFileUri, videoMimeType || 'video/mp4', streamWindow),
+                  {
+                    text: useGrappling
+                      ? buildGrapplingEvidenceLedgerPrompt({ clipDuration, focusTarget })
+                      : buildEvidenceLedgerPrompt({ clipDuration, focusTarget, poseEvidenceText }),
+                  }
                 ]
               }],
-              generationConfig: { temperature: 0.15, responseMimeType: 'application/json' }
+              generationConfig: {
+                temperature: 0.15,
+                responseMimeType: 'application/json',
+                mediaResolution: GEMINI_MEDIA_RESOLUTION_LOW,
+                ...(useGrappling ? { responseSchema: GRAPPLING_LEDGER_RESPONSE_SCHEMA } : {}),
+              }
             })
           }, 30000)
 
@@ -2775,7 +3177,9 @@ const handleAnalyzeVideoStream = (body: any): Response => {
           /* ledger failure is non-fatal */
         }
 
-        factualLedger = mergePoseEvidenceIntoLedger(factualLedger, poseEvidence)
+        if (!useGrappling) {
+          factualLedger = mergePoseEvidenceIntoLedger(factualLedger, poseEvidence)
+        }
 
         if (!hasMeaningfulLedgerData(factualLedger)) {
           try {
@@ -2786,11 +3190,19 @@ const handleAnalyzeVideoStream = (body: any): Response => {
                 contents: [{
                   role: 'user',
                   parts: [
-                    { fileData: { fileUri: videoFileUri, mimeType: videoMimeType || 'video/mp4' } },
-                    { text: buildEmergencyLedgerPrompt({ clipDuration, focusTarget, poseEvidenceText }) }
+                    buildGeminiVideoFilePart(videoFileUri, videoMimeType || 'video/mp4', streamWindow),
+                    {
+                      text: useGrappling
+                        ? buildGrapplingEvidenceLedgerPrompt({ clipDuration, focusTarget, attempt: 'emergency' })
+                        : buildEmergencyLedgerPrompt({ clipDuration, focusTarget, poseEvidenceText })
+                    }
                   ]
                 }],
-                generationConfig: { temperature: 0.1, responseMimeType: 'application/json' }
+                generationConfig: {
+                  temperature: 0.1,
+                  responseMimeType: 'application/json',
+                  mediaResolution: GEMINI_MEDIA_RESOLUTION_LOW,
+                },
               })
             }, 20000)
 
@@ -2807,21 +3219,25 @@ const handleAnalyzeVideoStream = (body: any): Response => {
           }
         }
 
-        factualLedger = mergePoseEvidenceIntoLedger(factualLedger, poseEvidence)
+        if (!useGrappling) {
+          factualLedger = mergePoseEvidenceIntoLedger(factualLedger, poseEvidence)
 
-        if (!hasMeaningfulLedgerData(factualLedger)) {
-          factualLedger = buildMinimalLedgerFromPoseEvidence(poseEvidence)
+          if (!hasMeaningfulLedgerData(factualLedger)) {
+            factualLedger = buildMinimalLedgerFromPoseEvidence(poseEvidence)
+          }
         }
 
         // Verification pass: re-watch tape and correct the candidate ledger before coaching + retrieval.
         try {
-          const verifyParts: Array<{ fileData?: { fileUri: string; mimeType: string }; text?: string }> = [
-            { fileData: { fileUri: videoFileUri, mimeType: videoMimeType || 'video/mp4' } },
+          const verifyParts: Array<ReturnType<typeof buildGeminiVideoFilePart> | { text: string }> = [
+            buildGeminiVideoFilePart(videoFileUri, videoMimeType || 'video/mp4', streamWindow),
             {
-              text: buildEvidenceVerificationPrompt(factualLedger, {
-                clipDuration,
-                poseEvidenceText,
-              }),
+              text: useGrappling
+                ? buildGrapplingVerificationPrompt(factualLedger, { clipDuration })
+                : buildEvidenceVerificationPrompt(factualLedger, {
+                    clipDuration,
+                    poseEvidenceText,
+                  }),
             },
           ]
           const verifyResp = await fetchWithTimeout(flashUrl, {
@@ -2829,7 +3245,11 @@ const handleAnalyzeVideoStream = (body: any): Response => {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               contents: [{ role: 'user', parts: verifyParts }],
-              generationConfig: { temperature: 0.1, responseMimeType: 'application/json' },
+              generationConfig: {
+                temperature: 0.1,
+                responseMimeType: 'application/json',
+                mediaResolution: GEMINI_MEDIA_RESOLUTION_LOW,
+              },
             }),
           }, 35000)
           if (verifyResp.ok) {
@@ -2837,7 +3257,7 @@ const handleAnalyzeVideoStream = (body: any): Response => {
             const vraw: string = verifyData?.candidates?.[0]?.content?.parts?.[0]?.text || ''
             const verified = extractJsonObject<FactualLedger>(vraw)
             if (hasMeaningfulLedgerData(verified)) {
-              factualLedger = mergePoseEvidenceIntoLedger(verified, poseEvidence)
+              factualLedger = useGrappling ? verified : mergePoseEvidenceIntoLedger(verified, poseEvidence)
             }
           }
         } catch {
@@ -2887,10 +3307,14 @@ const handleAnalyzeVideoStream = (body: any): Response => {
           process.env.GEMINI_MODEL ||
           'gemini-3.1-pro-preview'
 
-        const deepPromptText = buildEvidenceBackedCoachingPrompt(factualLedger, {
-          coachingMode: coachingMode as 'strategist' | 'corner_coach' | 'scout',
-          poseEvidenceText,
-        })
+        const deepPromptText = useGrappling
+          ? buildGrapplingCoachingPrompt(factualLedger, {
+              coachingMode: coachingMode as 'strategist' | 'corner_coach' | 'scout',
+            })
+          : buildEvidenceBackedCoachingPrompt(factualLedger, {
+              coachingMode: coachingMode as 'strategist' | 'corner_coach' | 'scout',
+              poseEvidenceText,
+            })
 
         const coachingDirective =
           coachingMode === 'corner_coach'
@@ -2899,7 +3323,9 @@ const handleAnalyzeVideoStream = (body: any): Response => {
             ? 'Focus your analysis primarily on Fighter B (red corner) — identify their patterns, tendencies, and exploitable habits.'
             : 'Analyze both fighters equally and explain the strategic interplay between their styles.'
 
-        const { tacticalAnchors, hardBans } = buildLedgerTacticalAndBans(factualLedger)
+        const { tacticalAnchors, hardBans } = useGrappling
+          ? buildGrapplingTacticalAndBans(factualLedger)
+          : buildLedgerTacticalAndBans(factualLedger)
 
         const textSnippets = (retrieved?.snippets || []).filter((s) => s.namespace !== 'video_segment')
         const videoSnippets = (retrieved?.snippets || []).filter((s) => s.namespace === 'video_segment')
@@ -2926,8 +3352,21 @@ const handleAnalyzeVideoStream = (body: any): Response => {
             ].join('\n\n')
           : ''
 
+        const grapplingConstraints = `ABSOLUTE CONSTRAINTS (violating ANY of these is a critical failure):
+- The VideoAnalysisLedger timeline is your ONLY source of truth for positions, transitions, and events.
+- Any striking events or striking faults that appear in pose-derived data are compiler artifacts on this grappling clip — ignore them entirely.
+- Do not claim a sweep, pass, submission, or tap happened unless the timeline lists it.
+- Treat "scramble_unresolved" and "camera_occluded" entries as visual gaps: acknowledge them, never reconstruct them.`
+
+        const strikingConstraints = `ABSOLUTE CONSTRAINTS (violating ANY of these is a critical failure):
+- The factual ledger is your ONLY source of truth for what happened.
+- Do not add a Quick Scan section.
+- Do not mention any strike, kick, knee, clinch, takedown, or exchange unless the factual ledger explicitly lists it.
+- If the ledger says something was NOT SEEN, you must not claim it happened. Period.
+- If a punch type is unclear, call it "lead-hand punch" or "rear-hand punch" instead of guessing jab/hook/cross.`
+
         const systemPrompt = [
-          MUSASHI_DEEP_ANALYSIS_SYSTEM.trim(),
+          (useGrappling ? MUSASHI_BJJ_DEEP_ANALYSIS_SYSTEM : MUSASHI_DEEP_ANALYSIS_SYSTEM).trim(),
           `COACHING MODE: ${coachingMode.toUpperCase()}\n${coachingDirective}`,
           // Coach brain: global rules + selected sport brain (alias-aware).
           buildCoachBrainBlock({
@@ -2936,12 +3375,7 @@ const handleAnalyzeVideoStream = (body: any): Response => {
             fighterFocus: typeof focusTarget === 'string' ? focusTarget : undefined,
             poseEngine: typeof poseEngine === 'string' ? poseEngine : undefined,
           }),
-          `ABSOLUTE CONSTRAINTS (violating ANY of these is a critical failure):
-- The factual ledger is your ONLY source of truth for what happened.
-- Do not add a Quick Scan section.
-- Do not mention any strike, kick, knee, clinch, takedown, or exchange unless the factual ledger explicitly lists it.
-- If the ledger says something was NOT SEEN, you must not claim it happened. Period.
-- If a punch type is unclear, call it "lead-hand punch" or "rear-hand punch" instead of guessing jab/hook/cross.
+          `${useGrappling ? grapplingConstraints : strikingConstraints}
 ${tacticalAnchors.join('\n')}
 ${hardBans.join('\n')}
 
@@ -2984,7 +3418,9 @@ Rules for retrieved VIDEO SEGMENTS:
         }
 
         if (!deepResp || !deepResp.ok || !deepResp.body) {
-          const fallbackText = buildLedgerFallbackReport(factualLedger)
+          const fallbackText = useGrappling
+            ? buildGrapplingLedgerFallbackReport(factualLedger)
+            : buildLedgerFallbackReport(factualLedger)
           controller.enqueue(sse('chunk', { text: fallbackText }))
           controller.enqueue(sse('complete', { full_text: fallbackText, model: 'ledger-fallback' }))
           controller.close()
@@ -3034,9 +3470,18 @@ Rules for retrieved VIDEO SEGMENTS:
 
         // Finalize
         if (!fullText.trim()) {
-          fullText = buildLedgerFallbackReport(factualLedger)
+          fullText = useGrappling
+            ? buildGrapplingLedgerFallbackReport(factualLedger)
+            : buildLedgerFallbackReport(factualLedger)
         }
-        fullText = await rewriteCoachingToMatchLedger(fullText, factualLedger, geminiKey, usedModel)
+        // The contradiction detector checks striking geometry (stances, movement
+        // direction) — not applicable to grappling timelines, so skip it there.
+        if (!useGrappling) {
+          fullText = await rewriteCoachingToMatchLedger(fullText, factualLedger, geminiKey, usedModel)
+        }
+        // The streamed report is user-facing prose — scrub any leaked
+        // coaching-JSON contract before it reaches the client.
+        fullText = sanitizeCoachText(fullText)
 
         const dbUpsert = getDbOrNull()
         if (dbUpsert && fullText.trim() && factualLedger) {
@@ -3160,12 +3605,42 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Missing action parameter' }, { status: 400 })
     }
 
+    // Follow-up counter poll — auth only, no AI quota burn.
+    if (action === 'clip_question_status') {
+      try {
+        const statusUser = await requireUser(req)
+        const ctx = (body?.context || {}) as Record<string, unknown>
+        const key =
+          extractChatClipKey('chat', {
+            context: {
+              videoFileUri: ctx.videoFileUri,
+              normalizedAssetId: ctx.normalizedAssetId,
+              clipAssetRef: ctx.clipAssetRef,
+            },
+          }) ||
+          (typeof body?.clipKey === 'string' ? String(body.clipKey).trim().slice(0, 256) : '')
+        if (!key) {
+          return NextResponse.json({
+            used: 0,
+            limit: QUESTIONS_PER_CLIP,
+            remaining: QUESTIONS_PER_CLIP,
+          })
+        }
+        const usage = await getClipQuestionUsage(statusUser.id, key)
+        return NextResponse.json(usage)
+      } catch (err) {
+        return aiErrorResponse(err)
+      }
+    }
+
     const quotaBucket = fightActionToQuotaBucket(action)
-    const guard = await aiGuard(req, quotaBucket)
+    const guard = await aiGuard(req, quotaBucket, {
+      noClipChat: isNoClipChatRequest(action, body),
+    })
     if (!guard.ok) return guard.response
 
     let user: MusashiUser | null = guard.user
-    if (!user && process.env.MUSASHI_DISABLE_AUTH === '1') {
+    if (!user && process.env.MUSASHI_DISABLE_AUTH === '1' && process.env.NODE_ENV !== 'production') {
       user = {
         id: 'dev',
         email: 'dev@local',
@@ -3194,10 +3669,12 @@ export async function POST(req: Request) {
     }
 
     // Per-clip follow-up question cap (chat/strategy grounded on an uploaded clip).
+    // Check BEFORE the AI call; increment ONLY after a successful reply so
+    // network/model failures do not consume a follow-up.
     const clipQuestionKey = extractChatClipKey(action, body)
     if (clipQuestionKey) {
       try {
-        await enforceClipQuestionLimit(user.id, user.role, clipQuestionKey)
+        await assertClipQuestionAvailable(user.id, user.role, clipQuestionKey)
       } catch (err) {
         return aiErrorResponse(err)
       }
@@ -3213,8 +3690,223 @@ export async function POST(req: Request) {
     // Route to appropriate handler
     switch (action) {
       case 'upload_video':
-        if (!formData) throw new Error('FormData required for upload_video')
-        result = await handleVideoUpload(formData, user)
+        {
+          const assetId = String(
+            (formData ? formData.get('assetId') : null) || body?.assetId || '',
+          ).trim()
+          const sessionId = String(
+            (formData ? formData.get('videoAnalysisSessionId') : null) ||
+              body?.videoAnalysisSessionId ||
+              '',
+          ).trim()
+          const requestedSourceStartSec = Number(
+            (formData ? formData.get('sourceStartSec') : null) ?? body?.sourceStartSec ?? 0,
+          )
+          const requestedSourceEndSec = Number(
+            (formData ? formData.get('sourceEndSec') : null) ?? body?.sourceEndSec ?? NaN,
+          )
+          const requestedDurationSecRaw =
+            (formData ? formData.get('requestedDurationSec') : null) ??
+            body?.requestedDurationSec
+          // The client may suggest where the source window starts, but cannot
+          // raise the tier duration cap. Modal clamps this again to the actual
+          // source duration before it invokes FFmpeg.
+          const sourceStartSec =
+            Number.isFinite(requestedSourceStartSec) && requestedSourceStartSec >= 0
+              ? Math.min(requestedSourceStartSec, 86_400)
+              : 0
+          // Prefer explicit endSec when present; otherwise fall back to duration.
+          const durationFromWindow =
+            Number.isFinite(requestedSourceEndSec) && requestedSourceEndSec > sourceStartSec
+              ? requestedSourceEndSec - sourceStartSec
+              : null
+          const requestedDurationSec =
+            durationFromWindow != null ? durationFromWindow : requestedDurationSecRaw
+          const requestId =
+            typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+              ? crypto.randomUUID()
+              : `ingestion-${Date.now()}-${Math.random().toString(36).slice(2)}`
+          let reserved = false
+          try {
+            if (!assetId) {
+              throw new VideoIngestionError('ORIGINAL_ASSET_NOT_READY', 'R2 asset id is required')
+            }
+
+            // The authenticated tier remains the server-owned ceiling, but a
+            // shorter athlete-selected interval must not be lengthened to that
+            // ceiling. Modal applies the final source-duration cap after it
+            // probes the actual media. Never trust a client-supplied maxSec.
+            const limits = await resolveVideoTierLimits(user.id, user.role)
+            const normalizedMaxSec = resolveRequestedVideoDurationSec(
+              requestedDurationSec,
+              limits.maxDurationSec,
+            )
+            await reserveVideoAnalysisCredit(user.id, user.role, {
+              sessionId,
+              clipDurationSec: normalizedMaxSec,
+            })
+            reserved = true
+
+            let original
+            try {
+              original = await readUploadedAssetStream(getDb(), {
+                assetId,
+                userId: user.id,
+                isAdmin: user.role === 'shogun',
+              })
+            } catch (error) {
+              throw new VideoIngestionError(
+                'ORIGINAL_ASSET_NOT_READY',
+                error instanceof Error ? error.message : 'original R2 object unavailable',
+              )
+            }
+
+            const normalized = await normalizeVideoOnServer({
+              source: original.body,
+              sourceName: original.originalName,
+              sourceMimeType: original.contentType,
+              maxSec: normalizedMaxSec,
+              sourceStartSec,
+              requestId,
+            })
+
+            let normalizedAsset
+            try {
+              normalizedAsset = await storeNormalizedAnalysisAsset(getDb(), {
+                sourceAssetId: assetId,
+                userId: user.id,
+                body: normalized.body,
+                expectedSizeBytes: normalized.sizeBytes,
+              })
+            } catch (error) {
+              throw asUploadIngestionFailure(error)
+            }
+
+            await setReservedVideoAnalysisDuration(user.id, user.role, {
+              sessionId,
+              effectiveDurationSec: normalized.effectiveDurationSec,
+            })
+
+            const normalizedStream = await readUploadedAssetStream(getDb(), {
+              assetId: normalizedAsset.id,
+              userId: user.id,
+              isAdmin: user.role === 'shogun',
+            })
+
+            // Inline-bytes fast path: when the normalized clip is < 20MB, skip
+            // the Gemini Files API ACTIVE poll so Coach Cards can start immediately.
+            // Optional background upload still produces a fileUri for later chat.
+            if (isInlineVideoEligible(normalizedStream.sizeBytes)) {
+              try {
+                await normalizedStream.body.cancel()
+              } catch {
+                void 0
+              }
+              const clipKey = `inline:${normalizedAsset.id}`
+              const credits = await commitVideoAnalysisCredit(user.id, user.role, {
+                sessionId,
+                clipKey,
+              })
+              const bgAssetId = normalizedAsset.id
+              const bgUserId = user.id
+              const bgIsAdmin = user.role === 'shogun'
+              void (async () => {
+                try {
+                  const again = await readUploadedAssetStream(getDb(), {
+                    assetId: bgAssetId,
+                    userId: bgUserId,
+                    isAdmin: bgIsAdmin,
+                  })
+                  const bg = await handleVideoUpload({
+                    body: again.body,
+                    sizeBytes: again.sizeBytes,
+                    mimeType: again.contentType,
+                    fileName: again.originalName,
+                  })
+                  console.log('[video-ingestion] background Files URI ready', {
+                    requestId,
+                    fileUri: bg.fileUri,
+                    normalizedAssetId: bgAssetId,
+                  })
+                } catch (bgErr) {
+                  console.warn('[video-ingestion] background Files upload failed (non-fatal)', {
+                    requestId,
+                    detail: bgErr instanceof Error ? bgErr.message : String(bgErr),
+                  })
+                }
+              })()
+
+              result = {
+                ready: true,
+                inlineEligible: true,
+                fileUri: null,
+                displayName: `fight-video-inline-${Date.now()}`,
+                mimeType: normalizedStream.contentType || 'video/mp4',
+                fileSize: normalizedStream.sizeBytes,
+                credits,
+                videoAnalysisSessionId: sessionId,
+                requestId,
+                normalizedAssetId: normalizedAsset.id,
+                requestedDurationSec: normalizedMaxSec,
+                effectiveDurationSec: normalized.effectiveDurationSec,
+              }
+              break
+            }
+
+            const upload = await handleVideoUpload({
+              body: normalizedStream.body,
+              sizeBytes: normalizedStream.sizeBytes,
+              mimeType: normalizedStream.contentType,
+              fileName: normalizedStream.originalName,
+            })
+            const credits = await commitVideoAnalysisCredit(user.id, user.role, {
+              sessionId,
+              clipKey: String(upload.fileUri || ''),
+            })
+            result = {
+              ...upload,
+              inlineEligible: false,
+              credits,
+              videoAnalysisSessionId: sessionId,
+              requestId,
+              normalizedAssetId: normalizedAsset.id,
+              requestedDurationSec: normalizedMaxSec,
+              effectiveDurationSec: normalized.effectiveDurationSec,
+            }
+          } catch (error) {
+            const quotaCode = error instanceof Error ? error.message : ''
+            if (
+              quotaCode === 'FREE_VIDEO_QUOTA' ||
+              quotaCode === 'WEEKLY_VIDEO_QUOTA' ||
+              quotaCode === 'VIDEO_DURATION_EXCEEDED'
+            ) {
+              // Quota rejections are expected product states (402 + upgrade
+              // hint), not ingestion failures — asUploadIngestionFailure would
+              // mask them as generic 502s and hide the upgrade prompt.
+              if (reserved) {
+                await releaseVideoAnalysisCredit(user.id, sessionId, quotaCode)
+              }
+              return aiErrorResponse(error)
+            }
+            const failure = asUploadIngestionFailure(error)
+            console.warn('[video-ingestion] upload failed', {
+              requestId,
+              code: failure.code,
+              detail: failure.detail,
+            })
+            if (reserved) {
+              await releaseVideoAnalysisCredit(
+                user.id,
+                sessionId,
+                failure.code,
+              )
+            }
+            return NextResponse.json(
+              { error: failure.message, code: failure.code, requestId },
+              { status: 502 },
+            )
+          }
+        }
         break
 
       case 'analyze_frame':
@@ -3312,6 +4004,30 @@ export async function POST(req: Request) {
       }
     }
 
+    // Count a follow-up only after a successful chat/strategy reply.
+    if (
+      clipQuestionKey &&
+      (action === 'chat' || action === 'strategy') &&
+      result &&
+      typeof result === 'object' &&
+      (typeof (result as { message?: unknown }).message === 'string' ||
+        typeof (result as { gameplan?: unknown }).gameplan === 'string')
+    ) {
+      try {
+        const usage = await incrementClipQuestion(user.id, clipQuestionKey)
+        ;(result as { clipFollowUp?: { used: number; limit: number; remaining: number } }).clipFollowUp =
+          {
+            used: usage.used,
+            limit: usage.limit,
+            remaining: Math.max(0, usage.limit - usage.used),
+          }
+      } catch (incErr) {
+        logger.warn('clip follow-up increment failed (non-fatal)', {
+          error: incErr instanceof Error ? incErr.message : String(incErr),
+        })
+      }
+    }
+
     return NextResponse.json(result)
 
   } catch (e) {
@@ -3343,7 +4059,7 @@ export async function POST(req: Request) {
 export async function GET(req: Request) {
   try {
     let user: MusashiUser
-    if (process.env.MUSASHI_DISABLE_AUTH === '1') {
+    if (process.env.MUSASHI_DISABLE_AUTH === '1' && process.env.NODE_ENV !== 'production') {
       user = {
         id: 'dev',
         email: 'dev@local',

@@ -8,6 +8,7 @@
  */
 
 import { useState, useEffect } from 'react'
+import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -17,10 +18,10 @@ import { Badge } from '@/components/ui/badge'
 import { useToast } from '@/hooks/use-toast'
 import { useAuth } from '@/hooks/useAuth'
 import { parseApiResponse } from '@/lib/safeJson'
-import { Dumbbell, Swords, Sparkles, Check, ArrowRight, Loader2 } from 'lucide-react'
+import { Dumbbell, Swords, Sparkles, Check, ArrowRight, Loader2, ShieldCheck } from 'lucide-react'
 
 type Path = 'train' | 'coach' | 'both'
-type Step = 'path' | 'fighter' | 'coach' | 'done'
+type Step = 'consent' | 'path' | 'fighter' | 'coach' | 'done'
 
 const DISCIPLINES: Array<[value: string, label: string]> = [
   ['boxing', 'Boxing'],
@@ -74,9 +75,34 @@ export default function OnboardingPage() {
     }
   }, [user, router])
 
-  const [step, setStep] = useState<Step>('path')
+  const [step, setStep] = useState<Step>('consent')
   const [path, setPath] = useState<Path>('train')
   const [saving, setSaving] = useState(false)
+
+  // AI consent is a hard condition of using Musashi AI — accept or no coaching.
+  const [savingConsent, setSavingConsent] = useState(false)
+
+  async function acceptConsent() {
+    setSavingConsent(true)
+    try {
+      const res = await fetch('/api/auth/consent', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ aiTraining: true }),
+      })
+      if (!res.ok) throw new Error('Could not save consent')
+      setStep('path')
+    } catch (err) {
+      toast({
+        title: 'Consent required',
+        description: err instanceof Error ? err.message : 'Try again',
+        variant: 'destructive',
+      })
+    } finally {
+      setSavingConsent(false)
+    }
+  }
 
   // Shared / fighter fields
   const [displayName, setDisplayName] = useState(user?.display_name || '')
@@ -175,8 +201,47 @@ export default function OnboardingPage() {
         </p>
       </div>
 
+      {step === 'consent' && (
+        <Card>
+          <CardContent className="space-y-4 p-6">
+            <div className="flex items-start gap-3">
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10">
+                <ShieldCheck className="h-5 w-5 text-primary" />
+              </div>
+              <div className="space-y-1">
+                <div className="font-semibold">How we use your footage</div>
+                <p className="text-sm text-muted-foreground">
+                  We analyze the clips you upload to give you AI coaching. We may also use your
+                  footage and its derived analysis to improve Musashi&apos;s AI coaching models. See
+                  our <Link href="/privacy" target="_blank" className="underline">Privacy Policy</Link>{' '}
+                  for details, including the third-party AI providers we use.
+                </p>
+              </div>
+            </div>
+            <p className="rounded-lg border border-border/60 bg-muted/30 p-3 text-sm">
+              By continuing, you agree that your footage and its analysis may be used to improve
+              Musashi&apos;s AI coaching. Without this agreement, AI coaching is unavailable.
+            </p>
+            <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end pt-2">
+              <Button variant="outline" asChild>
+                <Link href="/welcome">I don&apos;t agree</Link>
+              </Button>
+              <Button onClick={acceptConsent} disabled={savingConsent}>
+                {savingConsent ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <>
+                    Agree and continue <ArrowRight className="ml-1.5 h-4 w-4" />
+                  </>
+                )}
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       {step === 'path' && (
-        <div className="grid gap-4 sm:grid-cols-3">
+        <div className="grid gap-4">
           <PathCard
             icon={Dumbbell}
             title="I'm here to train"
@@ -205,7 +270,7 @@ export default function OnboardingPage() {
             <Field label="Display name">
               <Input value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="Fighter name" />
             </Field>
-            <div className="grid gap-4 sm:grid-cols-2">
+            <div className="grid gap-4">
               <Field label="Discipline">
                 <select className={selectClass} value={discipline} onChange={(e) => setDiscipline(e.target.value)}>
                   {DISCIPLINES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
@@ -262,7 +327,7 @@ export default function OnboardingPage() {
                 ))}
               </div>
             </Field>
-            <div className="grid gap-4 sm:grid-cols-2">
+            <div className="grid gap-4">
               <Field label="Turnaround (hours)">
                 <Input type="number" min={1} value={turnaroundHours} onChange={(e) => setTurnaroundHours(Number(e.target.value))} />
               </Field>

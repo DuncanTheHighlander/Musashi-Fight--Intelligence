@@ -10,10 +10,12 @@ export type CoachingQuotaState =
   | { kind: 'weekly_video_exhausted'; hint?: string }
   | { kind: 'video_duration_exceeded'; hint?: string; maxSec?: number }
   | { kind: 'kill_switch'; hint?: string }
+  | { kind: 'consent_required'; hint?: string }
+  | { kind: 'email_not_verified'; hint?: string }
 
 type GuardBody = { code?: string; hint?: string; error?: string } | null
 
-const GUARD_STATUSES = new Set([401, 402, 429, 503])
+const GUARD_STATUSES = new Set([401, 402, 403, 429, 503])
 
 export const isGuardHttpStatus = (status: number): boolean => GUARD_STATUSES.has(status)
 
@@ -28,6 +30,14 @@ export const parseGuardResponse = async (
   if (res.status === 401) return { kind: 'auth' }
 
   if (res.status === 429) return { kind: 'rate_limited', retryAfterSec: retryAfter }
+
+  if (res.status === 403 && guardBody?.code === 'CONSENT_REQUIRED') {
+    return { kind: 'consent_required', hint: guardBody.hint }
+  }
+
+  if (res.status === 403 && guardBody?.code === 'EMAIL_NOT_VERIFIED') {
+    return { kind: 'email_not_verified', hint: guardBody.hint }
+  }
 
   if (res.status === 503 && guardBody?.code === 'AI_KILL_SWITCH') {
     return { kind: 'kill_switch', hint: guardBody.hint }

@@ -11,6 +11,9 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Badge } from '@/components/ui/badge'
 import { PromptPreviewModal } from '@/components/ui/prompt-preview-modal'
+import { ShogunOverviewPanel, type OverviewData } from '@/components/admin/ShogunOverviewPanel'
+import { ShogunBusinessPanel } from '@/components/admin/ShogunBusinessPanel'
+import { AiCorrectionsPanel } from '@/components/admin/AiCorrectionsPanel'
 import { Eye, AlertCircle, CheckCircle } from 'lucide-react'
 import { parseApiResponse } from '@/lib/safeJson'
 
@@ -129,6 +132,7 @@ export default function ShogunPage() {
 
   const [users, setUsers] = useState<LimitsRow[]>([])
   const [selectedUserId, setSelectedUserId] = useState<string>('')
+  const [overview, setOverview] = useState<OverviewData | null>(null)
 
   const [dailyAnalyze, setDailyAnalyze] = useState('')
   const [dailyChat, setDailyChat] = useState('')
@@ -170,7 +174,7 @@ export default function ShogunPage() {
   const loadUsers = useCallback(async () => {
     const res = await fetch('/api/shogun/limits', { method: 'GET' })
     if (res.status === 401) {
-      window.location.href = '/login'
+      window.location.href = '/welcome'
       return
     }
     if (res.status === 403) {
@@ -185,6 +189,13 @@ export default function ShogunPage() {
     }
   }, [selectedUserId])
 
+  const loadOverview = useCallback(async () => {
+    const res = await fetch('/api/shogun/overview', { method: 'GET' })
+    if (!res.ok) return
+    const data: any = await parseApiResponse(res)
+    if (data?.totals && Array.isArray(data?.users)) setOverview(data as OverviewData)
+  }, [])
+
   const loadPrompt = useCallback(async (key: PromptKey) => {
     const defaults = defaultsForPromptKey(key)
     setPromptName(defaults.name)
@@ -195,7 +206,7 @@ export default function ShogunPage() {
 
     const res = await fetch(`/api/shogun/prompts?key=${encodeURIComponent(key)}&audit=1`, { method: 'GET' })
     if (res.status === 401) {
-      window.location.href = '/login'
+      window.location.href = '/welcome'
       return
     }
     if (res.status === 403) {
@@ -224,6 +235,7 @@ export default function ShogunPage() {
       try {
         await loadMe()
         await loadUsers()
+        await loadOverview()
         await loadPrompt(selectedPromptKey)
       } catch (e) {
         setError(e instanceof Error ? e.message : 'Failed to load')
@@ -232,7 +244,7 @@ export default function ShogunPage() {
       }
     }
     void run()
-  }, [loadMe, loadPrompt, loadUsers, selectedPromptKey])
+  }, [loadMe, loadPrompt, loadUsers, loadOverview, selectedPromptKey])
 
   useEffect(() => {
     if (!selectedUser) return
@@ -351,7 +363,7 @@ export default function ShogunPage() {
             </CardHeader>
             <CardFooter>
               <Button asChild>
-                <Link href="/login">Login</Link>
+                <Link href="/welcome">Login</Link>
               </Button>
             </CardFooter>
           </Card>
@@ -398,13 +410,60 @@ export default function ShogunPage() {
           </div>
         </div>
 
+        {/* Admin destinations — every admin tool reachable from this hub. */}
+        <div className="mb-6 grid grid-cols-1 gap-3 sm:grid-cols-3">
+          <Button asChild variant="outline" className="h-auto justify-start px-4 py-3">
+            <Link href="/review">
+              <span className="flex flex-col items-start text-left">
+                <span className="font-medium">AI Review &amp; Labeling</span>
+                <span className="text-xs text-muted-foreground">Correct the coach, label clips, build training data</span>
+              </span>
+            </Link>
+          </Button>
+          <Button asChild variant="outline" className="h-auto justify-start px-4 py-3">
+            <Link href="/admin/reports">
+              <span className="flex flex-col items-start text-left">
+                <span className="font-medium">Content Reports</span>
+                <span className="text-xs text-muted-foreground">User-reported content moderation queue</span>
+              </span>
+            </Link>
+          </Button>
+          <Button asChild variant="outline" className="h-auto justify-start px-4 py-3">
+            <Link href="/library">
+              <span className="flex flex-col items-start text-left">
+                <span className="font-medium">Knowledge Review</span>
+                <span className="text-xs text-muted-foreground">Approve user-submitted library documents</span>
+              </span>
+            </Link>
+          </Button>
+        </div>
+
         {error && <div className="mb-4 text-sm text-destructive">{error}</div>}
 
-        <Tabs defaultValue="limits">
+        <Tabs defaultValue="overview">
           <TabsList>
+            <TabsTrigger value="overview">Overview</TabsTrigger>
+            <TabsTrigger value="business">Business</TabsTrigger>
+            <TabsTrigger value="corrections">Corrections</TabsTrigger>
             <TabsTrigger value="limits">Limits</TabsTrigger>
             <TabsTrigger value="prompts">Prompts</TabsTrigger>
           </TabsList>
+
+          <TabsContent value="overview">
+            <ShogunOverviewPanel
+              overview={overview}
+              onRefresh={loadOverview}
+              onError={setError}
+            />
+          </TabsContent>
+
+          <TabsContent value="business">
+            <ShogunBusinessPanel onError={setError} />
+          </TabsContent>
+
+          <TabsContent value="corrections">
+            <AiCorrectionsPanel />
+          </TabsContent>
 
           <TabsContent value="limits">
             <div className="grid gap-4 md:grid-cols-2">

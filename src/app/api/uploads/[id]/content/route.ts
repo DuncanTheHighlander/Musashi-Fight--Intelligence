@@ -8,7 +8,8 @@ import { getDb } from '@/lib/marketplace/types'
 import type { MarketplaceAssetRow } from '@/lib/marketplace/types'
 import { getReadableAsset } from '@/lib/storage/assets'
 import { readMockObject, writeMockObject } from '@/lib/storage/mockStorage'
-import { resolveStorageMode } from '@/lib/storage/r2'
+import { isR2SigningConfigured, resolveStorageMode } from '@/lib/storage/r2'
+import { getWorkerUploadsBucket, putWorkerR2Object } from '@/lib/storage/workerR2'
 
 type Params = { id: string }
 
@@ -17,7 +18,9 @@ async function loadAsset(db: ReturnType<typeof getDb>, id: string): Promise<Mark
 }
 
 export async function PUT(req: Request, context: { params: Promise<Params> }) {
-  if (resolveStorageMode() !== 'mock') {
+  const mode = resolveStorageMode()
+  const useWorkerR2 = mode === 'r2' && !isR2SigningConfigured()
+  if (mode !== 'mock' && !useWorkerR2) {
     return NextResponse.json({ error: 'Direct upload only available in mock storage mode' }, { status: 405 })
   }
   try {
@@ -29,14 +32,37 @@ export async function PUT(req: Request, context: { params: Promise<Params> }) {
     if (asset.owner_user_id !== user.id) {
       return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
     }
+    if (asset.status !== 'pending_upload') {
+      return NextResponse.json(
+        { error: 'Upload is no longer pending' },
+        { status: 409 },
+      )
+    }
 
-    const bytes = Buffer.from(await req.arrayBuffer())
-    if (!bytes.length) return NextResponse.json({ error: 'Empty body' }, { status: 400 })
-    writeMockObject(asset.object_key, bytes)
+    if (useWorkerR2) {
+      const bucket = await getWorkerUploadsBucket()
+      if (!bucket) return NextResponse.json({ error: 'Worker R2 binding unavailable' }, { status: 503 })
+      if (!req.body) return NextResponse.json({ error: 'Empty body' }, { status: 400 })
+      // R2's Worker binding determines stream length itself. `contentLength` is
+      // not valid R2 HTTP metadata and caused every fallback PUT to fail.
+      await putWorkerR2Object(bucket, {
+        key: asset.object_key,
+        body: req.body,
+        sizeBytes: asset.size_bytes,
+        contentType: asset.content_type,
+      })
+    } else {
+      const bytes = await req.arrayBuffer()
+      if (!bytes.byteLength) return NextResponse.json({ error: 'Empty body' }, { status: 400 })
+      writeMockObject(asset.object_key, Buffer.from(bytes))
+    }
     return new NextResponse(null, { status: 200 })
   } catch (e) {
     const code = e instanceof Error ? e.message : 'UNKNOWN'
     if (code === 'UNAUTHORIZED') return NextResponse.json({ error: 'Login required' }, { status: 401 })
+    if (code === 'INVALID_STREAM_LENGTH' || /FixedLengthStream/i.test(code)) {
+      return NextResponse.json({ error: 'Upload size did not match the original file. Please select the video again.' }, { status: 400 })
+    }
     return NextResponse.json({ error: code || 'Upload failed' }, { status: 400 })
   }
 }
@@ -48,6 +74,24 @@ export async function GET(req: Request, context: { params: Promise<Params> }) {
     const mode = resolveStorageMode()
 
     if (mode === 'r2') {
+      if (!isR2SigningConfigured()) {
+        const { asset } = await getReadableAsset(getDb(), {
+          assetId: id,
+          userId: user.id,
+          isAdmin: user.role === 'shogun',
+        })
+        const object = await getWorkerUploadsBucket().then((bucket) => bucket?.get(asset.object_key))
+        if (!object?.body) return NextResponse.json({ error: 'Not found' }, { status: 404 })
+        return new NextResponse(object.body, {
+          status: 200,
+          headers: {
+            'Content-Type': object.httpMetadata?.contentType || asset.content_type,
+            'Content-Length': String(object.size),
+            'Content-Disposition': `inline; filename="${asset.original_name.replace(/"/g, '')}"`,
+            'Cache-Control': 'private, max-age=3600',
+          },
+        })
+      }
       const { readUrl } = await getReadableAsset(getDb(), {
         assetId: id,
         userId: user.id,

@@ -65,7 +65,7 @@ function ResetPasswordContent() {
         return
       }
       setDone(true)
-      setTimeout(() => router.push('/login'), 2000)
+      setTimeout(() => router.push('/welcome'), 2000)
     } catch {
       setError('Network error. Try again in a moment.')
     } finally {
@@ -132,7 +132,7 @@ function ResetPasswordContent() {
           </CardContent>
           <CardFooter className="flex flex-col gap-3">
             <div className="text-center text-sm text-muted-foreground">
-              <Link href="/login" className="font-medium text-primary hover:underline">
+              <Link href="/welcome" className="font-medium text-primary hover:underline">
                 Back to sign in
               </Link>
             </div>

@@ -1,12 +1,11 @@
 'use client'
 
 import { Card, CardContent } from '@/components/ui/card'
-import { Trophy, Award, Crown } from 'lucide-react'
+import { Trophy, Award } from 'lucide-react'
 import { SectionHeader, SectionShell } from '@/components/ui/section-header'
 import { CoachLeaderboard } from '@/components/marketplace/CoachLeaderboard'
-import { ComingSoonSection } from './ComingSoonSection'
-
-const PREVIEW_ENABLED = process.env.NEXT_PUBLIC_MUSASHI_PREVIEW_FEATURES === '1'
+import Link from 'next/link'
+import { Button } from '@/components/ui/button'
 
 // What a coach's belt is earned on (see lib/marketplace/coachRank.ts).
 const SCORE_FACTORS = [
@@ -17,17 +16,6 @@ const SCORE_FACTORS = [
 ]
 
 export default function CoachesSection() {
-  if (!PREVIEW_ENABLED) {
-    return (
-      <ComingSoonSection
-        title="Coaches"
-        icon={Crown}
-        description="Browse top-ranked coaches and analysts in the Musashi network."
-        details="Coming soon. Coach onboarding is in progress."
-      />
-    )
-  }
-
   return (
     <SectionShell maxWidth="5xl">
       <SectionHeader
@@ -56,6 +44,14 @@ export default function CoachesSection() {
             Ranks run White → Gray → Yellow → Blue → Purple → Brown (with stripes), then Black 1st–8th
             degree, Coral 9th, and Red 10th. Senior ranks require sustained volume — they&apos;re earned, not bought.
           </p>
+          <div className="mt-4 flex flex-wrap gap-2">
+            <Button asChild size="sm" variant="outline">
+              <Link href="/marketplace">Open marketplace</Link>
+            </Button>
+            <Button asChild size="sm" variant="ghost">
+              <Link href="/onboarding">Set up coach profile</Link>
+            </Button>
+          </div>
         </CardContent>
       </Card>
 

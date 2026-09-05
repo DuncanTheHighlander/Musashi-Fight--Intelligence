@@ -5,7 +5,8 @@ import { useRouter } from 'next/navigation'
 import dynamic from 'next/dynamic'
 import { Loader2, Video } from 'lucide-react'
 import { useSection } from '@/contexts/SectionContext'
-import { useVoiceSoon } from '@/components/mobile/MobileShell'
+import { FREE_MAX_VIDEO_SEC, PRO_MAX_VIDEO_SEC } from '@/lib/videoTierLimits'
+import { MAX_ORIGINAL_UPLOAD_BYTES } from '@/lib/gemini/videoFilePart'
 
 // FightCoachExperience pulls in MediaPipe + WASM. Loading it on the server
 // (or even on the client during the initial RSC payload) crashes the dev
@@ -32,8 +33,10 @@ import ProfileSection from '@/components/sections/ProfileSection'
 export default function HomePage() {
   const { activeSection } = useSection()
   const router = useRouter()
-  const { showVoiceSoon } = useVoiceSoon()
   const [bootstrapVideoFile, setBootstrapVideoFile] = useState<File | null>(null)
+  const [heroUploadError, setHeroUploadError] = useState<string | null>(null)
+  // Real athlete uploads always wait for an explicit Play tap. Automated QA
+  // fixtures may opt in with ?fixtureAutoplay=1.
   const [autoPlayFixture, setAutoPlayFixture] = useState(false)
   const fixtureLoadedRef = useRef(false)
 
@@ -132,19 +135,23 @@ export default function HomePage() {
     const f = e.target.files?.[0]
     e.target.value = ''
     if (!f) return
+    setHeroUploadError(null)
+    // Fight Lab owns the one canonical trim flow so uploads from the hero,
+    // restored sessions, and internal entry points cannot diverge.
+    if (f.size > MAX_ORIGINAL_UPLOAD_BYTES) {
+      setHeroUploadError('File is over 500 MB. Export a shorter clip or lower camera resolution, then try again.')
+      return
+    }
     setBootstrapVideoFile(f)
-    // The Fight Lab below is the real preview → processing → results surface.
     scrollToFightLab()
   }
 
   // The design's "ask anything, no clip needed" entry — the live AI coach chat
   // lives in the Fight Lab, so submitting brings the user to it.
-  const [entryDraft, setEntryDraft] = useState('')
-  const onAskCoach = (e: React.FormEvent) => {
-    e.preventDefault()
-    if (!entryDraft.trim()) return
-    scrollToFightLab()
-  }
+  // The "Musashi AI Coach" card below is just the header/chrome — the actual
+  // chat (message list + input) is FightCoachExperience's, portaled into
+  // #ask-musashi-slot so there's one chat, not a static box that hands off
+  // to a second live one further down the page.
 
   if (activeSection === 'fighters') return <ProfilesSection />
   if (activeSection === 'marketplace') return <MarketplaceSection />
@@ -204,9 +211,21 @@ export default function HomePage() {
           </div>
           <div className="text-center">
             <div className="text-[15px] font-semibold text-ms-bone">Tap to upload your clip</div>
-            <div className="mt-[5px] font-jbmono text-[11px] text-ms-faint">MP4 · MOV · WEBM — up to 60s</div>
+            <div className="mt-[5px] font-jbmono text-[11px] text-ms-faint">
+              MP4 · MOV · WEBM — free {FREE_MAX_VIDEO_SEC}s window · Pro {PRO_MAX_VIDEO_SEC}s
+            </div>
           </div>
         </label>
+
+        {heroUploadError && (
+          <div
+            role="alert"
+            className="mt-3 rounded-xl border px-4 py-3 text-[12.5px] text-red-300"
+            style={{ borderColor: 'rgba(220,80,80,0.45)', background: 'rgba(220,80,80,0.08)' }}
+          >
+            {heroUploadError}
+          </div>
+        )}
 
         {bootstrapVideoFile && (
           <div
@@ -263,37 +282,9 @@ export default function HomePage() {
               <div className="mt-px text-[11px] text-ms-faint">Ask anything — no clip needed</div>
             </div>
           </div>
-          <form onSubmit={onAskCoach} className="flex items-center gap-2 px-3 py-[11px]">
-            <input
-              value={entryDraft}
-              onChange={(e) => setEntryDraft(e.target.value)}
-              placeholder="How do I stop dropping my hands?"
-              className="min-w-0 flex-1 rounded-xl border bg-ms-surface2 px-[13px] py-[11px] text-[13.5px] text-ms-text outline-none placeholder:text-ms-faint"
-              style={{ borderColor: 'var(--ms-line10)' }}
-            />
-            <button
-              type="button"
-              onClick={showVoiceSoon}
-              title="Voice — coming soon"
-              className="flex h-[38px] w-[38px] flex-shrink-0 items-center justify-center rounded-[11px] border bg-ms-surface2 text-ms-faint"
-              style={{ borderColor: 'var(--ms-line10)' }}
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
-                <path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v4" />
-              </svg>
-            </button>
-            <button
-              type="submit"
-              className="flex h-[38px] w-[38px] flex-shrink-0 items-center justify-center rounded-[11px] text-white"
-              style={{ background: '#C6461B' }}
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <line x1="22" y1="2" x2="11" y2="13" />
-                <polygon points="22 2 15 22 11 13 2 9 22 2" />
-              </svg>
-            </button>
-          </form>
+          {/* FightCoachExperience portals its idle chat (messages + input +
+              send) in here — see pendingChatSlotId. */}
+          <div id="ask-musashi-slot" />
         </div>
       </div>
 
@@ -301,7 +292,9 @@ export default function HomePage() {
       <section id="fight-lab-anchor" className="scroll-mt-24 px-5 pb-8 outline-none" tabIndex={-1} aria-label="Fight Lab">
         <FightCoachExperience
           hideShellHeader
+          collapseWhenIdle
           bootstrapVideoFile={bootstrapVideoFile}
+          idleChatSlotId="ask-musashi-slot"
           autoPlayOnReady={autoPlayFixture}
           onBootstrapConsumed={clearBootstrapVideo}
         />

@@ -1,5 +1,7 @@
-import { requireUser, type MusashiRole } from '@/lib/musashiAuth'
+import { assertEmailVerified, requireUser, type MusashiRole } from '@/lib/musashiAuth'
 import { getDb } from '@/lib/db'
+import { resolveQuotaDurationSec } from '@/lib/gemini/videoFilePart'
+import { VIDEO_DURATION_TOLERANCE_SEC } from '@/lib/videoTierLimits'
 
 export type MusashiAction = 'analyze' | 'chat' | 'reflex' | 'track'
 
@@ -21,12 +23,17 @@ export const SHOGUN_MAX_VIDEO_SEC = 600
 
 /**
  * Follow-up AI questions allowed per analyzed clip.
- * The initial Full Clip Analysis is NOT counted here — only chat/strategy
- * questions that reference an already-uploaded clip. Bounds per-clip COGS:
- * each clip-grounded question re-sends video context to Gemini.
+ * The initial Full Clip Analysis / Coach Cards are NOT counted — only
+ * chat/strategy questions grounded on an analyzed clip.
+ *
+ * Product rule (vision-first follow-up): EVERY authenticated role gets the
+ * same ceiling of 3 successful follow-ups per clip (free, pro, shogun).
  */
-export const FREE_QUESTIONS_PER_CLIP = 3
-export const PRO_QUESTIONS_PER_CLIP = 15
+export const QUESTIONS_PER_CLIP = 3
+/** @deprecated Use QUESTIONS_PER_CLIP — kept for import compatibility. */
+export const FREE_QUESTIONS_PER_CLIP = QUESTIONS_PER_CLIP
+/** @deprecated Use QUESTIONS_PER_CLIP — all tiers share the same limit of 3. */
+export const PRO_QUESTIONS_PER_CLIP = QUESTIONS_PER_CLIP
 
 type Limits = {
   perMinute: number
@@ -208,6 +215,12 @@ export const isProSubscriber = async (userId: string, role: MusashiRole): Promis
   try {
     const db = getDb()
     const nowIso = new Date().toISOString()
+    const comp = await db
+      .prepare('SELECT comp_pro_until FROM musashi_users WHERE id = ?')
+      .bind(userId)
+      .first<{ comp_pro_until: string | null }>()
+    if (comp?.comp_pro_until && String(comp.comp_pro_until) >= nowIso) return true
+
     const row = await db
       .prepare(
         "SELECT stripe_subscription_id FROM musashi_stripe_subscriptions WHERE user_id = ? AND status IN ('active','trialing') AND (current_period_end IS NULL OR current_period_end >= ?) LIMIT 1"
@@ -254,6 +267,18 @@ export const resolveVideoTierLimits = async (userId: string, role: MusashiRole):
   const baseMaxSec = isPro ? PRO_MAX_VIDEO_SEC : FREE_MAX_VIDEO_SEC
   const baseWeekly = isPro ? PRO_WEEKLY_VIDEOS : 0
 
+  let bonusCredits = 0
+  try {
+    const db = getDb()
+    const bonus = await db
+      .prepare('SELECT COALESCE(bonus_video_credits, 0) AS c FROM musashi_users WHERE id = ?')
+      .bind(userId)
+      .first<{ c: number }>()
+    bonusCredits = Math.max(0, Number(bonus?.c || 0))
+  } catch {
+    bonusCredits = 0
+  }
+
   return {
     maxDurationSec: Number.isFinite(overrides.maxDurationSec as number)
       ? Math.max(1, overrides.maxDurationSec as number)
@@ -261,7 +286,7 @@ export const resolveVideoTierLimits = async (userId: string, role: MusashiRole):
     weeklyVideos: Number.isFinite(overrides.weeklyVideos as number)
       ? Math.max(0, overrides.weeklyVideos as number)
       : baseWeekly,
-    lifetimeFreeVideos: FREE_LIFETIME_VIDEOS,
+    lifetimeFreeVideos: FREE_LIFETIME_VIDEOS + bonusCredits,
   }
 }
 
@@ -280,7 +305,7 @@ export const enforceVideoAnalysis = async (
   role: MusashiRole,
   opts: VideoAnalysisOpts
 ): Promise<void> => {
-  if (process.env.MUSASHI_DISABLE_AUTH === '1') return
+  if (process.env.MUSASHI_DISABLE_AUTH === '1' && process.env.NODE_ENV !== 'production') return
 
   const clipDurationSec = Number(opts.clipDurationSec)
   const clipKey = String(opts.clipKey || '').trim().slice(0, 256)
@@ -289,7 +314,10 @@ export const enforceVideoAnalysis = async (
   }
 
   const limits = await resolveVideoTierLimits(userId, role)
-  if (clipDurationSec > limits.maxDurationSec) {
+  // Tolerance: a clip trimmed to exactly the cap measures a frame or two over
+  // (MediaRecorder overshoot) — hard-rejecting it would 402 every just-trimmed
+  // clip and the AI would never see the video.
+  if (clipDurationSec > limits.maxDurationSec + VIDEO_DURATION_TOLERANCE_SEC) {
     throw new Error('VIDEO_DURATION_EXCEEDED')
   }
 
@@ -354,9 +382,8 @@ export const enforceVideoAnalysis = async (
     .run()
 }
 
-/** Per-clip follow-up question ceiling for a user's tier. */
-export const questionsPerClipForTier = (isPro: boolean): number =>
-  isPro ? PRO_QUESTIONS_PER_CLIP : FREE_QUESTIONS_PER_CLIP
+/** Per-clip follow-up question ceiling — same for every authenticated tier. */
+export const questionsPerClipForTier = (_isPro?: boolean): number => QUESTIONS_PER_CLIP
 
 /**
  * Extract the clip key a chat/strategy question is grounded on, or null if the
@@ -365,41 +392,79 @@ export const questionsPerClipForTier = (isPro: boolean): number =>
 export const extractChatClipKey = (action: string, body: Record<string, unknown>): string | null => {
   if (action !== 'chat' && action !== 'strategy') return null
   const ctx = body?.context as Record<string, unknown> | undefined
-  if (!ctx?.videoFileUri) return null
-  const clipKey = String(ctx.videoFileUri).trim().slice(0, 256)
+  // The first native-video breakdown is paid for by the video-analysis credit.
+  // Do not also spend one of the per-clip follow-up questions on that request.
+  if (ctx?.initialVideoAnalysis === true) return null
+  const fromUri = ctx?.videoFileUri ? String(ctx.videoFileUri).trim() : ''
+  const fromInline =
+    !fromUri && ctx?.normalizedAssetId
+      ? `inline:${String(ctx.normalizedAssetId).trim()}`
+      : ''
+  const fromAssetRef =
+    !fromUri && !fromInline && ctx?.clipAssetRef
+      ? String(ctx.clipAssetRef).trim()
+      : ''
+  const clipKey = (fromUri || fromInline || fromAssetRef).slice(0, 256)
   return clipKey || null
 }
 
-/**
- * Enforce the per-clip follow-up question cap. Increments a (user, clip) counter
- * and throws `CLIP_QUESTION_LIMIT` once the tier ceiling is reached. Shogun is
- * unlimited; local/dev (auth disabled) is a no-op.
- */
-export const enforceClipQuestionLimit = async (
+/** Read current follow-up usage for a clip (does not increment). */
+export const getClipQuestionUsage = async (
   userId: string,
-  role: MusashiRole,
-  clipKey: string
-): Promise<void> => {
-  if (process.env.MUSASHI_DISABLE_AUTH === '1') return
-  if (role === 'shogun') return
-
+  clipKey: string,
+): Promise<{ used: number; limit: number; remaining: number }> => {
+  const limit = QUESTIONS_PER_CLIP
   const key = String(clipKey || '').trim().slice(0, 256)
-  if (!key) return
+  if (!key) return { used: 0, limit, remaining: limit }
 
-  const isPro = await isProSubscriber(userId, role)
-  const limit = questionsPerClipForTier(isPro)
+  try {
+    const db = getDb()
+    const row = await db
+      .prepare('SELECT question_count FROM musashi_clip_questions WHERE user_id = ? AND clip_key = ?')
+      .bind(userId, key)
+      .first()
+    const used = row?.question_count != null ? Number(row.question_count) : 0
+    const safeUsed = Number.isFinite(used) && used > 0 ? used : 0
+    return { used: safeUsed, limit, remaining: Math.max(0, limit - safeUsed) }
+  } catch {
+    return { used: 0, limit, remaining: limit }
+  }
+}
 
-  const db = getDb()
-  const row = await db
-    .prepare('SELECT question_count FROM musashi_clip_questions WHERE user_id = ? AND clip_key = ?')
-    .bind(userId, key)
-    .first()
-
-  const used = row?.question_count != null ? Number(row.question_count) : 0
-  if (used >= limit) {
-    throw new Error('CLIP_QUESTION_LIMIT')
+/**
+ * Throw CLIP_QUESTION_LIMIT when the user has already used their allowance.
+ * Does not increment — call {@link incrementClipQuestion} only after a
+ * successful AI reply so failed requests do not consume a follow-up.
+ */
+export const assertClipQuestionAvailable = async (
+  userId: string,
+  _role: MusashiRole,
+  clipKey: string,
+): Promise<{ used: number; limit: number }> => {
+  if (process.env.MUSASHI_DISABLE_AUTH === '1' && process.env.NODE_ENV !== 'production') {
+    return { used: 0, limit: QUESTIONS_PER_CLIP }
   }
 
+  const key = String(clipKey || '').trim().slice(0, 256)
+  if (!key) return { used: 0, limit: QUESTIONS_PER_CLIP }
+
+  const usage = await getClipQuestionUsage(userId, key)
+  if (usage.used >= usage.limit) {
+    throw new Error('CLIP_QUESTION_LIMIT')
+  }
+  return { used: usage.used, limit: usage.limit }
+}
+
+/** Increment the (user, clip) follow-up counter after a successful AI reply. */
+export const incrementClipQuestion = async (userId: string, clipKey: string): Promise<{ used: number; limit: number }> => {
+  if (process.env.MUSASHI_DISABLE_AUTH === '1' && process.env.NODE_ENV !== 'production') {
+    return { used: 0, limit: QUESTIONS_PER_CLIP }
+  }
+
+  const key = String(clipKey || '').trim().slice(0, 256)
+  if (!key) return { used: 0, limit: QUESTIONS_PER_CLIP }
+
+  const db = getDb()
   const now = new Date().toISOString()
   await db
     .prepare(
@@ -407,10 +472,28 @@ export const enforceClipQuestionLimit = async (
        VALUES (?, ?, 1, ?)
        ON CONFLICT(user_id, clip_key) DO UPDATE SET
          question_count = question_count + 1,
-         updated_at = excluded.updated_at`
+         updated_at = excluded.updated_at`,
     )
     .bind(userId, key, now)
     .run()
+
+  return getClipQuestionUsage(userId, key).then((u) => ({ used: u.used, limit: u.limit }))
+}
+
+/**
+ * Enforce the per-clip follow-up question cap (check + increment).
+ * Prefer {@link assertClipQuestionAvailable} + {@link incrementClipQuestion}
+ * when counting only successful replies.
+ *
+ * All authenticated roles (including shogun) share QUESTIONS_PER_CLIP.
+ */
+export const enforceClipQuestionLimit = async (
+  userId: string,
+  role: MusashiRole,
+  clipKey: string,
+): Promise<void> => {
+  await assertClipQuestionAvailable(userId, role, clipKey)
+  await incrementClipQuestion(userId, clipKey)
 }
 
 /** Map `/api/fight` action names to the correct daily + per-minute quota bucket. */
@@ -441,7 +524,7 @@ export const fightActionConsumesVideoQuota = (action: string, body: Record<strin
     const ctx = body?.context as Record<string, unknown> | undefined
     return Boolean(
       ctx?.nativeVideo &&
-        ctx?.videoFileUri &&
+        (ctx?.videoFileUri || ctx?.normalizedAssetId) &&
         typeof ctx?.clipDuration === 'number' &&
         Number(ctx.clipDuration) > 0
     )
@@ -455,7 +538,11 @@ export const extractFightVideoQuotaContext = (
   formData: FormData | null
 ): VideoAnalysisOpts | null => {
   if (action === 'analyze_video_stream') {
-    const clipDurationSec = Number(body?.clipDuration)
+    const clipDurationSec = resolveQuotaDurationSec({
+      clipDurationSec: Number(body?.clipDuration),
+      startSec: Number(body?.startSec),
+      endSec: Number(body?.endSec),
+    })
     const clipKey = String(
       body?.videoFileUri ||
         (body?.clip as { sourceId?: string } | undefined)?.sourceId ||
@@ -466,7 +553,11 @@ export const extractFightVideoQuotaContext = (
   }
 
   if (['analyze_frame', 'analyze_frames'].includes(action) && formData) {
-    const clipDurationSec = Number(formData.get('clipDuration') || formData.get('clipDurationSec') || 0)
+    const clipDurationSec = resolveQuotaDurationSec({
+      clipDurationSec: Number(formData.get('clipDuration') || formData.get('clipDurationSec') || 0),
+      startSec: Number(formData.get('startSec')),
+      endSec: Number(formData.get('endSec')),
+    })
     const clipKey = String(
       formData.get('videoFileUri') || formData.get('clipKey') || formData.get('sessionId') || ''
     ).trim()
@@ -476,10 +567,20 @@ export const extractFightVideoQuotaContext = (
 
   if (action === 'chat' || action === 'strategy') {
     const ctx = body?.context as Record<string, unknown> | undefined
-    if (!ctx?.nativeVideo || !ctx?.videoFileUri) return null
-    const clipDurationSec = Number(ctx.clipDuration)
-    const clipKey = String(ctx.videoFileUri || ctx.sourceId || '').trim()
-    if (!clipKey || !Number.isFinite(clipDurationSec) || clipDurationSec <= 0) return null
+    if (!ctx?.nativeVideo) return null
+    const clipKey = String(
+      ctx.videoFileUri ||
+        (ctx.normalizedAssetId ? `inline:${String(ctx.normalizedAssetId).trim()}` : '') ||
+        ctx.sourceId ||
+        '',
+    ).trim()
+    if (!clipKey) return null
+    const clipDurationSec = resolveQuotaDurationSec({
+      clipDurationSec: Number(ctx.clipDuration),
+      startSec: Number(ctx.startSec),
+      endSec: Number(ctx.endSec),
+    })
+    if (!Number.isFinite(clipDurationSec) || clipDurationSec <= 0) return null
     return { clipDurationSec, clipKey }
   }
 
@@ -499,7 +600,7 @@ export const maybeEnforceVideoFromAnalyzeRequest = async (
 }
 
 export const enforceUsage = async (req: Request, action: MusashiAction) => {
-  if (process.env.MUSASHI_DISABLE_AUTH === '1') {
+  if (process.env.MUSASHI_DISABLE_AUTH === '1' && process.env.NODE_ENV !== 'production') {
     return {
       id: 'dev',
       email: 'dev@local',
@@ -513,6 +614,9 @@ export const enforceUsage = async (req: Request, action: MusashiAction) => {
   }
 
   const user = await requireUser(req)
+  // AI quotas only apply after the account is eligible to use AI. Rejected
+  // verification attempts must not burn rate-limit or daily-usage counters.
+  assertEmailVerified(user)
   const limits = await resolveLimits(user.id, user.role)
 
   await enforceRateLimit(user.id, limits.perMinute)

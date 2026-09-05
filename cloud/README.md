@@ -8,9 +8,51 @@ Modal GPU endpoint after the user uploads a clip.
 
 - `pose_pipeline.py` is plain Python CV logic. It emits the same per-frame
   candidate shape the app already knows how to consume.
-- `modal_app.py` wraps that pipeline as the production GPU endpoint. It asks
+- `rtmpose_decoder.py` is RTMPose keypoint decoding on its own, so both the
+  MediaPipe-box and SAM-mask paths share one decoder.
+- `detector.py` finds every person in a frame (torchvision Faster R-CNN).
+- `sam_pipeline.py` is the SAM 2.1 tracker path — see below.
+- `modal_app.py` wraps those pipelines as the production GPU endpoints. It asks
   Modal for L4 first, then T4 as a fallback.
 - `modal_cpu_app.py` wraps the same contract as a CPU-only benchmark/fallback.
+
+## SAM 2.1 fighter tracking (`mode=sam2`)
+
+`pose_pipeline.py` derives identity from pose detections, which is backwards:
+MediaPipe returns one pose per frame (the largest body), its box is latched into
+`prev_boxes`, and a foreground spectator who wins frame 0 keeps a tracker slot
+for the whole clip — see `docs/AI_VISION_PIPELINE_AUDIT.md` §5.
+
+`sam_pipeline.py` inverts that. A real detector returns *every* person, a scoring
+function picks the two most fighter-like, and SAM 2.1's object memory carries
+those identities through occlusion and crossings. RTMPose then decodes keypoints
+inside boxes that are already identity-locked:
+
+```
+detector -> score_fighters -> SAM 2.1 (stable obj ids) -> mask -> bbox -> RTMPose
+```
+
+Each emitted candidate carries `trackId`. When every candidate has one,
+`src/lib/identityReplayCore.ts` uses a deterministic `trackId -> A/B` mapping and
+skips heuristic identity assignment entirely.
+
+SAM **2.1** specifically: it is Apache 2.0 and ungated. SAM 3's checkpoints are
+gated and licensed for non-commercial research only, and fal's hosted SAM 3 video
+endpoints return a rendered video rather than machine-readable per-frame masks.
+`SamPipeline.track_objects` is the one seam to change if that ever shifts.
+
+`score_fighters` is a port of `scoreFighters` in
+`src/lib/pose/fighterSelection.ts` and must stay in sync with it (verified equal
+to 5e-10 across 40 random cases).
+
+Notes:
+
+- GPU-only. The proxy never falls back to a CPU backend for `mode=sam2`, because
+  a silent fall-through to MediaPipe would reintroduce the bug this path fixes.
+- Its Modal image carries torch/torchvision and deliberately does **not** carry
+  MediaPipe, so the image stays separate from the RTMPose one.
+- SAM 2.1 and the detector weights are baked in at build time by
+  `_prefetch_sam_weights`, so a cold start does not download them.
 
 ## Deploy
 
@@ -176,6 +218,9 @@ The repo wiring is in place:
 - Default proxy target: `auto` (GPU first, CPU fallback)
 - Modal GPU endpoint: `https://duncanazsmith--musashi-pose-api-analyze-pose.modal.run`
 - Modal CPU endpoint: `https://duncanazsmith--musashi-pose-api-cpu-analyze-pose.modal.run`
+- Modal SAM endpoint: `https://duncanazsmith--musashi-pose-api-analyze-pose-sam.modal.run`
+  (**not deployed yet** — redeploy `cloud/modal_app.py` and set
+  `MUSASHI_POSE_CLOUD_SAM_URL` to enable `?poseCloudMode=sam2`)
 
 This machine has the Modal CLI installed in `.tools/modal-venv`, and the bearer
 token used for deploys is stored locally in `.tools/pose_api_token.txt`.

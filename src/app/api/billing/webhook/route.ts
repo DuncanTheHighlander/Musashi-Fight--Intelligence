@@ -184,6 +184,19 @@ export async function POST(req: Request) {
       if (accountId) {
         await refreshConnectPayoutStatusByAccountId(db, accountId)
       }
+    } else if (type === 'payment_intent.succeeded') {
+      const metadata = obj?.metadata || {}
+      if (metadata?.musashi_kind === 'marketplace_job_funding') {
+        const jobId = String(metadata?.musashi_marketplace_job_id || '').trim()
+        const actorUserId = String(metadata?.musashi_user_id || '').trim()
+        if (jobId && actorUserId) {
+          await completeJobFunding(db, {
+            jobId,
+            actorUserId,
+            stripePaymentIntentId: obj?.id ? String(obj.id) : null,
+          })
+        }
+      }
     } else if (type === 'checkout.session.completed') {
       const handledContent = await completeContentPurchaseFromCheckout(db, obj?.metadata || {})
       if (handledContent) {
@@ -197,6 +210,28 @@ export async function POST(req: Request) {
 
       const customerId = String(obj?.customer || '').trim()
       const sessionUserId = obj?.metadata?.musashi_user_id ? String(obj.metadata.musashi_user_id) : null
+      const mode = String(obj?.mode || '')
+      // Card setup (no subscription) — map customer and set default payment method.
+      if (mode === 'setup' && sessionUserId && customerId) {
+        await upsertCustomerMapping(db, sessionUserId, customerId)
+        const setupIntentId = obj?.setup_intent ? String(obj.setup_intent) : ''
+        if (setupIntentId) {
+          const si = await stripeRequest(secretKey, 'GET', `/v1/setup_intents/${setupIntentId}`)
+          const pmId = si?.payment_method ? String(si.payment_method) : ''
+          if (pmId) {
+            const form = new URLSearchParams()
+            form.set('invoice_settings[default_payment_method]', pmId)
+            await fetch(`https://api.stripe.com/v1/customers/${customerId}`, {
+              method: 'POST',
+              headers: {
+                Authorization: `Bearer ${secretKey}`,
+                'Content-Type': 'application/x-www-form-urlencoded',
+              },
+              body: form.toString(),
+            })
+          }
+        }
+      }
       const subscriptionId = obj?.subscription ? String(obj.subscription) : ''
       if (sessionUserId && customerId) {
         await upsertCustomerMapping(db, sessionUserId, customerId)

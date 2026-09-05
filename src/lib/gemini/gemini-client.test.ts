@@ -53,7 +53,21 @@ describe('buildGroundedCoachingPrompt', () => {
     })
 
     expect(prompt).toContain('FOCUS TARGET: both fighters')
-    expect(prompt).toContain('Return the most important cues across A and B')
+    expect(prompt).toContain('feedback for EACH fighter')
+    expect(prompt).toContain('do not double the response length')
+  })
+
+  it('makes "not sure" focus a cautious-identity coaching contract', () => {
+    const prompt = buildGroundedCoachingPrompt({
+      ledger,
+      retrievedSnippets: [],
+      focusTarget: 'unsure',
+    })
+
+    expect(prompt).toContain('FOCUS TARGET: not sure which fighter (identity uncertain)')
+    expect(prompt).toContain('Handle identity cautiously')
+    expect(prompt).toContain('coach the exchange as a whole')
+    expect(prompt).toContain('avoid strong identity-based claims')
   })
 
   it('includes the elite coach source influence library without changing the JSON contract', () => {
@@ -93,6 +107,33 @@ describe('buildGroundedCoachingPrompt', () => {
     expect(prompt).toContain('Current FightEvidenceLedger')
     expect(prompt).toContain('Clip type: sparring')
     expect(prompt).toContain('User question: How do I stop getting passed?')
+  })
+
+  it('enforces punchy Coach Card word budgets and human time format', () => {
+    const prompt = buildGroundedCoachingPrompt({
+      ledger,
+      retrievedSnippets: [],
+      focusTarget: 'A',
+    })
+    expect(prompt).toContain('MAX 2 sentences, ~35 words')
+    expect(prompt).toContain('≤18 words')
+    expect(prompt).toContain('≤20 words')
+    expect(prompt).toContain('NO REPETITION')
+    expect(prompt).toContain('NEVER raw milliseconds')
+    expect(prompt).toContain('4.2s in')
+  })
+
+  it('hardens grappling override: empty striking ledger, coach from video', () => {
+    const prompt = buildGroundedCoachingPrompt({
+      ledger,
+      retrievedSnippets: [],
+      focusTarget: 'A',
+      coachBrain: { selectedSport: 'bjj', clipType: 'rolling_grappling' },
+    })
+    expect(prompt).toContain('treat the FightEvidenceLedger as EMPTY')
+    expect(prompt).toContain('Coach exclusively from the video')
+    expect(prompt).toContain('never technique claims')
+    expect(prompt).toContain('Riding & Back Attacks')
   })
 
   it('includes poseEngine and poseQuality metadata with caution language', () => {
@@ -139,13 +180,18 @@ describe('buildGroundedCoachingPrompt', () => {
       focusTarget: 'A',
     })
 
-    expect(prompt).toContain('Use this higher-level structure inside the existing JSON')
+    expect(prompt).toContain('UNIVERSAL FEEDBACK FORMAT')
     expect(prompt).toContain('mainDiagnosis = Coach')
-    expect(prompt).toContain('quickCues = exactly 3 short corner commands')
-    expect(prompt).toContain('suggestedCorrections = exactly 3 detailed adjustments')
-    expect(prompt).toContain('Adjustment 1 - Technical adjustment')
-    expect(prompt).toContain('Adjustment 2 - Tactical adjustment')
-    expect(prompt).toContain('Adjustment 3 - Training/habit adjustment')
+    expect(prompt).toContain('fight reporter')
+    expect(prompt).toContain('MAX 2 sentences')
+    expect(prompt).toContain('cause-and-effect')
+    expect(prompt).toContain('quickCues = 3-5 short corner commands')
+    expect(prompt).toContain('suggestedCorrections = exactly 3 punchy cards')
+    expect(prompt).toContain('Technical — highest-leverage')
+    expect(prompt).toContain('Tactical — decision')
+    expect(prompt).toContain('Training/habit — ONE named drill')
+    expect(prompt).toContain('NO REPETITION')
+    expect(prompt).toContain('Never invent timestamps')
     expect(prompt).toContain('Do not structure the response as Moment 1 / Moment 2 / Moment 3')
   })
 })
@@ -211,6 +257,14 @@ describe('applyCoachingFocus', () => {
 
   it('leaves both-fighter coaching unchanged when both is focused', () => {
     const focused = applyCoachingFocus(payload, 'both')
+
+    expect(focused.quickCues).toHaveLength(2)
+    expect(focused.suggestedCorrections).toHaveLength(2)
+    expect(focused.overlayAnnotations).toHaveLength(2)
+  })
+
+  it('keeps every cue when identity is unsure (never drop the feedback the user wanted)', () => {
+    const focused = applyCoachingFocus(payload, 'unsure')
 
     expect(focused.quickCues).toHaveLength(2)
     expect(focused.suggestedCorrections).toHaveLength(2)

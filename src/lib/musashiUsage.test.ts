@@ -10,6 +10,7 @@ import {
   fightActionToQuotaBucket,
   questionsPerClipForTier,
   extractChatClipKey,
+  extractFightVideoQuotaContext,
 } from '@/lib/musashiUsage'
 
 describe('musashiUsage video tier defaults', () => {
@@ -51,22 +52,56 @@ describe('fightActionConsumesVideoQuota', () => {
   })
 })
 
-describe('per-clip question cap', () => {
-  it('uses product-specified per-clip question limits', () => {
-    expect(FREE_QUESTIONS_PER_CLIP).toBe(3)
-    expect(PRO_QUESTIONS_PER_CLIP).toBe(15)
+describe('extractFightVideoQuotaContext', () => {
+  it('uses analysis-window length when start/end offsets are present', () => {
+    const ctx = extractFightVideoQuotaContext(
+      'analyze_video_stream',
+      {
+        clipDuration: 19,
+        startSec: 2,
+        endSec: 12,
+        videoFileUri: 'files/abc',
+      },
+      null,
+    )
+    expect(ctx).toEqual({ clipDurationSec: 10, clipKey: 'files/abc' })
   })
 
-  it('resolves the per-clip ceiling by tier', () => {
-    expect(questionsPerClipForTier(false)).toBe(FREE_QUESTIONS_PER_CLIP)
-    expect(questionsPerClipForTier(true)).toBe(PRO_QUESTIONS_PER_CLIP)
+  it('falls back to clipDuration when offsets are missing', () => {
+    const ctx = extractFightVideoQuotaContext(
+      'chat',
+      {
+        context: {
+          nativeVideo: true,
+          videoFileUri: 'files/xyz',
+          clipDuration: 8,
+        },
+      },
+      null,
+    )
+    expect(ctx).toEqual({ clipDurationSec: 8, clipKey: 'files/xyz' })
+  })
+})
+
+describe('per-clip question cap', () => {
+  it('uses a single per-clip follow-up limit of 3 for every tier', () => {
+    expect(FREE_QUESTIONS_PER_CLIP).toBe(3)
+    expect(PRO_QUESTIONS_PER_CLIP).toBe(3)
+  })
+
+  it('resolves the per-clip ceiling identically for free and pro', () => {
+    expect(questionsPerClipForTier(false)).toBe(3)
+    expect(questionsPerClipForTier(true)).toBe(3)
   })
 
   it('extracts the clip key only for clip-grounded chat/strategy questions', () => {
     expect(extractChatClipKey('chat', {})).toBeNull()
     expect(extractChatClipKey('chat', { context: {} })).toBeNull()
+    expect(extractChatClipKey('chat', { context: { initialVideoAnalysis: true, videoFileUri: 'files/abc' } })).toBeNull()
     expect(extractChatClipKey('analyze_video_stream', { context: { videoFileUri: 'files/abc' } })).toBeNull()
     expect(extractChatClipKey('chat', { context: { videoFileUri: 'files/abc' } })).toBe('files/abc')
     expect(extractChatClipKey('strategy', { context: { videoFileUri: 'files/xyz' } })).toBe('files/xyz')
+    expect(extractChatClipKey('chat', { context: { normalizedAssetId: 'n1' } })).toBe('inline:n1')
+    expect(extractChatClipKey('chat', { context: { clipAssetRef: 'r2:x' } })).toBe('r2:x')
   })
 })

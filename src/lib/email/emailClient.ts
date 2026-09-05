@@ -1,3 +1,5 @@
+import { getEmailApiKey } from '@/lib/email/getEmailApiKey'
+
 export type SendEmailResult = { sent: true } | { dryRun: true; url?: string }
 
 /** Dry-run URLs are dev-only — never expose reset/verify links in production responses. */
@@ -9,10 +11,10 @@ export function emailDryRunClientPayload(
   return { dryRun: true, url: result.url }
 }
 
-const isDryRunMode = (): boolean => {
+const isDryRunMode = async (): Promise<boolean> => {
   if (process.env.EMAIL_DRY_RUN === '1') return true
   if (process.env.NODE_ENV === 'production') return false
-  return !String(process.env.EMAIL_API_KEY || '').trim()
+  return !(await getEmailApiKey())
 }
 
 export async function sendTransactionalEmail(args: {
@@ -22,12 +24,12 @@ export async function sendTransactionalEmail(args: {
   text: string
   actionUrl?: string
 }): Promise<SendEmailResult> {
-  if (isDryRunMode()) {
+  if (await isDryRunMode()) {
     return { dryRun: true, url: args.actionUrl }
   }
 
   const serviceUrl = String(process.env.EMAIL_SERVICE_URL || '').replace(/\/$/, '')
-  const apiKey = String(process.env.EMAIL_API_KEY || '').trim()
+  const apiKey = await getEmailApiKey()
   const from = String(process.env.EMAIL_FROM_ADDRESS || '').trim()
 
   if (!serviceUrl || !apiKey || !from) {

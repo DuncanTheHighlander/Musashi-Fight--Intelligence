@@ -45,15 +45,16 @@ describe('marketplace lifecycle with uploads', () => {
     const analystId = 'lifecycle_analyst'
     await seedAnalyst(db, analystId)
 
+    const videoBytes = Buffer.from('video-bytes')
     const videoTicket = await createUploadTicket(db, {
       userId: 'dev',
       purpose: 'job_video',
       originalName: 'sparring.mp4',
       contentType: 'video/mp4',
-      sizeBytes: 2048,
+      sizeBytes: videoBytes.length,
       origin: 'http://localhost:3000',
     })
-    writeMockObject(videoTicket.asset.object_key, Buffer.from('video-bytes'))
+    writeMockObject(videoTicket.asset.object_key, videoBytes)
     await completeUpload(db, { assetId: videoTicket.asset.id, userId: 'dev' })
     await assertUploadedAssetsOwned(db, [videoTicket.asset.id], 'dev', 'job_video')
 
@@ -79,16 +80,17 @@ describe('marketplace lifecycle with uploads', () => {
     })
     expect(started.status).toBe('IN_PROGRESS')
 
+    const deliverableBytes = Buffer.from('pdf-bytes')
     const deliverableTicket = await createUploadTicket(db, {
       userId: analystId,
       purpose: 'deliverable',
       originalName: 'breakdown.pdf',
       contentType: 'application/pdf',
-      sizeBytes: 512,
+      sizeBytes: deliverableBytes.length,
       jobId: job.id,
       origin: 'http://localhost:3000',
     })
-    writeMockObject(deliverableTicket.asset.object_key, Buffer.from('pdf-bytes'))
+    writeMockObject(deliverableTicket.asset.object_key, deliverableBytes)
     await completeUpload(db, { assetId: deliverableTicket.asset.id, userId: analystId })
 
     const submitted = await submitJob(db, {

@@ -1,8 +1,10 @@
 'use client'
 
-import React, { useState } from 'react'
+import React, { useMemo, useState } from 'react'
 import Link from 'next/link'
 import type { CoachingPayload } from '@/lib/validators/llm-output.validator'
+import { buildCoachFeedbackView } from '@/lib/feedback/coachFeedback'
+import { TeachCorrectionPanel, ThumbsDownReasonPanel, type TeachContext } from '@/components/fight/TeachCorrectionPanel'
 
 /**
  * Quota / guard state surfaced from the AI routes (see `src/lib/ai/aiGuard.ts`).
@@ -13,6 +15,8 @@ export type CoachingQuotaState =
   | { kind: 'rate_limited'; retryAfterSec?: number }
   | { kind: 'quota_exhausted' }
   | { kind: 'kill_switch'; hint?: string }
+  | { kind: 'consent_required'; hint?: string }
+  | { kind: 'email_not_verified'; hint?: string }
 
 export type CoachingPanelProps = Readonly<{
   payload: CoachingPayload | null
@@ -20,6 +24,36 @@ export type CoachingPanelProps = Readonly<{
   overlayCount?: number
   /** When present, replaces the coaching display with a polished status card. */
   quotaState?: CoachingQuotaState | null
+  /** Enables the thumbs up/down rating row. Requires a saved analysis id. */
+  ratingContext?: {
+    ledgerId: string
+    aiModel?: string | null
+    discipline?: string | null
+  } | null
+  /** Clip duration lets replay evidence use real timestamps when available. */
+  clipDurationMs?: number | null
+  /** Admin/debug mode: shows validator warnings and the raw payload. Normal users never see raw data. */
+  isAdmin?: boolean
+  /**
+   * Soft-fail: boot finished / Play unlocked but Coach Cards never arrived.
+   * Shows "Coaching unavailable — Retry Analyze" instead of the blank placeholder.
+   */
+  coachUnavailable?: boolean
+  /** Optional reason from boot soft-fail or analyze error. */
+  unavailableReason?: string | null
+  /** Retry Analyze CTA (Full Clip / vision-first Analyze). */
+  onRetryAnalyze?: () => void
+  /** True while a retry Analyze is in flight. */
+  retryBusy?: boolean
+  /** Shogun Teach Musashi capture (Phase 1). */
+  teachContext?: {
+    isShogun: boolean
+    sport: string
+    focusTarget?: string | null
+    clipId?: string | null
+    clipDurationMs?: number | null
+    onApproved?: () => void
+  } | null
 }>
 
 const ACTOR_COLORS: Record<string, { bg: string; border: string; text: string; icon: string }> = {
@@ -32,7 +66,7 @@ function QuotaStateCard({ state }: { state: CoachingQuotaState }) {
     auth: {
       title: 'Sign in to use live coaching',
       body: 'Tactical analysis is a paid feature. Sign in to unlock the AI coach for your uploaded clips.',
-      cta: { href: '/login', label: 'Sign in' },
+      cta: { href: '/welcome', label: 'Sign in' },
       accent: 'cyan',
     },
     rate_limited: {
@@ -58,6 +92,24 @@ function QuotaStateCard({ state }: { state: CoachingQuotaState }) {
           ? state.hint
           : 'An admin has paused live AI calls. The CV pipeline and overlays still work — coaching will return shortly.',
       cta: null as null | { href: string; label: string },
+      accent: 'amber',
+    },
+    consent_required: {
+      title: 'AI consent required',
+      body:
+        state.kind === 'consent_required' && state.hint
+          ? state.hint
+          : 'You must agree that your footage may be used to improve Musashi AI coaching before analysis is available.',
+      cta: { href: '/onboarding', label: 'Review and agree' } as { href: string; label: string },
+      accent: 'amber',
+    },
+    email_not_verified: {
+      title: 'Verify your email',
+      body:
+        state.kind === 'email_not_verified' && state.hint
+          ? state.hint
+          : 'Confirm your email address before using AI coaching. Open Profile to resend the verification link.',
+      cta: { href: '/welcome', label: 'Open account' } as { href: string; label: string },
       accent: 'amber',
     },
   } as const
@@ -107,26 +159,228 @@ function FighterBadge({ actorId }: { actorId?: string }) {
   if (!actorId) return null
   const c = ACTOR_COLORS[actorId] || { bg: 'bg-zinc-700/30', border: 'border-zinc-500/40', text: 'text-zinc-300', icon: 'bg-zinc-500' }
   return (
-    <span className={`mr-2 inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] font-bold tracking-wide ${c.bg} ${c.border} ${c.text}`}>
+    <span className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] font-bold tracking-wide ${c.bg} ${c.border} ${c.text}`}>
       <span className={`inline-block h-2 w-2 rounded-full ${c.icon} shadow-[0_0_6px_rgba(255,255,255,0.3)]`} />
       {actorId === 'A' ? 'BLUE' : 'RED'}
     </span>
   )
 }
 
-function SeverityDot({ score }: { score: number }) {
-  const color = score >= 0.8 ? 'bg-red-400' : score >= 0.6 ? 'bg-amber-400' : 'bg-emerald-400'
-  return <span className={`inline-block h-2 w-2 rounded-full ${color} shadow-[0_0_6px_rgba(255,255,255,0.2)]`} />
+/** Thumbs up/down on the whole analysis. Ratings land in coaching_feedback for admin review. */
+function RatingRow({ context }: { context: NonNullable<CoachingPanelProps['ratingContext']> }) {
+  const [rated, setRated] = useState<1 | -1 | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [failed, setFailed] = useState(false)
+  const [showReasons, setShowReasons] = useState(false)
+
+  const submit = async (rating: 1 | -1, extra?: { categories?: string[]; text?: string }) => {
+    if (busy) return
+    setBusy(true)
+    setFailed(false)
+    try {
+      const res = await fetch('/api/fight/coaching-feedback', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ledgerId: context.ledgerId,
+          rating,
+          aiModel: context.aiModel ?? null,
+          discipline: context.discipline ?? null,
+          errorCategories: extra?.categories ?? null,
+          feedbackText: extra?.text ?? null,
+        }),
+      })
+      const data = (await res.json().catch(() => null)) as { success?: boolean } | null
+      if (!res.ok || !data?.success) throw new Error('rating failed')
+      setRated(rating)
+      setShowReasons(false)
+    } catch {
+      setFailed(true)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-2 rounded-2xl border border-zinc-700/40 bg-zinc-900/50 px-4 py-2.5">
+        <span className="text-xs font-medium text-zinc-400">
+          {rated ? 'Thanks — your rating helps the coach improve.' : 'Was this coaching useful?'}
+        </span>
+        <div className="ml-auto flex items-center gap-1.5">
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => void submit(1)}
+            aria-label="Coaching was useful"
+            className={`rounded-lg border px-2.5 py-1 text-sm transition ${
+              rated === 1
+                ? 'border-emerald-400/60 bg-emerald-500/20 text-emerald-200'
+                : 'border-zinc-600/50 text-zinc-300 hover:border-emerald-400/40 hover:text-emerald-200'
+            } ${busy ? 'opacity-50' : ''}`}
+          >
+            &#128077;
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => setShowReasons(true)}
+            aria-label="Coaching was not useful"
+            className={`rounded-lg border px-2.5 py-1 text-sm transition ${
+              rated === -1
+                ? 'border-red-400/60 bg-red-500/20 text-red-200'
+                : 'border-zinc-600/50 text-zinc-300 hover:border-red-400/40 hover:text-red-200'
+            } ${busy ? 'opacity-50' : ''}`}
+          >
+            &#128078;
+          </button>
+        </div>
+        {failed && <span className="text-[11px] text-amber-400">Couldn&apos;t save — try again</span>}
+      </div>
+      {showReasons && !rated && (
+        <ThumbsDownReasonPanel
+          busy={busy}
+          onCancel={() => setShowReasons(false)}
+          onSubmit={({ categories, text }) => void submit(-1, { categories, text })}
+        />
+      )}
+    </div>
+  )
 }
 
-export function CoachingPanel({ payload, llmIssues, overlayCount, quotaState }: CoachingPanelProps) {
-  const [expandedCue, setExpandedCue] = useState<string | null>(null)
+function evidenceWindowFromPayload(
+  payload: CoachingPayload,
+  section: 'coach_read' | 'fix' | 'drill' | 'quick_cues',
+  fixIndex?: number,
+): { startMs: number | null; endMs: number | null } {
+  const cues = Array.isArray(payload.quickCues) ? payload.quickCues : []
+  const pickCue = (i: number) => {
+    const c = cues[i] as { t?: { startMs?: number; endMs?: number } } | undefined
+    const startMs = typeof c?.t?.startMs === 'number' && c.t.startMs > 0 ? c.t.startMs : null
+    const endMs = typeof c?.t?.endMs === 'number' && c.t.endMs > 0 ? c.t.endMs : startMs
+    return { startMs, endMs }
+  }
+  if (section === 'quick_cues' && cues.length) return pickCue(0)
+  if (section === 'fix' && typeof fixIndex === 'number') {
+    const corr = payload.suggestedCorrections?.[fixIndex] as
+      | { evidenceIds?: string[] }
+      | undefined
+    // Prefer matching cue by index when evidence ids aren't time-stamped here.
+    if (cues[fixIndex]) return pickCue(fixIndex)
+    void corr
+  }
+  if (cues[0]) return pickCue(0)
+  return { startMs: null, endMs: null }
+}
+
+function SectionLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="flex items-center gap-2 px-1">
+      <span className="text-xs font-bold uppercase tracking-wider text-zinc-400">{children}</span>
+    </div>
+  )
+}
+
+export function CoachingPanel({
+  payload,
+  llmIssues,
+  quotaState,
+  ratingContext,
+  clipDurationMs,
+  isAdmin,
+  coachUnavailable,
+  unavailableReason,
+  onRetryAnalyze,
+  retryBusy,
+  teachContext,
+}: CoachingPanelProps) {
+  const [teachFor, setTeachFor] = useState<TeachContext | null>(null)
+  const view = useMemo(
+    () => (payload ? buildCoachFeedbackView(payload, { clipDurationMs }) : null),
+    [payload, clipDurationMs]
+  )
+
+  const openTeach = (
+    section: 'coach_read' | 'fix' | 'drill' | 'quick_cues',
+    originalText: string,
+    fixIndex?: number,
+  ) => {
+    if (!payload || !teachContext?.isShogun || !teachContext.sport) return
+    const win = evidenceWindowFromPayload(payload, section, fixIndex)
+    setTeachFor({
+      surface: 'coach_card',
+      cardSection: section,
+      responseRef: typeof fixIndex === 'number' ? `fix_${fixIndex}` : section,
+      originalText,
+      evidenceStartMs: win.startMs,
+      evidenceEndMs: win.endMs,
+      sport: teachContext.sport,
+      focusTarget: teachContext.focusTarget,
+      clipId: teachContext.clipId,
+      ledgerId: ratingContext?.ledgerId ?? null,
+      clipDurationMs: teachContext.clipDurationMs ?? clipDurationMs ?? null,
+    })
+  }
 
   if (quotaState) {
     return <QuotaStateCard state={quotaState} />
   }
 
-  if (!payload) {
+  // Failed analysis / soft-fail: clear retry CTA — never blank placeholder, never mock feedback.
+  const coachingFailed =
+    !payload &&
+    (Boolean(coachUnavailable) ||
+      (Array.isArray(llmIssues) && llmIssues.some((i) => i.code === 'llm_unavailable' || i.code === 'coach_cards_incomplete')))
+
+  if (coachingFailed) {
+    const issueHint =
+      Array.isArray(llmIssues) && llmIssues.length > 0
+        ? llmIssues[0]?.message
+        : null
+    const body =
+      (unavailableReason && unavailableReason.trim()) ||
+      issueHint ||
+      "The coach couldn't finish Coach Cards for this clip. Your video is fine — retry Analyze."
+
+    return (
+      <div className="space-y-4">
+        <div className="rounded-2xl border border-amber-500/30 bg-gradient-to-br from-amber-950/40 via-slate-900/80 to-slate-950/60 p-5 backdrop-blur-xl">
+          <div className="flex items-center gap-2.5">
+            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-amber-400/20 text-xs font-black text-amber-200">
+              AI
+            </div>
+            <div className="text-sm font-bold tracking-wide text-amber-100">COACHING UNAVAILABLE</div>
+          </div>
+          <div className="mt-3 text-[15px] font-medium leading-relaxed text-white/90">
+            {body}
+          </div>
+          {onRetryAnalyze && (
+            <div className="mt-4">
+              <button
+                type="button"
+                disabled={retryBusy}
+                onClick={() => onRetryAnalyze()}
+                className="rounded-lg border border-amber-400/40 bg-amber-500/15 px-3 py-2 text-sm font-semibold text-amber-100 transition hover:bg-amber-500/25 disabled:opacity-50"
+              >
+                {retryBusy ? 'Retrying…' : 'Retry Analyze'}
+              </button>
+            </div>
+          )}
+          {isAdmin && Array.isArray(llmIssues) && llmIssues.length > 0 && (
+            <ul className="mt-3 list-disc space-y-1 pl-5 text-xs text-zinc-400">
+              {llmIssues.slice(0, 4).map((i, idx) => (
+                <li key={idx}>
+                  <span className="font-medium text-zinc-300">{i.code}</span>: {i.message}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
+    )
+  }
+
+  if (!payload || !view) {
     return (
       <div className="space-y-4">
         <div className="rounded-2xl border border-zinc-700/50 bg-gradient-to-br from-zinc-900/80 to-zinc-800/40 p-5 backdrop-blur-xl">
@@ -148,7 +402,7 @@ export function CoachingPanel({ payload, llmIssues, overlayCount, quotaState }: 
 
   return (
     <div className="space-y-4">
-      {/* Main Diagnosis — Hero Card */}
+      {/* Coach's Read */}
       <div className="relative overflow-hidden rounded-2xl border border-cyan-500/30 bg-gradient-to-br from-cyan-950/60 via-slate-900/80 to-slate-950/60 p-5 backdrop-blur-xl">
         <div className="absolute -right-8 -top-8 h-32 w-32 rounded-full bg-cyan-500/10 blur-3xl" />
         <div className="relative">
@@ -156,130 +410,65 @@ export function CoachingPanel({ payload, llmIssues, overlayCount, quotaState }: 
             <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-cyan-400/20 text-xs font-black text-cyan-300 shadow-[0_0_12px_rgba(34,211,238,0.3)]">
               AI
             </div>
-            <div className="text-sm font-bold tracking-wide text-cyan-100">FIGHT DIAGNOSIS</div>
-            {overlayCount != null && overlayCount > 0 && (
-              <span className="ml-auto rounded-full bg-cyan-500/20 px-2.5 py-0.5 text-[10px] font-bold text-cyan-300">
-                {overlayCount} on-screen callouts
-              </span>
+            <div className="text-sm font-bold tracking-wide text-cyan-100">COACH&apos;S READ</div>
+            {teachContext?.isShogun && (
+              <button
+                type="button"
+                onClick={() => openTeach('coach_read', view.coachRead)}
+                className="ml-auto rounded-md border border-cyan-400/40 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-cyan-200 hover:bg-cyan-500/15"
+              >
+                Teach
+              </button>
             )}
           </div>
           <div className="mt-3 text-[15px] font-medium leading-relaxed text-white/95">
-            {payload.mainDiagnosis}
+            {view.coachRead}
           </div>
+          {teachFor?.cardSection === 'coach_read' && (
+            <TeachCorrectionPanel
+              ctx={teachFor}
+              onClose={() => setTeachFor(null)}
+              onApproved={teachContext?.onApproved}
+            />
+          )}
         </div>
       </div>
 
-      {/* Style Notes */}
-      {Array.isArray((payload as any).styleNotes) && (payload as any).styleNotes.length > 0 && (
-        <div className="rounded-2xl border border-purple-500/25 bg-gradient-to-br from-purple-950/40 to-slate-900/40 p-4 backdrop-blur-xl">
-          <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-purple-300">
-            <span className="inline-block h-1 w-6 rounded-full bg-gradient-to-r from-purple-400 to-purple-600" />
-            Fighting Style
-          </div>
-          <div className="mt-3 flex flex-wrap gap-2">
-            {((payload as any).styleNotes as string[]).map((note, idx) => (
-              <span key={idx} className="inline-flex items-center rounded-full border border-purple-500/20 bg-purple-500/10 px-3 py-1 text-xs font-medium text-purple-100/90">
-                {note}
-              </span>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Quick Cues — Tactical Cards */}
-      <div className="space-y-2">
-        <div className="flex items-center gap-2 px-1">
-          <span className="text-xs font-bold uppercase tracking-wider text-zinc-400">Tactical Cues</span>
-          <span className="rounded-full bg-zinc-700/50 px-2 py-0.5 text-[10px] font-bold text-zinc-300">{payload.quickCues.length}</span>
-        </div>
-        <div className="grid gap-3 md:grid-cols-2">
-          {payload.quickCues.slice(0, 8).map((cue) => {
-            const isExpanded = expandedCue === cue.id
-            return (
-              <button
-                key={cue.id}
-                type="button"
-                onClick={() => setExpandedCue(isExpanded ? null : cue.id)}
-                className="group rounded-2xl border border-zinc-700/50 bg-gradient-to-br from-zinc-900/80 to-zinc-800/30 p-4 text-left transition-all duration-200 hover:border-cyan-500/30 hover:shadow-[0_0_20px_rgba(34,211,238,0.08)]"
-              >
-                <div className="flex items-start gap-2">
-                  <SeverityDot score={cue.confidence.score} />
-                  <div className="flex-1">
-                    <div className="flex items-center gap-1.5">
-                      <FighterBadge actorId={cue.actorId} />
-                    </div>
-                    <div className="mt-1.5 text-sm font-bold leading-snug text-white">{cue.quickCue}</div>
-                  </div>
-                </div>
-
-                {cue.keyMistake && (
-                  <div className="mt-3 flex items-start gap-2 rounded-lg bg-amber-500/8 p-2">
-                    <span className="mt-0.5 text-xs text-amber-400">&#x26A0;</span>
-                    <span className="text-xs font-medium text-amber-200/90">{cue.keyMistake}</span>
-                  </div>
-                )}
-
-                {cue.whyItMatters && (
-                  <div className="mt-2 text-xs leading-relaxed text-zinc-400">
-                    <span className="font-semibold text-zinc-300">Why it matters: </span>{cue.whyItMatters}
-                  </div>
-                )}
-
-                {cue.whatToDoInstead && (
-                  <div className="mt-2 flex items-start gap-2 rounded-lg bg-emerald-500/8 p-2">
-                    <span className="mt-0.5 text-xs text-emerald-400">&#x2714;</span>
-                    <span className="text-xs font-medium text-emerald-200/90">{cue.whatToDoInstead}</span>
-                  </div>
-                )}
-
-                {isExpanded && cue.expanded && (
-                  <div className="mt-3 rounded-xl border border-zinc-700/30 bg-zinc-800/40 p-3 text-xs leading-relaxed text-zinc-300">
-                    {cue.expanded}
-                  </div>
-                )}
-
-                <div className="mt-3 flex flex-wrap items-center gap-2 text-[10px]">
-                  <span className="rounded-full bg-cyan-500/15 px-2 py-0.5 font-bold text-cyan-300">
-                    {(cue.confidence.score * 100).toFixed(0)}% confidence
-                  </span>
-                  {cue.t && (
-                    <span className="rounded-full bg-zinc-700/50 px-2 py-0.5 font-medium text-zinc-400">
-                      {(cue.t.startMs / 1000).toFixed(1)}s – {(cue.t.endMs / 1000).toFixed(1)}s
-                    </span>
-                  )}
-                  {!isExpanded && cue.expanded && (
-                    <span className="rounded-full bg-zinc-700/40 px-2 py-0.5 text-zinc-500 group-hover:text-cyan-400 transition-colors">
-                      click to expand
-                    </span>
-                  )}
-                </div>
-              </button>
-            )
-          })}
-        </div>
-      </div>
-
-      {/* Corrections */}
-      {payload.suggestedCorrections?.length > 0 && (
+      {/* 3 Things to Fix */}
+      {view.fixes.length > 0 && (
         <div className="space-y-2">
-          <div className="flex items-center gap-2 px-1">
-            <span className="text-xs font-bold uppercase tracking-wider text-zinc-400">Corrections</span>
-          </div>
+          <SectionLabel>{view.fixes.length === 3 ? '3 Things to Fix' : 'What to Fix'}</SectionLabel>
           <div className="space-y-3">
-            {payload.suggestedCorrections.slice(0, 6).map((c, idx) => (
+            {view.fixes.map((fix, idx) => (
               <div key={idx} className="rounded-2xl border border-zinc-700/50 bg-gradient-to-r from-zinc-900/80 to-zinc-800/30 p-4">
-                <div className="flex items-start gap-2">
-                  <FighterBadge actorId={c.actorId} />
-                  <span className="text-sm font-bold text-white">{c.title}</span>
-                </div>
-                <div className="mt-3 space-y-2">
-                  <div className="flex items-start gap-2 rounded-lg bg-amber-500/8 p-2.5">
-                    <span className="mt-0.5 text-xs text-amber-400">&#x26A0;</span>
-                    <span className="text-xs font-medium text-amber-200/90">{c.why}</span>
-                  </div>
-                  <div className="flex items-start gap-2 rounded-lg bg-emerald-500/8 p-2.5">
-                    <span className="mt-0.5 text-xs text-emerald-400">&#x2714;</span>
-                    <span className="text-xs font-medium text-emerald-200/90">{c.doInstead}</span>
+                <div className="flex items-start gap-2.5">
+                  <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-cyan-500/20 text-xs font-black text-cyan-300">
+                    {idx + 1}
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-sm font-bold text-white">{fix.title}</span>
+                      <FighterBadge actorId={fix.actorId} />
+                      {teachContext?.isShogun && (
+                        <button
+                          type="button"
+                          onClick={() => openTeach('fix', `${fix.title}. ${fix.body}`, idx)}
+                          className="ml-auto rounded-md border border-cyan-400/40 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-cyan-200 hover:bg-cyan-500/15"
+                        >
+                          Teach
+                        </button>
+                      )}
+                    </div>
+                    <div className="mt-2.5 text-[13px] leading-relaxed text-zinc-300">
+                      {fix.body}
+                    </div>
+                    {teachFor?.responseRef === `fix_${idx}` && (
+                      <TeachCorrectionPanel
+                        ctx={teachFor}
+                        onClose={() => setTeachFor(null)}
+                        onApproved={teachContext?.onApproved}
+                      />
+                    )}
                   </div>
                 </div>
               </div>
@@ -288,11 +477,92 @@ export function CoachingPanel({ payload, llmIssues, overlayCount, quotaState }: 
         </div>
       )}
 
-      {/* Validator Warnings (collapsed by default) */}
-      {llmIssues && llmIssues.length > 0 && (
+      {/* Drill */}
+      {view.drill && (
+        <div className="space-y-2">
+          <SectionLabel>Drill</SectionLabel>
+          <div className="rounded-2xl border border-emerald-500/25 bg-gradient-to-br from-emerald-950/40 to-slate-900/40 p-4">
+            {view.drill.title && (
+              <div className="text-sm font-bold text-emerald-100">{view.drill.title}</div>
+            )}
+            <div className={`text-[13px] leading-relaxed text-emerald-100/90 ${view.drill.title ? 'mt-1.5' : ''}`}>
+              {view.drill.body}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Quick Cues */}
+      {view.quickCues.length > 0 && (
+        <div className="space-y-2">
+          <div className="flex items-center gap-2 px-1">
+            <SectionLabel>Quick Cues</SectionLabel>
+            {teachContext?.isShogun && (
+              <button
+                type="button"
+                onClick={() => openTeach('quick_cues', view.quickCues.join('\n'))}
+                className="ml-auto rounded-md border border-cyan-400/40 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-cyan-200 hover:bg-cyan-500/15"
+              >
+                Teach
+              </button>
+            )}
+          </div>
+          <ul className="space-y-1.5 rounded-2xl border border-zinc-700/50 bg-gradient-to-br from-zinc-900/80 to-zinc-800/30 p-4">
+            {view.quickCues.map((cue, idx) => (
+              <li key={idx} className="flex items-start gap-2.5 text-sm font-medium text-white/90">
+                <span className="mt-[7px] inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-cyan-400" />
+                {cue}
+              </li>
+            ))}
+          </ul>
+          {teachFor?.cardSection === 'quick_cues' && (
+            <TeachCorrectionPanel
+              ctx={teachFor}
+              onClose={() => setTeachFor(null)}
+              onApproved={teachContext?.onApproved}
+            />
+          )}
+        </div>
+      )}
+
+      {/* Confidence Note — only when the clip limits what the coach can say */}
+      {view.confidenceNote && (
+        <div className="rounded-2xl border border-amber-500/25 bg-amber-500/5 p-3.5">
+          <div className="text-[13px] leading-relaxed text-amber-200/90">
+            <span className="font-semibold text-amber-200">Confidence note: </span>
+            {view.confidenceNote}
+          </div>
+        </div>
+      )}
+
+      {/* Why Musashi says this — small, collapsible replay evidence */}
+      {view.evidence.length > 0 && (
+        <details className="group rounded-2xl border border-zinc-700/40 bg-zinc-900/40 p-3">
+          <summary className="cursor-pointer text-xs font-semibold text-zinc-400 transition-colors hover:text-cyan-300">
+            Why Musashi says this
+          </summary>
+          <ul className="mt-2 space-y-1.5 pl-1">
+            {view.evidence.map((ev, idx) => (
+              <li key={idx} className="flex items-start gap-2 text-xs leading-relaxed text-zinc-400">
+                <span className="mt-0.5 shrink-0 font-semibold text-zinc-500">{ev.when}:</span>
+                <span>{ev.what}</span>
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+
+      {/* Rate this coaching — feeds the coaching_feedback learning loop */}
+      {ratingContext?.ledgerId && (
+        // Re-mount (and reset the rating state) when a new analysis arrives.
+        <RatingRow key={ratingContext.ledgerId} context={ratingContext} />
+      )}
+
+      {/* Admin/debug only: validator warnings + raw payload. Never rendered for normal users. */}
+      {isAdmin && llmIssues && llmIssues.length > 0 && (
         <details className="group rounded-2xl border border-yellow-500/20 bg-yellow-500/5 p-3">
           <summary className="cursor-pointer text-xs font-semibold text-yellow-300/80">
-            {llmIssues.length} validator warnings (click to expand)
+            {llmIssues.length} validator warnings (admin)
           </summary>
           <ul className="mt-2 list-disc space-y-1 pl-5 text-xs text-zinc-400">
             {llmIssues.slice(0, 6).map((i, idx) => (
@@ -301,6 +571,16 @@ export function CoachingPanel({ payload, llmIssues, overlayCount, quotaState }: 
               </li>
             ))}
           </ul>
+        </details>
+      )}
+      {isAdmin && (
+        <details className="group rounded-2xl border border-zinc-700/40 bg-zinc-900/40 p-3">
+          <summary className="cursor-pointer text-xs font-semibold text-zinc-500">
+            Raw coaching payload (admin)
+          </summary>
+          <pre className="mt-2 max-h-[300px] overflow-auto rounded-lg bg-zinc-950/60 p-3 text-[11px] leading-relaxed text-zinc-400">
+            {JSON.stringify(payload, null, 2)}
+          </pre>
         </details>
       )}
     </div>

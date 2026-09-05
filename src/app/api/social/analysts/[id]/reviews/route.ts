@@ -3,7 +3,7 @@
  * Also returns aggregate stats so a single call powers the profile page.
  */
 import { NextResponse } from 'next/server'
-import { enforceUsage } from '@/lib/musashiUsage'
+import { requireUser } from '@/lib/musashiAuth'
 import { getDb } from '@/lib/marketplace/types'
 import type { AnalystProfileRow, MarketplaceReviewRow } from '@/lib/marketplace/types'
 
@@ -11,7 +11,7 @@ type Params = { id: string }
 
 export async function GET(req: Request, context: { params: Promise<Params> }) {
   try {
-    await enforceUsage(req, 'chat')
+    await requireUser(req)
     const { id } = await context.params
     const { searchParams } = new URL(req.url)
     const limit = Math.min(Math.max(Number(searchParams.get('limit') || 20), 1), 100)

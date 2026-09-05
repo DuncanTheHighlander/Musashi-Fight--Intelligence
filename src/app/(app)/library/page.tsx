@@ -1,10 +1,12 @@
 import LibrarySection from '@/components/sections/LibrarySection'
 import ClipLibrarySection from '@/components/sections/ClipLibrarySection'
+import PendingReviewPanel from '@/components/library/PendingReviewPanel'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 
 export default function LibraryPage() {
   return (
     <Tabs defaultValue="knowledge">
+      <PendingReviewPanel />
       <div className="container mx-auto max-w-6xl px-4 pt-8 lg:px-6 lg:pt-10">
         <TabsList>
           <TabsTrigger value="knowledge">Knowledge Library</TabsTrigger>

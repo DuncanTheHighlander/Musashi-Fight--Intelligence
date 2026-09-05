@@ -111,7 +111,8 @@ Production vars in `wrangler.toml` are already set: `MUSASHI_MARKETPLACE_PAYMENT
 - Auth bypass: `MUSASHI_DISABLE_AUTH=1` locally.
 - Email: dry-run without `EMAIL_API_KEY`.
 - UI placeholders: Coaches section “Coming soon”, Profile “Account Settings (Coming soon)”.
-- Terms/privacy: placeholder support email TODO.
+- Terms/privacy: pages live with `support@musashi.ai` — confirm inbox is monitored; lawyer review still open.
+- Mobile stores: eng gates + gap spec landed (`check:mobile-release`, `STORE_DATA_SAFETY.md`, `MOBILE_STORE_QA.md`); Play/ASC listing + signing + device QA still ops.
 
 **Fixed this session:**
 

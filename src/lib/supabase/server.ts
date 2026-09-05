@@ -37,6 +37,18 @@ export async function getSupabaseServerConfig(): Promise<SupabaseServerConfig | 
   return null
 }
 
+function buildSupabaseRestUrl(baseUrl: string, path: string): string | null {
+  const trimmed = String(path || '').trim()
+  if (!trimmed || trimmed.includes('://') || trimmed.includes('..')) return null
+
+  const normalizedPath = trimmed.replace(/^\/+/, '')
+  if (!normalizedPath) return null
+
+  const url = new URL(`${baseUrl.replace(/\/$/, '')}/rest/v1/${normalizedPath}`)
+  if (!url.pathname.startsWith('/rest/v1/')) return null
+  return url.toString()
+}
+
 /** Example server-side Supabase REST call — keeps service role off the client. */
 export async function supabaseAdminFetch(
   path: string,
@@ -50,14 +62,23 @@ export async function supabaseAdminFetch(
     })
   }
 
-  const url = `${config.url.replace(/\/$/, '')}/rest/v1/${path.replace(/^\//, '')}`
+  const url = buildSupabaseRestUrl(config.url, path)
+  if (!url) {
+    return new Response(JSON.stringify({ error: 'Invalid Supabase REST path' }), {
+      status: 400,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+
+  const callerHeaders = (init.headers as Record<string, string> | undefined) ?? {}
+
   return fetch(url, {
     ...init,
     headers: {
+      ...callerHeaders,
+      'Content-Type': callerHeaders['Content-Type'] ?? 'application/json',
       apikey: config.serviceRoleKey,
       Authorization: `Bearer ${config.serviceRoleKey}`,
-      'Content-Type': 'application/json',
-      ...(init.headers as Record<string, string> | undefined),
     },
   })
 }
