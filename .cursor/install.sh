@@ -45,4 +45,14 @@ else
   echo "[musashi-install] .env.local already present — leaving it untouched."
 fi
 
+# Seed the built-in "Try demo clip" video (public/test-videos/ is gitignored) from a
+# committed sample fight clip so the Fight Lab demo flow works out of the box.
+DEMO_CLIP="public/test-videos/test-video-for-app.mp4"
+DEMO_SRC="tracking-eval-2026-06-11/clip.mp4"
+if [ ! -f "$DEMO_CLIP" ] && [ -f "$DEMO_SRC" ]; then
+  echo "[musashi-install] Seeding demo clip -> $DEMO_CLIP"
+  mkdir -p "$(dirname "$DEMO_CLIP")"
+  cp "$DEMO_SRC" "$DEMO_CLIP"
+fi
+
 echo "[musashi-install] Done."
