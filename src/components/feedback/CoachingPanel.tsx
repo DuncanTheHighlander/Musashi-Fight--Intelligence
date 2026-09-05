@@ -203,7 +203,7 @@ export function CoachingPanel({ payload, llmIssues, overlayCount, quotaState }: 
                 className="group rounded-2xl border border-zinc-700/50 bg-gradient-to-br from-zinc-900/80 to-zinc-800/30 p-4 text-left transition-all duration-200 hover:border-cyan-500/30 hover:shadow-[0_0_20px_rgba(34,211,238,0.08)]"
               >
                 <div className="flex items-start gap-2">
-                  <SeverityDot score={cue.confidence.score} />
+                  <SeverityDot score={cue.confidence?.score ?? 0} />
                   <div className="flex-1">
                     <div className="flex items-center gap-1.5">
                       <FighterBadge actorId={cue.actorId} />
@@ -239,9 +239,11 @@ export function CoachingPanel({ payload, llmIssues, overlayCount, quotaState }: 
                 )}
 
                 <div className="mt-3 flex flex-wrap items-center gap-2 text-[10px]">
-                  <span className="rounded-full bg-cyan-500/15 px-2 py-0.5 font-bold text-cyan-300">
-                    {(cue.confidence.score * 100).toFixed(0)}% confidence
-                  </span>
+                  {typeof cue.confidence?.score === 'number' && (
+                    <span className="rounded-full bg-cyan-500/15 px-2 py-0.5 font-bold text-cyan-300">
+                      {(cue.confidence.score * 100).toFixed(0)}% confidence
+                    </span>
+                  )}
                   {cue.t && (
                     <span className="rounded-full bg-zinc-700/50 px-2 py-0.5 font-medium text-zinc-400">
                       {(cue.t.startMs / 1000).toFixed(1)}s – {(cue.t.endMs / 1000).toFixed(1)}s
