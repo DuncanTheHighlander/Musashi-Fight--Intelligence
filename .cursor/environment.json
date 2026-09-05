@@ -1,0 +1,16 @@
+{
+  "name": "Musashi Dev",
+  "install": "bash .cursor/install.sh",
+  "terminals": [
+    {
+      "name": "dev",
+      "command": "pnpm dev"
+    }
+  ],
+  "ports": [
+    {
+      "name": "Musashi web",
+      "port": 3000
+    }
+  ]
+}
